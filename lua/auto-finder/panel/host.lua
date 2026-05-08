@@ -51,18 +51,37 @@ local function resolve_width(cfg, state)
   return require("auto-finder.config").resolve_width(cfg, vim.o.columns)
 end
 
----Cache the panel width on state and mirror it into neo-tree's runtime
----config so a subsequent standalone `:Neotree` invocation lines up with
----the panel. Inside the panel itself neo-tree reads the live window
----width via nvim_win_get_width, so this only matters for siblings.
+---Cache the panel width on state, mirror it into neo-tree's runtime
+---config so a subsequent standalone `:Neotree` invocation lines up
+---with the panel, AND invalidate the per-state `win_width` cache on
+---every live neo-tree state for the panel window so right-aligned
+---components re-position against the actual width on next render.
 ---@param state table
 ---@param width integer
 local function set_panel_width(state, width)
   state.panel_width = width
   local ok, neo = pcall(require, "neo-tree")
-  if not ok then return end
-  if type(neo.config) ~= "table" or type(neo.config.window) ~= "table" then return end
-  neo.config.window.width = width
+  if ok and type(neo.config) == "table" and type(neo.config.window) == "table" then
+    neo.config.window.width = width
+  end
+  -- Cross-source: invalidate every state attached to the panel
+  -- window so right-aligned icons (modified / diagnostics /
+  -- git_status) realign on next render. Without this, neo-tree
+  -- positions them against a stale state.win_width that was set
+  -- when auto_expand_width grew the window above auto-finder's
+  -- pin.
+  local ok_mgr, manager = pcall(require, "neo-tree.sources.manager")
+  if ok_mgr and type(manager._for_each_state) == "function"
+      and state.panel_winid and vim.api.nvim_win_is_valid(state.panel_winid) then
+    pcall(manager._for_each_state, nil, function(s)
+      if s.winid == state.panel_winid then
+        s.win_width = width
+        s.longest_node = nil  -- forces a fresh pre-render so the
+                              -- container's truncation math runs
+                              -- against the new width
+      end
+    end)
+  end
 end
 
 ---Apply our buffer-local section-switch keymap (0..9 in normal mode)
@@ -248,6 +267,13 @@ function M.focus(cfg, state, key)
   state.section = section.number
   state.section_buffers = state.section_buffers or {}
   state.section_buffers[section.number] = bufnr
+
+  -- Persist the active section so the next `nvim` session reopens
+  -- on the same slot. Best-effort — store.update wraps its own I/O
+  -- in pcalls and notifies on failure, so we never block focus.
+  pcall(function()
+    require("auto-finder.store").update({ panel = { last_section = section.number } })
+  end)
 
   -- Section-switch keymap is buffer-local; reapply each focus so
   -- buffers that get clobbered by their owner (e.g. neo-tree

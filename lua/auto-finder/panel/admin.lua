@@ -284,6 +284,24 @@ function M.get_or_create_buffer()
     return "<S-Tab>"
   end, { buffer = bufnr, expr = true, silent = true })
 
+  -- Pass F1..F12 through to global mappings instead of letting them
+  -- land as literal `<F5>` text in the prompt buffer. The user's
+  -- F-keys are typically wired to snacks float terminals (or other
+  -- global functions) and should fire regardless of which buffer is
+  -- focused. We briefly switch to normal mode (`<C-\><C-n>`) and
+  -- re-feed the keystroke so vim's normal-mode dispatch picks up the
+  -- global mapping; without this, prompt-buffer insert mode swallows
+  -- F-keys and types their literal name.
+  for i = 1, 12 do
+    local key = string.format("<F%d>", i)
+    vim.keymap.set("i", key, function()
+      local exit = vim.api.nvim_replace_termcodes("<C-\\><C-n>", true, false, true)
+      local fkey = vim.api.nvim_replace_termcodes(key, true, false, true)
+      vim.api.nvim_feedkeys(exit .. fkey, "n", false)
+    end, { buffer = bufnr, silent = true, nowait = true,
+           desc = "passthrough " .. key .. " to global mapping" })
+  end
+
   M._bufnr = bufnr
   return bufnr
 end
@@ -319,8 +337,8 @@ local function complete_at(prompt, cursor_col)
 
   local candidates
   if #prev_toks == 0 then
-    candidates = { "help", "?", ":h", "focus", "panel", "files", "reload",
-                   "status", "clear", "quit" }
+    candidates = { "help", "?", ":h", "focus", "panel", "files",
+                   "reload", "status", "clear", "quit" }
   elseif #prev_toks == 1 and prev_toks[1] == "focus" then
     -- Numeric indices and section names from the live registry.
     candidates = {}

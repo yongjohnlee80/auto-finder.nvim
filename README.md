@@ -6,7 +6,7 @@ conventional filesystem view and stacks purpose-built sections
 it — all reachable from one window with a single command-driven
 control surface.
 
-> Status: **v0.1.0 — config + files sections.** Repos / remote / db
+> Status: **v0.1.2 — config + files + repos sections.** Remote / db
 > sections are designed in
 > [`docs/adr/0001-auto-finder-design.md`](docs/adr/0001-auto-finder-design.md)
 > and ship in subsequent versions.
@@ -27,9 +27,45 @@ control surface.
   `quit`, `help`.
 - **Section 1 — files:** vanilla neo-tree filesystem rendered into the
   panel window via `position = "current"`.
+- **Section 2 — repos** *(v0.1.2+)***:** auto-discovered git repos ×
+  worktrees, sourced entirely from worktree.nvim. Each repo under
+  `worktree.nvim`'s `root` renders as a top-level workspace node,
+  with each git worktree as a child and ordinary directories below
+  that. No registry, no manual `add` — what worktree.nvim sees is
+  what shows up. fs_event watchers refresh the tree automatically
+  when worktrees are added/removed externally.
 - Numeric `0..9` in normal mode inside the panel switches sections.
+- The active section is **persisted** across `nvim` restarts — the
+  panel re-opens on the slot you were last on.
 - The panel is left-anchored; the right slot is left free for sibling
   plugins (auto-agents.nvim, terminal splits, etc).
+
+## What ships in v0.1.2
+
+- **Repos section (slot 2)** — auto-discovered repos × git worktrees
+  view, ported from Bryan Cua's `neo-tree-workspace` source.
+  - **Single source of truth — worktree.nvim.** Discovery (which
+    dirs are git, what counts as a worktree, the bare-vs-`.git`
+    layout detection) and the active root come from worktree.nvim
+    via `require("worktree").get_root()` +
+    `require("worktree.git").list_child_repos(root)`. No registry,
+    no manual `add` — what worktree.nvim sees, the panel shows.
+  - Worktree paths exposed for consumer keymaps:
+    `require("auto-finder").repos.worktree_paths()` returns the flat
+    list of every non-bare worktree under worktree.nvim's root.
+    Lets you wire e.g. an `<leader><leader>` files-finder that
+    scopes pick queries to the active workspace.
+  - When worktree.nvim isn't installed, the panel renders an
+    empty-state placeholder explaining the dependency rather than
+    throwing.
+- **Active section persists across restarts** — the slot you last
+  focused is saved in
+  `<stdpath('config')>/.auto-finder/config.json` under
+  `panel.last_section` and restored on next `setup()`.
+- **Per-section config forwarding** — `opts.repos = { window = {
+  mappings = { ... } } }` (and similarly `opts.files`) are
+  deep-merged into the corresponding neo-tree source's default
+  config. Consumers can inject their own keymaps without forking.
 
 ## What ships in v0.1.0
 
@@ -71,9 +107,19 @@ control surface.
     --   `percentage`  fraction of `vim.o.columns`, clamped to [min..max]
     -- `min`/`max` bound `panel resize N` (the hard-cap pin).
     width = { default = 38, min = 25, max = 100 },
-    default_section = 1,             -- 1 = files; 0 = the config REPL
-    sections = { "config", "files" }, -- order also defines the index
-    hijack_directories = true,       -- open panel for `nvim .`
+    default_section = 1,                       -- 1 = files; 0 = config; 2 = repos (v0.1.2+)
+    sections = { "config", "files", "repos" }, -- order also defines the index
+    hijack_directories = true,               -- open panel for `nvim .`
+    -- Per-section configs deep-merged into the underlying neo-tree
+    -- source. Use this to inject custom keymaps without forking the
+    -- plugin. Discovery / root / bare_dir live in worktree.nvim,
+    -- not here.
+    repos = {
+      window = { mappings = {} },  -- e.g. ["<C-x>"] = "close_node"
+    },
+    files = {
+      window = { mappings = {} },
+    },
   },
   keys = {
     { "<leader>e",  "<cmd>AutoFinder<cr>",         desc = "Explorer (auto-finder)" },
@@ -100,6 +146,7 @@ for the full list, or any of these:
 ```
 focus 1                 # jump to files section (numeric or name)
 focus files             # same thing
+focus repos             # jump to the auto-discovered repos / worktrees section
 panel resize 50         # pin width to 50 cols (hard cap)
 panel reset             # release the pin (alias: panel dynamic)
 panel show              # show mode / default / range / live width
@@ -109,6 +156,11 @@ reload                  # re-render the active section
 quit                    # close the panel (section buffers persist)
 ```
 
+(Repo / worktree mutations are owned by worktree.nvim — use its
+`<leader>gw` / `<leader>gA` / `<leader>gC` / `<leader>gc` keymaps
+to switch / add / clone / init worktrees. The auto-finder repos panel
+just renders whatever worktree.nvim is currently tracking.)
+
 Tab-completion works on every verb, including numeric width
 candidates inside the configured `[width.min .. width.max]` range.
 
@@ -117,10 +169,14 @@ candidates inside the configured `[width.min .. width.max]` range.
 See [`docs/adr/0001-auto-finder-design.md`](docs/adr/0001-auto-finder-design.md)
 for the full design rationale.
 
-- **v0.1 — config + files** ← this release
-- **v0.2 — repos** — registered repos × git worktrees, à la Bryan's
-  `neo-tree-workspace`. Switch between worktrees from the panel
-  without leaving nvim.
+- **v0.1.0 — config + files**
+- **v0.1.2 — repos** ← this release (auto-discovered repos × git
+  worktrees view, ported from Bryan Cua's `neo-tree-workspace`;
+  worktree.nvim is the discovery source-of-truth; active-section
+  persistence; per-section config forwarding).
+- **v0.2 — repos polish** (TBD: keymap presets, repo init/clone
+  surface integration with worktree.nvim, repo-scoped session
+  save/load).
 - **v0.3 — remote** — SSH targets, on-demand directory listings,
   scratch-buffer edits that round-trip via `rsync` / `scp`.
 - **v0.4 — db** — read-only browser over registered database

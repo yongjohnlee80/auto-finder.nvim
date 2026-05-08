@@ -355,6 +355,89 @@ ok("complete_at on 'p' filters to verbs starting with p",
   #partial > 0 and vim.tbl_contains(partial, "panel"),
   "got=" .. table.concat(partial, ","))
 
+-- ─────────────────────── 11. repos section ──────────────────────
+print("\n[11] repos section (worktree.nvim facade)")
+-- Re-setup with the repos section enabled. Idempotent — re-applies opts
+-- and rebuilds the section registry. Use a temp config dir so any
+-- per-config persistence is isolated from the user's real one.
+vim.fn.delete("/tmp/auto-finder-smoke-config-repos", "rf")
+vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-repos"
+af.setup({
+  width = { default = 38, min = 25, max = 100 },
+  default_section = 1,
+  sections = { "config", "files", "repos" },
+})
+ok("repos section registered", require("auto-finder.sections")._by_name["repos"] ~= nil)
+local repos_sec = require("auto-finder.sections").resolve("repos")
+ok("repos section resolves by name", repos_sec ~= nil)
+ok("repos section gets index 2", repos_sec and repos_sec.number == 2)
+
+-- worktree.nvim isn't on the test runtimepath. The repos module
+-- should degrade gracefully — every accessor returns empty / nil
+-- instead of throwing, and the section can still be focused (the
+-- tree just renders the empty-state placeholder).
+local repos_mod = require("auto-finder.repos")
+ok("repos.root() returns nil when worktree.nvim absent",
+  repos_mod.root() == nil)
+ok("repos.load() returns empty when worktree.nvim absent",
+  type(repos_mod.load()) == "table" and #repos_mod.load() == 0)
+ok("repos.worktree_paths() returns empty when worktree.nvim absent",
+  type(repos_mod.worktree_paths()) == "table" and #repos_mod.worktree_paths() == 0)
+
+-- Admin REPL: the verb / completion surface for `repos` is
+-- intentionally absent — discovery is fully automatic via
+-- worktree.nvim, no admin commands operate on the registry (there
+-- is no registry).
+local _, top = admin._complete_at("", 0)
+ok("complete_at empty does NOT offer 'repos'",
+  not vim.tbl_contains(top, "repos"))
+
+-- Focusing the repos section must succeed end-to-end even with an
+-- empty discovery — the empty-state placeholder is rendered as a
+-- single message-type node and the panel buffer is still neo-tree.
+af.open(true)
+local repos_focus_ok, repos_focus_err = af.focus("repos")
+ok("focus('repos') succeeds", repos_focus_ok, repos_focus_err)
+ok("state.section == 2 after focus repos", af.state.section == 2)
+vim.wait(300, function()
+  if not af.state.panel_winid or not vim.api.nvim_win_is_valid(af.state.panel_winid) then
+    return false
+  end
+  local b = vim.api.nvim_win_get_buf(af.state.panel_winid)
+  return vim.bo[b].filetype == "neo-tree"
+end, 10)
+local repos_buf = af.state.panel_winid and vim.api.nvim_win_get_buf(af.state.panel_winid)
+ok("repos panel buffer is neo-tree filetype",
+  repos_buf and vim.bo[repos_buf].filetype == "neo-tree",
+  "ft=" .. tostring(repos_buf and vim.bo[repos_buf].filetype))
+
+-- ─────────────────────── 12. last_section persistence ──────────────────
+print("\n[12] last_section persists across setup")
+af.open(true)
+af.focus(1)  -- files
+ok("focused files (section 1)", af.state.section == 1)
+local persisted_after_focus = require("auto-finder.store").load()
+ok("store.last_section == 1 after focus(1)",
+  (persisted_after_focus.panel or {}).last_section == 1,
+  vim.inspect(persisted_after_focus))
+af.focus(0)  -- config
+ok("focused config (section 0)", af.state.section == 0)
+local persisted_after_config = require("auto-finder.store").load()
+ok("store.last_section == 0 after focus(0)",
+  (persisted_after_config.panel or {}).last_section == 0)
+
+-- Restart sim: clear state, re-setup, verify state.section restored.
+af.close()
+af.state.section = nil
+af.setup({
+  width = { default = 38, min = 25, max = 100 },
+  default_section = 1,
+  sections = { "config", "files", "repos" },
+})
+ok("setup restored last_section into state.section",
+  af.state.section == 0,
+  "state.section=" .. tostring(af.state.section))
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

@@ -7,7 +7,8 @@ local M = {}
 ---@field width { default?: integer, percentage?: number, min: integer, max: integer }
 ---@field default_section integer
 ---@field sections string[]      -- ordered list of section names enabled this session
----@field files table            -- reserved; currently a no-op (defer to neo-tree's own setup)
+---@field files table            -- per-section opts forwarded to neo-tree's `filesystem` source on setup; consumer keymap overrides go in `files.window.mappings`
+---@field repos table            -- per-section opts forwarded to the `auto-finder-repos` source on setup; consumer keymap overrides go in `repos.window.mappings`
 ---@field hijack_directories boolean  -- replace directory buffers with the panel + cwd at the dir
 ---
 ---NOTE: the `side` field was removed in v0.1.x — the panel is now
@@ -16,6 +17,25 @@ local M = {}
 ---user_opts is silently ignored for backwards compat with older
 ---consumer configs; persisted `panel.side` values in the store are
 ---also ignored on load.
+---
+---Per-section config (one table per section name) is forwarded to
+---the underlying neo-tree source's default config at setup time.
+---Consumers can inject custom keymaps without modifying the plugin:
+---```lua
+---opts = {
+---  sections = { "config", "files", "repos" },
+---  repos = {
+---    window = {
+---      mappings = {
+---        ["<C-x>"] = "close_node",
+---        -- … any binding the auto-finder-repos source's commands
+---        --   module exposes (open / open_split / open_vsplit /
+---        --   open_tabnew / refresh / etc.)
+---      },
+---    },
+---  },
+---}
+---```
 M.defaults = {
   -- Two-shape width spec, picked by `resolve_width` in this priority:
   --   1. `default`     fixed column count (takes priority when set)
@@ -34,6 +54,17 @@ M.defaults = {
   default_section = 1,
   sections = { "config", "files" },
   files = {},
+  -- Per-section opts for the `repos` section. Forwarded to the
+  -- `auto-finder-repos` neo-tree source on setup so consumers can
+  -- inject window mappings without forking the plugin.
+  --
+  -- Discovery (which dirs are git repos, what counts as a worktree,
+  -- the bare-vs-`.git` layout detection) and the active root are
+  -- delegated to worktree.nvim — no parallel options live here.
+  -- Configure those via `require("worktree").setup({ root = …,
+  -- bare_dir = … })` and the repos section picks them up at render
+  -- time.
+  repos = {},
   hijack_directories = true,
 }
 

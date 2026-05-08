@@ -6,7 +6,15 @@
 
 local M = {}
 
-M.version = "0.1.1"
+M.version = "0.1.2"
+
+---Public-surface accessor for the registered-repos registry. Lazy-
+---loaded so consumers can `require("auto-finder").repos.add(path)`
+---directly. The underlying module owns persistence + neo-tree
+---source notification.
+M.repos = setmetatable({}, {
+  __index = function(_, k) return require("auto-finder.repos")[k] end,
+})
 
 ---@class AutoFinderState
 ---@field config AutoFinderConfig|nil
@@ -33,7 +41,15 @@ function M.setup(user_opts)
   -- Build / rebuild the section registry.
   require("auto-finder.sections").setup(cfg.sections)
 
-  -- Restore persisted user state (panel pin, side override, files
+  -- If `repos` is enabled, register the auto-finder-repos source with
+  -- neo-tree so `cmd.execute({ source = "auto-finder-repos" })` works.
+  -- Order: section registry first (so we know whether repos is enabled),
+  -- then neo-tree registration before any section mount can fire.
+  if require("auto-finder.sections")._by_name["repos"] then
+    M._register_neotree_workspace_source(cfg.repos)
+  end
+
+  -- Restore persisted user state (panel pin, last section, files
   -- filter prefs). Missing or malformed files fall back to defaults
   -- silently — see auto-finder.store for the schema.
   local persisted = require("auto-finder.store").load()
@@ -42,6 +58,14 @@ function M.setup(user_opts)
         and persisted.panel.user_width >= cfg.width.min
         and persisted.panel.user_width <= cfg.width.max then
       M.state.user_width = persisted.panel.user_width
+    end
+    -- Restore the last-active section so the panel reopens on the
+    -- same slot the user was on. Validated against the live section
+    -- registry so a stored index for a now-disabled section silently
+    -- falls back to default_section.
+    if type(persisted.panel.last_section) == "number"
+        and require("auto-finder.sections").resolve(persisted.panel.last_section) then
+      M.state.section = persisted.panel.last_section
     end
     -- The `side` field was removed from the config. We deliberately do
     -- NOT apply persisted.panel.side here — the panel is always
@@ -128,6 +152,86 @@ function M.setup(user_opts)
   end
 end
 
+---Register the `auto-finder-repos` neo-tree source so
+---`cmd.execute({ source = "auto-finder-repos", … })` works inside the
+---repos section.
+---
+---Neo-tree's normal setup pipeline (setup/init.lua's per-source loop
+---around line 525-660) does several things our source needs:
+---
+---  1. Builds `nt.config[source_name]` with `components`, `commands`,
+---     `renderers`, and a merged `window` block. `cmd.execute` reads
+---     `nt.config[source].window.position` directly, so this entry
+---     MUST exist or focus crashes with
+---     `attempt to index field … (a nil value)`.
+---  2. Calls `manager.setup(source_name, source_config, global_config,
+---     module)` which sets the per-source default config in the source
+---     data table AND stashes the module reference (used by command
+---     wrappers and `manager.get_state(source_name)`).
+---
+---We replicate enough of that pipeline here that a `cmd.execute` call
+---against `auto-finder-repos` flows through cleanly. Base config is
+---deep-copied from neo-tree's filesystem source so we inherit a
+---working renderers / window-mappings shape; our source's own
+---`default_config` and the consumer's `cfg.repos` are layered on top.
+---@param extra table?  -- consumer overrides to merge atop the source defaults
+function M._register_neotree_workspace_source(extra)
+  local ok_neo, neo = pcall(require, "neo-tree")
+  if not ok_neo then return end
+  if type(neo.ensure_config) == "function" then
+    pcall(neo.ensure_config)
+  end
+  if type(neo.config) ~= "table" then return end
+
+  local ok_src, src = pcall(require, "auto-finder-repos")
+  if not ok_src then
+    vim.notify("auto-finder: failed to require 'auto-finder-repos': " .. tostring(src),
+      vim.log.levels.ERROR)
+    return
+  end
+
+  -- Per-source config. Order (later wins):
+  --   1. filesystem source as a base (gives renderers + working window mappings)
+  --   2. our overrides (name, display_name, our components + commands)
+  --   3. our source's `default_config` (own keymaps inside the panel)
+  --   4. consumer's `cfg.repos` (their keymaps / overrides)
+  local base = vim.deepcopy(neo.config.filesystem or {})
+  local components_ok, components = pcall(require, "auto-finder-repos.components")
+  local commands_ok, commands = pcall(require, "auto-finder-repos.commands")
+  local source_config = vim.tbl_deep_extend("force",
+    base,
+    {
+      name = "auto-finder-repos",
+      display_name = src.display_name or " Git ",
+      components = components_ok and components or nil,
+      commands = commands_ok and commands or nil,
+    },
+    src.default_config or {},
+    extra or {})
+
+  -- Make the per-source config visible to `cmd.execute` and friends.
+  neo.config["auto-finder-repos"] = source_config
+
+  -- Add to neo.config.sources so future ensure_config / setup re-runs
+  -- include us when iterating known sources.
+  neo.config.sources = neo.config.sources or { "filesystem", "buffers", "git_status" }
+  local already_listed = false
+  for _, s in ipairs(neo.config.sources) do
+    if s == "auto-finder-repos" then already_listed = true; break end
+  end
+  if not already_listed then
+    table.insert(neo.config.sources, "auto-finder-repos")
+  end
+
+  -- Run the manager-side setup so `manager.get_state("auto-finder-repos")`
+  -- can find us, and so the source's own `setup()` (no-op for us) is
+  -- invoked symmetrically with neo-tree's built-in sources.
+  local ok_mgr, manager = pcall(require, "neo-tree.sources.manager")
+  if ok_mgr and type(manager.setup) == "function" then
+    pcall(manager.setup, "auto-finder-repos", source_config, neo.config, src)
+  end
+end
+
 ---One-shot directory hijack: if the initial buffer's name is an
 ---existing directory on disk, replace it with a scratch and open the
 ---panel. Idempotent — safe to call multiple times; only acts the
@@ -207,30 +311,19 @@ function M.reset_width()
   require("auto-finder.panel.host").reset_width(M.state.config, M.state)
 end
 
----Re-render the active section. For neo-tree-backed sections this
----drops the cached bufnr so neo-tree's command surface is re-driven
----with current config (e.g. after `files show/hide …` mutated
----neo-tree's filtered_items at runtime).
+---Re-render the active section. Calls the section's `on_close`
+---hook (which wipes any cached neo-tree buffer for neo-tree-backed
+---sections) and then re-focuses, so the next mount picks up any
+---runtime config change (e.g. after `files show/hide …` mutated
+---neo-tree's filtered_items, or after `repos add` changed the
+---registry).
 function M.reload()
   local section = require("auto-finder.sections").resolve(M.state.section or 0)
   if not section then return end
-  -- Drop any cached buffer pointer so the section rebuilds it.
   if M.state.section_buffers then
     M.state.section_buffers[section.number] = nil
   end
-  -- For the files section, also wipe the module-level bufnr cache
-  -- and force neo-tree to discard its existing buffer so the next
-  -- mount re-applies filtered_items.
-  if section.name == "files" then
-    local files = package.loaded["auto-finder.sections.files"]
-    if files then
-      if files._bufnr and vim.api.nvim_buf_is_valid(files._bufnr) then
-        pcall(vim.api.nvim_buf_delete, files._bufnr, { force = true })
-      end
-      files._bufnr = nil
-    end
-  end
-  if section.on_close then pcall(section.on_close) end
+  if type(section.on_close) == "function" then pcall(section.on_close) end
   M.focus(section.number)
 end
 
