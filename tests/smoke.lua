@@ -6,6 +6,9 @@
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 for _, p in ipairs({
   "/home/johno/Source/Projects/nvim-plugins/auto-finder.nvim",
+  -- auto-core soft-dep: when present, enables Phase 4b live-refresh
+  -- in the files section. Tests below verify the wiring.
+  "/home/johno/Source/Projects/nvim-plugins/auto-core.nvim",
   LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
 }) do
@@ -609,6 +612,104 @@ ok("panel opens after scheduled tick drains",
   af.state.panel_winid ~= nil
     and vim.api.nvim_win_is_valid(af.state.panel_winid),
   "panel_winid=" .. tostring(af.state.panel_winid))
+
+-- ───────────────────────── 14. auto-core fs.watch live-refresh wiring ─────────────────────────
+-- v0.1.4 integration: auto-finder/sections/files.lua sets
+-- `live_refresh = true` so the files section subscribes to
+-- core.file:* and triggers a debounced neo-tree refresh on changes.
+-- Soft-dep: when auto-core is on the runtimepath (it IS for these
+-- tests — added at the rtp prelude), the wiring is active.
+print("\n[14] auto-core fs.watch live-refresh wiring (files section)")
+
+local ac_ok, core = pcall(require, "auto-core")
+ok("auto-core loadable on the rtp", ac_ok and type(core) == "table")
+ok("auto-core.fs.watch present",
+  type(core.fs) == "table" and type(core.fs.watch) == "table")
+ok("auto-core.events present", type(core.events) == "table")
+
+-- Reset state and refocus the files section so the watcher is fresh.
+af.close()
+vim.wait(50)  -- drain any pending neo-tree async callbacks
+af.open(true)
+af.focus(1)  -- files
+
+local files_section = require("auto-finder.sections").resolve(1)
+ok("files section resolves",
+  files_section ~= nil and files_section.name == "files")
+ok("files section has _ensure_fs_watch (live_refresh wired)",
+  type(files_section._ensure_fs_watch) == "function")
+ok("files section has _stop_fs_watch",
+  type(files_section._stop_fs_watch) == "function")
+
+ok("watcher handle present after focus(files)",
+  files_section._fs_watch_handle ~= nil,
+  "handle=" .. tostring(files_section._fs_watch_handle))
+ok("watcher root matches getcwd",
+  files_section._fs_watch_root == vim.fn.getcwd(),
+  string.format("root=%s cwd=%s",
+    tostring(files_section._fs_watch_root), vim.fn.getcwd()))
+
+-- Stub neo-tree's execute to capture refresh calls. Publishing a
+-- core.file:* event under cwd should land a refresh after the
+-- 150 ms debounce window.
+local cmd_mod = require("auto-finder.neotree.command")
+local orig_execute = cmd_mod.execute
+local refresh_calls = {}
+cmd_mod.execute = function(args)
+  if type(args) == "table" then
+    refresh_calls[#refresh_calls + 1] = args
+  end
+  -- Don't actually drive neo-tree on the synthetic event — we'd
+  -- be asking it to refresh against a path that doesn't exist.
+  return true
+end
+
+core.events.publish("core.file:modified", {
+  path   = vim.fn.getcwd() .. "/some-synthetic-event-path.txt",
+  change = "modified",
+})
+vim.wait(400, function()
+  for _, c in ipairs(refresh_calls) do
+    if c.action == "refresh" and c.source == "filesystem" then
+      return true
+    end
+  end
+  return false
+end)
+local saw_refresh = false
+for _, c in ipairs(refresh_calls) do
+  if c.action == "refresh" and c.source == "filesystem" then
+    saw_refresh = true
+    break
+  end
+end
+ok("file-event under cwd triggers neo-tree refresh after debounce",
+  saw_refresh,
+  "refresh_calls=" .. vim.inspect(refresh_calls))
+
+-- Events for paths OUTSIDE the watched root should NOT refresh.
+-- Reset the call list, publish an out-of-root event, drain, assert.
+refresh_calls = {}
+core.events.publish("core.file:modified", {
+  path   = "/tmp/some-other-place/x.txt",
+  change = "modified",
+})
+vim.wait(250)
+local saw_outside_refresh = false
+for _, c in ipairs(refresh_calls) do
+  if c.action == "refresh" then saw_outside_refresh = true end
+end
+ok("out-of-root event does NOT trigger refresh", not saw_outside_refresh,
+  "refresh_calls=" .. vim.inspect(refresh_calls))
+
+cmd_mod.execute = orig_execute
+
+-- Tear-down.
+files_section._stop_fs_watch()
+ok("_stop_fs_watch clears watcher handle",
+  files_section._fs_watch_handle == nil)
+ok("_stop_fs_watch clears watcher root",
+  files_section._fs_watch_root == nil)
 
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))

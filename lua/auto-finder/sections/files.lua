@@ -11,4 +11,9 @@ return require("auto-finder.sections._neotree").build_section({
   name = "files",
   description = "filesystem (neo-tree wrapper)",
   source = "filesystem",
+  -- Subscribe to auto-core.fs.watch (Phase 4b) so the file tree
+  -- auto-refreshes when the filesystem changes underneath. Soft-dep:
+  -- if auto-core isn't installed, this flag is a no-op and the
+  -- section behaves as it did pre-integration.
+  live_refresh = true,
 })

@@ -16,6 +16,109 @@
 
 local M = {}
 
+-- ── live refresh via auto-core.fs.watch (Phase 4b integration) ──
+--
+-- Soft-dep on auto-core: when present, sections that opt in via
+-- `opts.live_refresh = true` get a libuv fs watcher rooted at the
+-- cwd and debounced neo-tree refresh on file events. Auto-core
+-- absent → silently skipped (auto-finder still works, just without
+-- auto-refresh — the prior behavior).
+--
+-- Per-section state:
+--   section._fs_watch_handle   active watcher handle (or nil)
+--   section._fs_watch_root     dir the handle is rooted at
+--   section._fs_subscribed     events subscription wired? (one-shot)
+local LIVE_REFRESH_DEBOUNCE_MS = 150  -- collapse refresh storms
+
+local function require_core()
+  local ok, core = pcall(require, "auto-core")
+  if not ok then return nil end
+  if type(core) ~= "table" or type(core.fs) ~= "table"
+      or type(core.fs.watch) ~= "table"
+      or type(core.events) ~= "table" then
+    return nil
+  end
+  return core
+end
+
+---Wire fs-watch + refresh hooks onto `section`. Mutates `section`:
+---adds `_ensure_fs_watch` and `_stop_fs_watch` methods, and a
+---one-shot `_fs_subscribed` flag. No-op if auto-core isn't loadable.
+---@param section table
+---@param source string
+local function setup_live_refresh(section, source)
+  local core = require_core()
+  if not core then return end
+
+  local refresh_pending = false
+  local function schedule_refresh()
+    if refresh_pending then return end
+    refresh_pending = true
+    vim.defer_fn(function()
+      refresh_pending = false
+      if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
+        return
+      end
+      pcall(function()
+        require("auto-finder.neotree.command").execute({
+          action = "refresh",
+          source = source,
+        })
+      end)
+    end, LIVE_REFRESH_DEBOUNCE_MS)
+  end
+
+  local function ensure_subscribed()
+    if section._fs_subscribed then return end
+    section._fs_subscribed = true
+    core.events.subscribe("core.file:*", function(payload, _topic)
+      if type(payload) ~= "table" or type(payload.path) ~= "string" then
+        return
+      end
+      local root = section._fs_watch_root
+      if not root then return end
+      -- Only react when the path falls under our watched root.
+      if payload.path:sub(1, #root) ~= root
+          and payload.path ~= root then
+        return
+      end
+      schedule_refresh()
+    end)
+  end
+
+  function section._ensure_fs_watch()
+    ensure_subscribed()
+    local cwd = vim.fn.getcwd()
+    if section._fs_watch_handle and section._fs_watch_root == cwd then
+      return
+    end
+    if section._fs_watch_handle then
+      pcall(core.fs.watch.stop, section._fs_watch_handle)
+      section._fs_watch_handle = nil
+    end
+    local h, err = core.fs.watch.start(cwd, { recursive = true })
+    if h then
+      section._fs_watch_handle = h
+      section._fs_watch_root   = cwd
+    else
+      -- Soft-fail: log + continue. The section still works without
+      -- auto-refresh.
+      vim.notify(
+        "auto-finder: fs.watch.start failed for '" .. cwd .. "': " ..
+          tostring(err),
+        vim.log.levels.DEBUG)
+    end
+  end
+
+  function section._stop_fs_watch()
+    if section._fs_watch_handle then
+      pcall(core.fs.watch.stop, section._fs_watch_handle)
+      section._fs_watch_handle = nil
+      section._fs_watch_root   = nil
+    end
+  end
+end
+
 ---Defensive monkey-patch: neo-tree's `renderer.get_expanded_nodes`
 ---indexes `tree:get_nodes(...)` without nil-checking, but the
 ---win_enter redirect can call it with `old_state.tree = nil` when a
@@ -109,7 +212,7 @@ end
 ---  source = "filesystem",
 ---})
 ---```
----@param opts { name: string, description: string?, source: string }
+---@param opts { name: string, description: string?, source: string, live_refresh: boolean? }
 ---@return AutoFinderSection
 function M.build_section(opts)
   patch_neotree_renderer_nil_tree()
@@ -159,6 +262,32 @@ function M.build_section(opts)
       pcall(vim.api.nvim_buf_delete, section._bufnr, { force = true })
     end
     section._bufnr = nil
+  end
+
+  -- Wrap the lifecycle hooks for live-refresh-enabled sections.
+  -- The wrappers only fire when auto-core is loadable; otherwise the
+  -- _ensure_fs_watch / _stop_fs_watch methods aren't installed and
+  -- the calls below short-circuit.
+  if opts.live_refresh then
+    setup_live_refresh(section, source)
+    if section._ensure_fs_watch then
+      local orig_get_buffer = section.get_buffer
+      section.get_buffer = function(panel_winid)
+        local b = orig_get_buffer(panel_winid)
+        section._ensure_fs_watch()
+        return b
+      end
+      local orig_on_focus = section.on_focus
+      section.on_focus = function(panel_winid, bufnr)
+        orig_on_focus(panel_winid, bufnr)
+        section._ensure_fs_watch()
+      end
+      local orig_on_close = section.on_close
+      section.on_close = function()
+        section._stop_fs_watch()
+        orig_on_close()
+      end
+    end
   end
 
   return section
