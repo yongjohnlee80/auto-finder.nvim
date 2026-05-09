@@ -72,13 +72,13 @@ function M.setup(user_opts)
     -- left-anchored now. Old store files containing `side` are left
     -- intact on disk so a downgrade still finds them.
   end
-  -- Sync neo-tree's auto_expand_width with whatever pin state we
-  -- ended up with after the persisted load. Without this, a session
-  -- that restarts with a saved pin would still create the first
-  -- filesystem state with auto_expand_width=true (LazyVim consumer
-  -- default), expand the panel on first files focus, and only
-  -- recover after the next resize/reset call.
-  require("auto-finder.panel.host")._sync_neotree_auto_expand(M.state)
+  -- Phase 3c note: previously re-synced
+  -- `state.window.auto_expand_width` here so a session restart with
+  -- a saved pin wouldn't expand on first files focus. The forked
+  -- renderer now reads `M.state.user_width` directly each render —
+  -- the persisted pin is already in `M.state.user_width` by this
+  -- point in setup, so the renderer sees the pin from its very
+  -- first call. No manual sync needed.
   if persisted.files then
     local ok, neo = pcall(require, "auto-finder.neotree")
     if ok and type(neo.config) == "table" then

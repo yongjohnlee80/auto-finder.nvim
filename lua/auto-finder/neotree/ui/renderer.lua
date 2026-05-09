@@ -1350,7 +1350,24 @@ end
 ---@param state neotree.StateWithTree The state containing tree to render. Almost same as state.tree:render()
 render_tree = function(state)
   local add_blank_line_at_top = nt.config.add_blank_line_at_top
-  local should_auto_expand = state.window.auto_expand_width and state.current_position ~= "float"
+  -- Auto-finder fork: pin state overrides `auto_expand_width`. When
+  -- the panel has a user-set pin (`panel resize N`), we hard-cap at
+  -- N and never grow — even if the longest node would push past it.
+  -- Reads pin from `auto-finder.state.user_width` directly each
+  -- render, so a `panel resize` / `panel reset` takes effect on the
+  -- very next redraw without needing to mutate every live state's
+  -- `state.window.auto_expand_width` from outside (which was the
+  -- whole v0.1.x wrapper-sync pile in `panel/host.lua`).
+  local pinned = false
+  do
+    local af_ok, af = pcall(require, "auto-finder")
+    if af_ok and af.state and af.state.user_width and af.state.user_width > 0 then
+      pinned = true
+    end
+  end
+  local should_auto_expand = state.window.auto_expand_width
+      and state.current_position ~= "float"
+      and not pinned
   local should_pre_render = should_auto_expand or state.current_position == "current"
 
   local marks = save_marks(state)

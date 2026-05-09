@@ -191,31 +191,34 @@ ok("user_width cleared", af.state.user_width == nil)
 ok("live width back to default (38)", vim.api.nvim_win_get_width(panel) == 38,
   "live=" .. vim.api.nvim_win_get_width(panel))
 
--- 7d. Pin must propagate auto_expand_width=false to neo-tree's
--- filesystem state and the global config — even when set from a
--- non-files section. This is the regression fix for "panel resize N
--- shows pinned at N but live still expands".
-print("\n[7d] pin disables neo-tree auto_expand_width across sections")
-local neo = require("neo-tree")
-af.focus(0)  -- switch to config (REPL) section: panel buffer is no longer neo-tree
+-- 7d. Pin must prevent the renderer from auto-expanding the panel.
+-- v0.1.x worked around this by mutating
+-- `state.window.auto_expand_width = false` on every live filesystem
+-- state from outside; the v0.1.3 fork moves the check into the
+-- renderer, which reads `auto-finder.state.user_width` directly per
+-- render. So the assertion is observable behavior — does the panel
+-- stay at the pin when we resize wider with auto_expand_width still
+-- nominally enabled?
+print("\n[7d] pin caps the panel — renderer respects user_width")
+af.focus(0)  -- in config REPL; panel buffer is not neo-tree
 ok("focused config section", af.state.section == 0)
 af.resize(50)
-ok("global neo.config.window.auto_expand_width = false after pin",
-  neo.config.window.auto_expand_width == false,
-  tostring(neo.config.window.auto_expand_width))
-local mgr = require("neo-tree.sources.manager")
-local fs_states = {}
-mgr._for_each_state("filesystem", function(s) table.insert(fs_states, s) end)
-ok("at least one filesystem state exists", #fs_states > 0)
-local all_off = true
-for _, s in ipairs(fs_states) do
-  if s.window and s.window.auto_expand_width ~= false then all_off = false end
-end
-ok("every filesystem state has auto_expand_width=false while pinned", all_off)
-af.reset_width()
-ok("global auto_expand_width restored to true after reset",
+ok("user_width = 50 after resize", af.state.user_width == 50)
+ok("panel locked at 50 after resize",
+  vim.api.nvim_win_get_width(af.state.panel_winid) == 50,
+  "live=" .. vim.api.nvim_win_get_width(af.state.panel_winid))
+
+-- The fork's render_tree (renderer.lua near line 1353) reads
+-- `auto-finder.state.user_width` and skips the auto-expand branch
+-- when a pin is set. The on-state `state.window.auto_expand_width`
+-- can stay `true` — the renderer ignores it under a pin.
+local neo = require("auto-finder.neotree")
+ok("neo.config.window.auto_expand_width unchanged by pin (still true)",
   neo.config.window.auto_expand_width == true,
-  tostring(neo.config.window.auto_expand_width))
+  "got " .. tostring(neo.config.window.auto_expand_width))
+
+af.reset_width()
+ok("user_width cleared after reset", af.state.user_width == nil)
 af.focus(1)  -- back to files for the rest of the suite
 
 -- 7c. New panel verbs: dynamic alias and panel show

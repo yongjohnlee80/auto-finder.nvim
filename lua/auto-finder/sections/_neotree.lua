@@ -76,25 +76,22 @@ local function mount(panel_winid, source, section_label)
   end
   -- Wait briefly for neo-tree's async mount to settle. The buffer-
   -- swap into our panel is synchronous, but on the very first mount
-  -- the buffer may not yet have filetype="auto-finder.neotree" at this exact
+  -- the buffer may not yet have filetype="neo-tree" at this exact
   -- tick — caching the scratch bufnr in that case would let the
   -- bounce-back guard restore the wrong thing later.
   vim.wait(200, function()
     if not vim.api.nvim_win_is_valid(panel_winid) then return false end
     local b = vim.api.nvim_win_get_buf(panel_winid)
-    return vim.bo[b].filetype == "auto-finder.neotree"
+    return vim.bo[b].filetype == "neo-tree"
   end, 5)
 
-  -- Re-sync neo-tree's auto_expand_width to whatever the current pin
-  -- state demands. A fresh neo-tree state was just created (or
-  -- revived) and inherits the global config; if a pin is active we
-  -- want auto_expand off, if dynamic, on. Catches both first mounts
-  -- and remounts after on_close().
-  pcall(function()
-    local af = require("auto-finder")
-    require("auto-finder.panel.host")._sync_neotree_auto_expand(af.state)
-  end)
-
+  -- Phase 3c note: previously called
+  -- `host._sync_neotree_auto_expand(af.state)` here so a freshly-
+  -- created neo-tree state would inherit the right
+  -- auto_expand_width based on pin status. The forked renderer now
+  -- reads `auto-finder.state.user_width` each render, so a pin
+  -- already-set on entry is honored from the very first render
+  -- without needing to mutate the new state's flag from outside.
   return vim.api.nvim_win_get_buf(panel_winid)
 end
 

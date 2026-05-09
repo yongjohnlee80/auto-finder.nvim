@@ -110,7 +110,7 @@ function M.ensure_open(cfg, state, force)
   local placement = "topleft"
   -- The new vsplit inherits the source window's buffer. If we were sitting
   -- in a neo-tree window (e.g. the autostart from `nvim .`), the panel
-  -- would arrive carrying a buffer with `filetype = "auto-finder.neotree"` and a
+  -- would arrive carrying a buffer with `filetype = "neo-tree"` and a
   -- `neo_tree_position` buffer var. neo-tree's command override
   -- (command/init.lua:155) then rewrites any subsequent
   -- `position = "current"` to whatever the inherited buffer says — and
@@ -277,91 +277,29 @@ function M.focus(cfg, state, key)
 end
 
 -- Snapshot of neo-tree's auto_expand_width as it was before we first
--- forced it off — captured lazily on the first toggle so reset_width
--- can restore the user's actual default rather than hard-coding `true`.
-local original_auto_expand = nil
+-- Phase 3c note: the v0.1.x wrapper-side auto-expand machinery used
+-- to live here — `original_auto_expand` snapshot,
+-- `snapshot_auto_expand_default()`, `set_neotree_auto_expand()`,
+-- `M._restore_neotree_auto_expand()`, `M._sync_neotree_auto_expand()`,
+-- the `manager._for_each_state` iteration that toggled
+-- `state.window.auto_expand_width` on every live filesystem state.
+--
+-- All gone. The forked renderer (`auto-finder.neotree.ui.renderer`'s
+-- `render_tree`) reads `auto-finder.state.user_width` directly each
+-- render and skips the auto-expand branch when a pin is set. The
+-- consumer's `state.window.auto_expand_width` is honored as-is when
+-- not pinned, so dynamic mode still grows on long filenames. The
+-- ~100 lines of wrapper indirection that used to sit here are no
+-- longer needed.
 
-local function snapshot_auto_expand_default()
-  if original_auto_expand ~= nil then return end
-  local ok, neo = pcall(require, "auto-finder.neotree")
-  if not ok then
-    original_auto_expand = false  -- neo-tree's own default (defaults.lua:391)
-    return
-  end
-  -- neo-tree's config is lazy: setup() only stages user_config; M.config
-  -- is populated by the first ensure_config() call. Force materialization
-  -- so we read the post-merge value, otherwise we'd snapshot the bare
-  -- defaults and a `panel reset` would restore to false even when the
-  -- consumer configured `auto_expand_width = true`.
-  if type(neo.ensure_config) == "function" then
-    pcall(neo.ensure_config)
-  end
-  if type(neo.config) ~= "table" or type(neo.config.window) ~= "table" then
-    original_auto_expand = false
-    return
-  end
-  local cur = neo.config.window.auto_expand_width
-  original_auto_expand = (cur == nil) and false or cur
-end
-
----Toggle neo-tree's filesystem `auto_expand_width` globally for the
----session. Without this, render_tree keeps calling nvim_win_set_width
----to expand the panel to fit the longest node — fighting our pin in a
----ping-pong with WinResized's enforce_pin clamp. The previous
----per-window approach only worked when the panel currently held a
----neo-tree buffer; toggling from the config REPL was a silent no-op
----because the lookup failed against the REPL buffer. So we now mutate
----both the live config (so newly-created states inherit the value)
----*and* every existing filesystem state, which catches the case where
----the user pins from one section and then switches to files.
----@param enabled boolean
-local function set_neotree_auto_expand(enabled)
-  snapshot_auto_expand_default()
-  -- 1. Update the global config so future state creations inherit it.
-  local ok_neo, neo = pcall(require, "auto-finder.neotree")
-  if ok_neo and type(neo.ensure_config) == "function" then
-    pcall(neo.ensure_config)
-  end
-  if ok_neo and type(neo.config) == "table" and type(neo.config.window) == "table" then
-    neo.config.window.auto_expand_width = enabled
-  end
-  -- 2. Mutate every live filesystem state so the next render — even
-  -- one already mid-flight from neo-tree's setup pipeline — picks up
-  -- the new value. This is what actually breaks the ping-pong.
-  local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
-  if ok_mgr and type(manager._for_each_state) == "function" then
-    pcall(manager._for_each_state, "filesystem", function(state)
-      if type(state.window) == "table" then
-        state.window.auto_expand_width = enabled
-      end
-    end)
-  end
-end
-
----Public: restore neo-tree's auto_expand_width to the value it held
----before we first forced it off. Used by reset_width and by the files
----section mount when no pin is active.
-function M._restore_neotree_auto_expand()
-  snapshot_auto_expand_default()
-  set_neotree_auto_expand(original_auto_expand)
-end
-
----Public: sync neo-tree's auto_expand_width to whatever the current
----pin state demands. Called from sections/files.lua right after
----mount_neotree so a freshly-created filesystem state can't race
----ahead of the pin.
----@param state table  -- M.state from auto-finder
-function M._sync_neotree_auto_expand(state)
-  if state.user_width and state.user_width > 0 then
-    set_neotree_auto_expand(false)
-  else
-    M._restore_neotree_auto_expand()
-  end
-end
-
----Pin the panel width to N columns. Survives :VimResized. Also
----disables neo-tree's auto_expand_width on the live state so it
----can't fight the pin in a ping-pong.
+---Pin the panel width to N columns. Survives :VimResized.
+---
+---Phase 3c note: the previous version called
+---`set_neotree_auto_expand(false)` here to disable auto-expand on
+---every live filesystem state. That's no longer needed — the
+---forked `render_tree` reads `auto-finder.state.user_width`
+---directly each render and skips the auto-expand branch when a pin
+---is set. Setting `state.user_width` is enough.
 ---@param cfg AutoFinderConfig
 ---@param state table
 ---@param n integer
@@ -378,7 +316,6 @@ function M.resize(cfg, state, n)
     return
   end
   state.user_width = n
-  set_neotree_auto_expand(false)
   if panel_is_open(state) then
     pcall(vim.api.nvim_win_set_width, state.panel_winid, n)
     set_panel_width(state, n)
@@ -389,14 +326,13 @@ function M.resize(cfg, state, n)
 end
 
 ---Clear the user-pinned width. Width reverts to the configured
----default and neo-tree's auto_expand_width is re-enabled so the
----panel can grow to fit longer filenames again. Aliased as
----`panel dynamic` in the admin DSL.
+---default; auto_expand_width re-engages on the next render because
+---the forked renderer's pin-check sees `state.user_width = nil`.
+---Aliased as `panel dynamic` in the admin DSL.
 ---@param cfg AutoFinderConfig
 ---@param state table
 function M.reset_width(cfg, state)
   state.user_width = nil
-  M._restore_neotree_auto_expand()
   if panel_is_open(state) then
     local w = resolve_width(cfg, state)
     pcall(vim.api.nvim_win_set_width, state.panel_winid, w)
@@ -419,13 +355,15 @@ function M.refresh_width(cfg, state)
   M.refresh_winbar(state)
 end
 
----WinResized callback: re-clamp the panel back to the user pin when
----an external resize (e.g. neo-tree's `auto_expand_width`) bypassed
----our cached value. **Only fires when a pin is set** — without a pin
----we deliberately let neo-tree grow the panel dynamically (that's
----the whole point of `panel dynamic`). Pair this with
----`set_neotree_auto_expand(false)` from `M.resize` so we don't
----ping-pong with neo-tree's renderer.
+---WinResized callback: re-clamp the panel back to the user pin
+---when an external resize (window-equalize, etc.) grew it past the
+---pin. **Only fires when a pin is set** — without a pin we
+---deliberately let the renderer grow the panel dynamically (that's
+---the whole point of `panel dynamic`). Pairs with the renderer-
+---side pin check in `auto-finder.neotree.ui.renderer.render_tree`
+---which prevents auto-expand from firing under a pin in the first
+---place — this autocmd handles the rarer "non-renderer resized us"
+---path.
 ---@param cfg AutoFinderConfig
 ---@param state table
 function M.enforce_pin(cfg, state)
