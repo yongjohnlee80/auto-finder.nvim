@@ -87,7 +87,15 @@ local function poke_neotree_redraw()
 end
 
 ---Apply our buffer-local section-switch keymap (0..9 in normal mode)
----to a buffer. Idempotent: safe to call repeatedly on the same buffer.
+---and the `q` close-panel binding to a buffer. Idempotent: safe to
+---call repeatedly on the same buffer.
+---
+---`q` is bound here to override neo-tree's default `q = close_window`
+---mapping. That default fires `renderer.close` which tries to swap
+---the panel's buffer for a scratch — but our panel has `winfixbuf`,
+---so the swap raises E1513 and crashes. We instead make `q` close
+---the entire auto-finder panel, which is the user's mental model
+---("close the tree → close the panel") and avoids the swap entirely.
 ---@param bufnr integer
 local function apply_section_keymap(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
@@ -101,6 +109,14 @@ local function apply_section_keymap(bufnr)
       desc = "auto-finder: focus section " .. i,
     })
   end
+  pcall(vim.keymap.set, "n", "q", function()
+    require("auto-finder").close()
+  end, {
+    buffer = bufnr,
+    silent = true,
+    nowait = true,
+    desc = "auto-finder: close panel",
+  })
 end
 
 ---Open the panel window if not already open. Returns its winid.

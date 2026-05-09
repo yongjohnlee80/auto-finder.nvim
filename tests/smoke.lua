@@ -167,6 +167,16 @@ ok("panel back on neo-tree", vim.bo[panel_buf].filetype == "auto-finder")
 ok("section_buffers cached for 0 and 1",
   af.state.section_buffers[0] and af.state.section_buffers[1])
 
+-- v0.1.4: `q` is bound buffer-locally to close the auto-finder panel
+-- — overrides neo-tree's default `q = close_window` which would
+-- otherwise trigger `nvim_win_set_buf` against winfixbuf and crash
+-- with E1513.
+local q_keymap = vim.fn.maparg("q", "n", false, true)
+ok("q bound on the panel buffer (overrides neo-tree close_window)",
+  type(q_keymap) == "table" and q_keymap.buffer == 1
+    and (q_keymap.desc or ""):find("close panel") ~= nil,
+  vim.inspect(q_keymap))
+
 -- ───────────────────────── 7. resize / reset ───────────────────────
 print("\n[7] resize / reset")
 af.resize(60)

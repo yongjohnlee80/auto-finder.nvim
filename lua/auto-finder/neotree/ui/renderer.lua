@@ -118,12 +118,31 @@ M.close = function(state, focus_prior_window)
     log.debug("Closing window, but saving position first.")
     M.position.save(state, true)
     if state.current_position == "current" then
-      -- we are going to hide the buffer instead of closing the window
+      -- we are going to hide the buffer instead of closing the window.
+      -- Auto-finder fork: the panel host sets `winfixbuf = true` on the
+      -- panel window to prevent external :edit / :buffer / bufferline-
+      -- click hijacks. nvim_win_set_buf would raise E1513 against that.
+      -- Temporarily disable winfixbuf around our own legitimate swap,
+      -- then restore. If the panel host is what we're sitting in,
+      -- close `q` should also close the entire auto-finder panel — but
+      -- the buffer-local `q` keymap in panel/host.lua handles that
+      -- preemptively; this branch is for non-`q` close paths.
       local new_buf = vim.fn.bufnr("#")
       if new_buf < 1 then
         new_buf = vim.api.nvim_create_buf(true, false)
       end
-      vim.api.nvim_win_set_buf(state.winid, new_buf)
+      local was_fixed = false
+      if state.winid and vim.api.nvim_win_is_valid(state.winid) then
+        local ok_get, val = pcall(function() return vim.wo[state.winid].winfixbuf end)
+        was_fixed = ok_get and val == true
+        if was_fixed then
+          pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = state.winid })
+        end
+      end
+      pcall(vim.api.nvim_win_set_buf, state.winid, new_buf)
+      if was_fixed and vim.api.nvim_win_is_valid(state.winid) then
+        pcall(vim.api.nvim_set_option_value, "winfixbuf", true, { win = state.winid })
+      end
     else
       local args = {
         position = state.current_position,
