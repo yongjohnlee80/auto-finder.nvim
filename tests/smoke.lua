@@ -433,6 +433,47 @@ ok("repos panel buffer is neo-tree filetype",
   repos_buf and vim.bo[repos_buf].filetype == "neo-tree",
   "ft=" .. tostring(repos_buf and vim.bo[repos_buf].filetype))
 
+-- ─────────────────────── 11b. repos icon overrides ──────────────────
+print("\n[11b] repos section icon overrides (workspace + worktree glyphs)")
+local repos_components = require("auto-finder-repos.components")
+local repos_highlights = require("auto-finder.neotree.ui.highlights")
+local fake_state = {}
+local workspace_node = { type = "directory", extra = { is_workspace = true } }
+local worktree_node = { type = "directory", extra = { is_worktree = true } }
+local subdir_node = {
+  type = "directory",
+  extra = {},
+  loaded = true,
+  is_expanded = function() return false end,
+  has_children = function() return true end,
+}
+
+local ws_icon = repos_components.icon({}, workspace_node, fake_state)
+ok("workspace icon glyph is the repository codepoint",
+  ws_icon and ws_icon.text and ws_icon.text:find("\u{ea62}", 1, true) ~= nil,
+  "got text=" .. vim.inspect(ws_icon and ws_icon.text))
+ok("workspace icon uses ROOT_NAME highlight",
+  ws_icon and ws_icon.highlight == repos_highlights.ROOT_NAME,
+  "hl=" .. tostring(ws_icon and ws_icon.highlight))
+
+local wt_icon = repos_components.icon({}, worktree_node, fake_state)
+ok("worktree icon glyph is the branch codepoint",
+  wt_icon and wt_icon.text and wt_icon.text:find("\u{f126}", 1, true) ~= nil,
+  "got text=" .. vim.inspect(wt_icon and wt_icon.text))
+ok("worktree icon uses GIT_UNTRACKED highlight",
+  wt_icon and wt_icon.highlight == repos_highlights.GIT_UNTRACKED,
+  "hl=" .. tostring(wt_icon and wt_icon.highlight))
+
+-- Subdirectories under a worktree (no is_workspace/is_worktree
+-- flag) must fall through to the common icon component — the
+-- workspace/worktree glyphs MUST NOT appear there.
+local sub_icon = repos_components.icon({}, subdir_node, fake_state)
+ok("subdirectory icon does NOT use the workspace glyph",
+  sub_icon and sub_icon.text
+    and sub_icon.text:find("\u{ea62}", 1, true) == nil
+    and sub_icon.text:find("\u{f126}", 1, true) == nil,
+  "got text=" .. vim.inspect(sub_icon and sub_icon.text))
+
 -- ─────────────────────── 12. last_section persistence ──────────────────
 print("\n[12] last_section persists across setup")
 af.open(true)
