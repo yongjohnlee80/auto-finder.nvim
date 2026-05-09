@@ -5,7 +5,7 @@ local manager = require("auto-finder.neotree.sources.manager")
 local M = {}
 
 local hijack_cursor_handler = function()
-  if vim.o.filetype ~= "neo-tree" then
+  if vim.o.filetype ~= "auto-finder" then
     return
   end
   local success, source = pcall(vim.api.nvim_buf_get_var, 0, "neo_tree_source")

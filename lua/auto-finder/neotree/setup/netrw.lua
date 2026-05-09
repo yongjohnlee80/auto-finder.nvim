@@ -44,7 +44,7 @@ M.hijack = function()
     local replacement_buffer = vim.fn.bufnr("#")
     local is_currently_neo_tree = false
     if replacement_buffer > 0 then
-      if vim.bo[replacement_buffer].filetype == "neo-tree" then
+      if vim.bo[replacement_buffer].filetype == "auto-finder" then
         -- don't hijack the current window if it's already a Neo-tree sidebar
         local position = vim.b[replacement_buffer].neo_tree_position
         if position == "current" then

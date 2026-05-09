@@ -110,7 +110,7 @@ function M.ensure_open(cfg, state, force)
   local placement = "topleft"
   -- The new vsplit inherits the source window's buffer. If we were sitting
   -- in a neo-tree window (e.g. the autostart from `nvim .`), the panel
-  -- would arrive carrying a buffer with `filetype = "neo-tree"` and a
+  -- would arrive carrying a buffer with `filetype = "auto-finder"` and a
   -- `neo_tree_position` buffer var. neo-tree's command override
   -- (command/init.lua:155) then rewrites any subsequent
   -- `position = "current"` to whatever the inherited buffer says — and

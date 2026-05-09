@@ -262,7 +262,7 @@ M.get_path_to_reveal = function(include_terminals)
     return nil
   end
 
-  if vim.bo.filetype == "neo-tree" then
+  if vim.bo.filetype == "auto-finder" then
     return nil
   end
 

@@ -159,8 +159,8 @@ end
 local last_buffer_enter_filetype = nil
 M.buffer_enter_event = function()
   -- if it is a neo-tree window, just set local options
-  if vim.bo.filetype == "neo-tree" then
-    if last_buffer_enter_filetype == "neo-tree" then
+  if vim.bo.filetype == "auto-finder" then
+    if last_buffer_enter_filetype == "auto-finder" then
       -- we've switched to another neo-tree window
       events.fire_event(events.NEO_TREE_BUFFER_LEAVE)
     else
@@ -187,7 +187,7 @@ M.buffer_enter_event = function()
     return
   end
 
-  if vim.bo.filetype == "neo-tree-popup" then
+  if vim.bo.filetype == "auto-finder-popup" then
     vim.cmd([[
     setlocal winhighlight=Normal:NeoTreeFloatNormal,FloatBorder:NeoTreeFloatBorder
     setlocal nolist nospell nonumber norelativenumber
@@ -197,10 +197,10 @@ M.buffer_enter_event = function()
     return
   end
 
-  if last_buffer_enter_filetype == "neo-tree" then
+  if last_buffer_enter_filetype == "auto-finder" then
     events.fire_event(events.NEO_TREE_BUFFER_LEAVE)
   end
-  if last_buffer_enter_filetype == "neo-tree-popup" then
+  if last_buffer_enter_filetype == "auto-finder-popup" then
     events.fire_event(events.NEO_TREE_POPUP_BUFFER_LEAVE)
   end
   last_buffer_enter_filetype = vim.bo.filetype
@@ -220,11 +220,11 @@ M.buffer_enter_event = function()
 
   -- there is nothing more we want to do with floating windows
   -- but when prior_type is neo-tree we might need to redirect buffer somewhere else.
-  if utils.is_floating() and prior_type ~= "neo-tree" then
+  if utils.is_floating() and prior_type ~= "auto-finder" then
     return
   end
 
-  if prior_type == "neo-tree" then
+  if prior_type == "auto-finder" then
     local success, position = pcall(vim.api.nvim_buf_get_var, prior_buf, "neo_tree_position")
     if not success then
       -- just bail out now, the rest of these lookups will probably fail too.
@@ -280,7 +280,7 @@ M.win_enter_event = function()
   -- if the new win is not a floating window, make sure all neo-tree floats are closed
   manager.close_all("float")
 
-  if vim.o.filetype == "neo-tree" then
+  if vim.o.filetype == "auto-finder" then
     local _, position = pcall(vim.api.nvim_buf_get_var, 0, "neo_tree_position")
     if position == "current" then
       -- make sure the buffer wasn't moved to a new window
@@ -298,7 +298,7 @@ M.win_enter_event = function()
           local bufnr = vim.api.nvim_get_current_buf()
           if bufnr ~= current_bufnr then
             -- The neo-tree buffer was replaced with something else, so we don't need to do anything.
-            log.trace("neo-tree buffer replaced with something else - no further action required")
+            log.trace("auto-finder buffer replaced with something else - no further action required")
             return
           end
           -- create a new tree for this window
@@ -468,7 +468,7 @@ M.merge_config = function(user_config)
   end
   vim.api.nvim_create_autocmd({ "BufWinLeave" }, {
     group = augroup,
-    pattern = "neo-tree *",
+    pattern = "auto-finder *",
     callback = bufleave,
   })
 

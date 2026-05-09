@@ -76,13 +76,13 @@ local function mount(panel_winid, source, section_label)
   end
   -- Wait briefly for neo-tree's async mount to settle. The buffer-
   -- swap into our panel is synchronous, but on the very first mount
-  -- the buffer may not yet have filetype="neo-tree" at this exact
+  -- the buffer may not yet have filetype="auto-finder" at this exact
   -- tick — caching the scratch bufnr in that case would let the
   -- bounce-back guard restore the wrong thing later.
   vim.wait(200, function()
     if not vim.api.nvim_win_is_valid(panel_winid) then return false end
     local b = vim.api.nvim_win_get_buf(panel_winid)
-    return vim.bo[b].filetype == "neo-tree"
+    return vim.bo[b].filetype == "auto-finder"
   end, 5)
 
   -- Phase 3c note: previously called

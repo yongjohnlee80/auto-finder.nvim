@@ -695,7 +695,7 @@ M.get_appropriate_window = function(state, ignore_winfixbuf)
   local nt = require("auto-finder.neotree")
   local ignore_list = nt.config.open_files_do_not_replace_types or {}
   local ignore = M.list_to_dict(ignore_list)
-  ignore["neo-tree"] = true
+  ignore["auto-finder"] = true
   if nt.config.open_files_in_last_window then
     local prior_window = nt.get_prior_window(ignore, ignore_winfixbuf)
     if prior_window > 0 then
@@ -732,7 +732,7 @@ M.get_appropriate_window = function(state, ignore_winfixbuf)
   end
 
   local winid = vim.api.nvim_get_current_win()
-  local is_neo_tree_window = vim.bo.filetype == "neo-tree"
+  local is_neo_tree_window = vim.bo.filetype == "auto-finder"
   vim.api.nvim_set_current_win(current_window)
 
   vim.o.eventignore = eventignore

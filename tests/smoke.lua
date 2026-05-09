@@ -114,11 +114,11 @@ ok("state.section == 1", af.state.section == 1)
 -- neo-tree's command path has internal scheduling; give the BufWinEnter
 -- chain a tick to settle before sampling filetype.
 vim.wait(200,
-  function() return vim.bo[vim.api.nvim_win_get_buf(panel)].filetype == "neo-tree" end,
+  function() return vim.bo[vim.api.nvim_win_get_buf(panel)].filetype == "auto-finder" end,
   5)
 local panel_buf = vim.api.nvim_win_get_buf(panel)
 local ft = vim.bo[panel_buf].filetype
-ok("panel buffer is filetype=neo-tree", ft == "neo-tree", "ft=" .. ft)
+ok("panel buffer is filetype=neo-tree", ft == "auto-finder", "ft=" .. ft)
 
 -- ───────────────────────── 4. winfixbuf blocks :edit ───────────────
 print("\n[4] winfixbuf blocks external :edit from inside panel")
@@ -133,7 +133,7 @@ ok(":edit errored with E1513 (winfixbuf)",
   "ok=" .. tostring(edit_ok) .. " err=" .. tostring(edit_err))
 panel_buf = vim.api.nvim_win_get_buf(panel)
 ok("panel still neo-tree after blocked :edit",
-  vim.bo[panel_buf].filetype == "neo-tree",
+  vim.bo[panel_buf].filetype == "auto-finder",
   "ft=" .. vim.bo[panel_buf].filetype)
 
 -- ───────────────────────── 5. winfixbuf blocks :buffer ─────────────
@@ -146,7 +146,7 @@ ok(":buffer errored with E1513 (winfixbuf)",
   not buf_ok and tostring(buf_err):find("winfixbuf"))
 panel_buf = vim.api.nvim_win_get_buf(panel)
 ok("panel still neo-tree after blocked :buffer",
-  vim.bo[panel_buf].filetype == "neo-tree")
+  vim.bo[panel_buf].filetype == "auto-finder")
 
 -- ───────────────────────── 6. section switch ───────────────────────
 print("\n[6] section switching 1 → 0 → 1")
@@ -158,7 +158,7 @@ ok("panel ft = auto-finder-config", vim.bo[panel_buf].filetype == "auto-finder-c
 af.focus(1)
 ok("state.section == 1 again", af.state.section == 1)
 panel_buf = vim.api.nvim_win_get_buf(panel)
-ok("panel back on neo-tree", vim.bo[panel_buf].filetype == "neo-tree")
+ok("panel back on neo-tree", vim.bo[panel_buf].filetype == "auto-finder")
 ok("section_buffers cached for 0 and 1",
   af.state.section_buffers[0] and af.state.section_buffers[1])
 
@@ -296,17 +296,17 @@ ok("panel reopens", af.state.panel_winid ~= nil and vim.api.nvim_win_is_valid(af
 print("\n[9] panel does not inherit neo-tree filetype on open")
 af.close()
 -- Simulate the `nvim .` autostart scenario without depending on neo-tree
--- internals: create a fake "neo-tree" buffer and park it in the cursor
+-- internals: create a fake "auto-finder" buffer and park it in the cursor
 -- window. The panel-open code path should refuse to inherit it.
 local fake_nt = vim.api.nvim_create_buf(false, true)
 vim.bo[fake_nt].buftype = "nofile"
-vim.bo[fake_nt].filetype = "neo-tree"
+vim.bo[fake_nt].filetype = "auto-finder"
 pcall(vim.api.nvim_buf_set_var, fake_nt, "neo_tree_position", "left")
 local first_win = vim.api.nvim_list_wins()[1]
 vim.api.nvim_set_current_win(first_win)
 pcall(vim.api.nvim_win_set_buf, first_win, fake_nt)
 -- Pre-condition: cursor window holds a neo-tree-flavored buffer.
-ok("cursor window has filetype=neo-tree before open", vim.bo.filetype == "neo-tree")
+ok("cursor window has filetype=neo-tree before open", vim.bo.filetype == "auto-finder")
 
 -- Now open the panel from inside that window. ensure_open should swap
 -- the inherited buffer for a scratch *before* focus mounts the section
@@ -470,11 +470,11 @@ vim.wait(300, function()
     return false
   end
   local b = vim.api.nvim_win_get_buf(af.state.panel_winid)
-  return vim.bo[b].filetype == "neo-tree"
+  return vim.bo[b].filetype == "auto-finder"
 end, 10)
 local repos_buf = af.state.panel_winid and vim.api.nvim_win_get_buf(af.state.panel_winid)
 ok("repos panel buffer is neo-tree filetype",
-  repos_buf and vim.bo[repos_buf].filetype == "neo-tree",
+  repos_buf and vim.bo[repos_buf].filetype == "auto-finder",
   "ft=" .. tostring(repos_buf and vim.bo[repos_buf].filetype))
 
 -- ─────────────────────── 11b. repos icon overrides ──────────────────

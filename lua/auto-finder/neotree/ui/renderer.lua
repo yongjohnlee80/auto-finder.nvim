@@ -1140,7 +1140,7 @@ local get_buffer = function(bufname, state)
     vim.api.nvim_buf_set_name(bufnr, bufname)
     vim.bo[bufnr].buftype = "nofile"
     vim.bo[bufnr].swapfile = false
-    vim.bo[bufnr].filetype = "neo-tree"
+    vim.bo[bufnr].filetype = "auto-finder"
     vim.bo[bufnr].modifiable = false
     vim.bo[bufnr].undolevels = -1
     attach_position_autocmds(bufnr, state)
@@ -1160,7 +1160,7 @@ M.acquire_window = function(state)
   local relative = utils.resolve_config_option(state, "window.relative", "editor")
   state.current_position = state.current_position or default_position
 
-  local bufname = string.format("neo-tree %s [%s]", state.name, state.id)
+  local bufname = string.format("auto-finder %s [%s]", state.name, state.id)
   local size_opt, default_size
   if state.current_position == "top" or state.current_position == "bottom" then
     size_opt, default_size = "window.height", "15"
@@ -1176,7 +1176,7 @@ M.acquire_window = function(state)
       buftype = "nofile",
       modifiable = false,
       swapfile = false,
-      filetype = "neo-tree",
+      filetype = "auto-finder",
       undolevels = -1,
     },
     win_options = {

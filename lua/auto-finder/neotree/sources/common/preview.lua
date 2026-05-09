@@ -107,7 +107,7 @@ local function create_floating_preview_window(state)
     },
   })
   options.zindex = 40
-  options.buf_options.filetype = "neo-tree-preview"
+  options.buf_options.filetype = "auto-finder-preview"
 
   local win = NuiPopup(options)
   win:mount()

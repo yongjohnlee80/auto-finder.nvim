@@ -29,7 +29,7 @@ end
 local follow_internal = function(callback, force_show, async)
   log.trace("follow called")
   local state = get_state()
-  if vim.bo.filetype == "neo-tree" or vim.bo.filetype == "neo-tree-popup" then
+  if vim.bo.filetype == "auto-finder" or vim.bo.filetype == "auto-finder-popup" then
     return false
   end
   local path_to_reveal = utils.normalize_path(manager.get_path_to_reveal() or "")

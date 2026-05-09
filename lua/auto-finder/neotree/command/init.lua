@@ -152,7 +152,7 @@ M.execute = function(args, state_config_override)
 
   -- If position=current was requested, but we are currently in a neo-tree window,
   -- then we need to override that.
-  if args.position == "current" and vim.bo.filetype == "neo-tree" then
+  if args.position == "current" and vim.bo.filetype == "auto-finder" then
     local position = vim.api.nvim_buf_get_var(0, "neo_tree_position")
     if position then
       args.position = position

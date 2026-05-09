@@ -35,7 +35,7 @@ M.get_prior_window = function(ignore_filetypes, ignore_winfixbuf)
   local utils = require("auto-finder.neotree.utils")
   ignore_filetypes = ignore_filetypes or {}
   local ignore = utils.list_to_dict(ignore_filetypes)
-  ignore["neo-tree"] = true
+  ignore["auto-finder"] = true
 
   local tabid = vim.api.nvim_get_current_tabpage()
   local wins = utils.prior_windows[tabid]

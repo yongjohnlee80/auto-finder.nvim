@@ -142,15 +142,35 @@ function M.setup(user_opts)
   -- fell through to vsplit and the new window inherited the panel's
   -- neo-tree buffer.)
 
-  -- Directory hijack — ONE-SHOT only at VimEnter (covers `nvim .`
-  -- and `nvim /path/to/dir`). Per-BufEnter polling caused multi-panel
-  -- regressions in v0.1.1; this one-shot fires once after startup
-  -- and never again, so it can't compete with neo-tree's own buffer
-  -- churn.
+  -- Directory hijack — ONE-SHOT firing as early as we can manage so
+  -- we win against other directory-hijacking autocmds (LazyVim's
+  -- snacks-explorer, oil.nvim's auto-detect, dirbuf, etc.) that
+  -- typically fire on BufEnter.
+  --
+  -- We register both BufEnter (early — fires before VimEnter for the
+  -- initial buffer) AND VimEnter (fallback — covers the case where
+  -- the BufEnter for the initial buffer fired before our setup
+  -- completed, e.g. when auto-finder is lazy-loaded VeryLazy). The
+  -- `once = true` + the internal `M._hijack_done` guard make this
+  -- idempotent; the first hijack wins, subsequent fires no-op.
+  --
+  -- v0.1.3 phase 6: pulled forward from VimEnter-only because
+  -- snacks-explorer / LazyVim's Explorer otherwise grab the initial
+  -- directory buffer before our VimEnter fires and we never get a
+  -- chance to hijack.
   if cfg.hijack_directories then
+    vim.api.nvim_create_autocmd("BufEnter", {
+      group = group,
+      once = true,
+      desc = "auto-finder: directory hijack on first BufEnter",
+      callback = function()
+        M._maybe_hijack_startup_directory()
+      end,
+    })
     vim.api.nvim_create_autocmd("VimEnter", {
       group = group,
       once = true,
+      desc = "auto-finder: directory hijack fallback at VimEnter",
       callback = function()
         M._maybe_hijack_startup_directory()
       end,
