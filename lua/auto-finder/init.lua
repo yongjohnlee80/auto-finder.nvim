@@ -286,7 +286,12 @@ function M._maybe_hijack_startup_directory()
   vim.bo[scratch].buftype = "nofile"
   pcall(vim.api.nvim_win_set_buf, win, scratch)
   pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
-  M.open(true)
+  -- Defer the panel open: nvim_buf_delete with force=true unwinds
+  -- BufDelete/BufWipeout autocmds and may leave nvim in a window-
+  -- closing state. A synchronous vsplit hits E242 ("Can't split a
+  -- window while closing another"). vim.schedule lets the close
+  -- chain drain before we vsplit.
+  vim.schedule(function() M.open(true) end)
 end
 
 -- _maybe_hijack_directory removed in v0.1.1+1. Restore via VimEnter

@@ -560,6 +560,56 @@ ok("setup restored last_section into state.section",
   af.state.section == 0,
   "state.section=" .. tostring(af.state.section))
 
+-- ───────────────────────── 13. directory-hijack defers M.open ─────────────────────────
+-- Regression: E242 "Can't split a window while closing another" on
+-- `nvim .` when the hijack called M.open synchronously. nvim_buf_delete
+-- with force=true unwinds BufDelete/BufWipeout autocmds and may leave
+-- nvim in a window-closing state; a synchronous vsplit then fails.
+-- Fix: vim.schedule() the open so the close chain drains first.
+print("\n[13] directory-hijack defers M.open")
+-- NB: this section's vim.wait() drains the scheduler, so any neo-tree
+-- async-render callbacks from [11] that were still queued may now
+-- fire and complain about the closed panel window from [11]/[12]
+-- (stale winid). Those stderr warnings are harmless and not a
+-- regression from this fix — the assertions below are what matter.
+af.close()
+af._hijack_done = nil
+-- Stage a directory buffer at the cwd. _maybe_hijack_startup_directory
+-- reads the current buffer's name; isdirectory(name) must return 1.
+-- eventignore=all during setup so neo-tree / other autocmds don't
+-- hijack-and-wipe our staging buffer (buf 13 vanishing was the
+-- symptom).
+local dir = vim.fn.getcwd()
+local saved_ei = vim.o.eventignore
+vim.o.eventignore = "all"
+local dir_buf = vim.api.nvim_create_buf(true, false)
+vim.bo[dir_buf].buftype = "nofile"
+vim.api.nvim_buf_set_name(dir_buf, dir)
+vim.api.nvim_set_current_buf(dir_buf)
+vim.o.eventignore = saved_ei
+ok("directory buffer staged + valid",
+  vim.api.nvim_buf_is_valid(dir_buf)
+    and vim.fn.isdirectory(vim.api.nvim_buf_get_name(dir_buf)) == 1,
+  "buf=" .. tostring(dir_buf) ..
+    " valid=" .. tostring(vim.api.nvim_buf_is_valid(dir_buf)))
+
+af._maybe_hijack_startup_directory()
+ok("_hijack_done flagged after hijack call", af._hijack_done == true)
+ok("panel NOT open synchronously inside hijack",
+  af.state.panel_winid == nil
+    or not vim.api.nvim_win_is_valid(af.state.panel_winid),
+  "expected nil/invalid right after hijack, got winid=" ..
+    tostring(af.state.panel_winid))
+
+vim.wait(500, function()
+  return af.state.panel_winid ~= nil
+    and vim.api.nvim_win_is_valid(af.state.panel_winid)
+end)
+ok("panel opens after scheduled tick drains",
+  af.state.panel_winid ~= nil
+    and vim.api.nvim_win_is_valid(af.state.panel_winid),
+  "panel_winid=" .. tostring(af.state.panel_winid))
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
