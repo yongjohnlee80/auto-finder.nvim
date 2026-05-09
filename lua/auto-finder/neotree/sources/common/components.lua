@@ -1,0 +1,848 @@
+-- This file contains the built-in components. Each componment is a function
+-- that takes the following arguments:
+--      config: A table containing the configuration provided by the user
+--              when declaring this component in their renderer config.
+--      node:   A NuiNode object for the currently focused node.
+--      state:  The current state of the source providing the items.
+--
+-- The function should return either a table, or a list of tables, each of which
+-- contains the following keys:
+--    text:      The text to display for this item.
+--    highlight: The highlight group to apply to this text.
+
+local highlights = require("auto-finder.neotree.ui.highlights")
+local utils = require("auto-finder.neotree.utils")
+local file_nesting = require("auto-finder.neotree.sources.common.file-nesting")
+local container = require("auto-finder.neotree.sources.common.container")
+local git = require("auto-finder.neotree.git")
+local git_parser = require("auto-finder.neotree.git.parser")
+
+---@alias neotree.Component.Common._Key
+---|"bufnr"
+---|"clipboard"
+---|"container"
+---|"current_filter"
+---|"diagnostics"
+---|"git_status"
+---|"filtered_by"
+---|"icon"
+---|"modified"
+---|"name"
+---|"indent"
+---|"file_size"
+---|"last_modified"
+---|"created"
+---|"symlink_target"
+---|"type"
+
+---@class neotree.Component.Common Use the neotree.Component.Common.* types to get more specific types.
+---@field [1] neotree.Component.Common._Key
+
+---@type table<neotree.Component.Common._Key, neotree.FileRenderer>
+local M = {}
+
+---@param symbol string
+---@return string left_padded_symbol
+local to2char = function(symbol)
+  if vim.fn.strchars(symbol) == 1 then
+    return symbol .. " "
+  else
+    return symbol
+  end
+end
+
+---@class (exact) neotree.Component.Common.Bufnr : neotree.Component
+---@field [1] "bufnr"?
+
+-- Config fields below:
+-- only works in the buffers component, but it's here so we don't have to defined
+-- multple renderers.
+---@param config neotree.Component.Common.Bufnr
+M.bufnr = function(config, node, _)
+  local highlight = config.highlight or highlights.BUFFER_NUMBER
+  local bufnr = node.extra and node.extra.bufnr
+  if not bufnr then
+    return {}
+  end
+  return {
+    text = string.format("#%s", bufnr),
+    highlight = highlight,
+  }
+end
+
+---@class (exact) neotree.Component.Common.Clipboard : neotree.Component
+---@field [1] "clipboard"?
+
+---@param config neotree.Component.Common.Clipboard
+M.clipboard = function(config, node, state)
+  local clipboard_state = state.clipboard[node:get_id()]
+  if not clipboard_state then
+    return {}
+  end
+  return {
+    text = " (" .. clipboard_state.action .. ")",
+    highlight = config.highlight or highlights.DIM_TEXT,
+  }
+end
+
+---@class (exact) neotree.Component.Common.Container : neotree.Component
+---@field [1] "container"?
+---@field left_padding integer?
+---@field right_padding integer?
+---@field enable_character_fade boolean?
+---@field content (neotree.Component|{zindex: number, align: "left"|"right"|nil})[]?
+
+M.container = container.render
+
+---@class (exact) neotree.Component.Common.CurrentFilter : neotree.Component
+---@field [1] "current_filter"
+
+---@param config neotree.Component.Common.CurrentFilter
+M.current_filter = function(config, node, _)
+  local filter = node.search_pattern or ""
+  if filter == "" then
+    return {}
+  end
+  return {
+    {
+      text = "Find",
+      highlight = highlights.DIM_TEXT,
+    },
+    {
+      text = string.format('"%s"', filter),
+      highlight = config.highlight or highlights.FILTER_TERM,
+    },
+    {
+      text = "in",
+      highlight = highlights.DIM_TEXT,
+    },
+  }
+end
+
+---`sign_getdefined` based wrapper with compatibility
+---@param severity string
+---@return vim.fn.sign_getdefined.ret.item
+local get_legacy_sign = function(severity)
+  local sign = vim.fn.sign_getdefined("DiagnosticSign" .. severity)
+  if vim.tbl_isempty(sign) then
+    -- backwards compatibility...
+    local old_severity = severity
+    if severity == "Warning" then
+      old_severity = "Warn"
+    elseif severity == "Information" then
+      old_severity = "Info"
+    end
+    sign = vim.fn.sign_getdefined("LspDiagnosticsSign" .. old_severity)
+  end
+  return sign and sign[1]
+end
+
+local nvim_0_10 = vim.fn.has("nvim-0.10") > 0
+---Returns the sign corresponding to the given severity
+---@param severity string
+---@return vim.fn.sign_getdefined.ret.item
+local function get_diagnostic_sign(severity)
+  local sign
+
+  if nvim_0_10 then
+    local signs = vim.diagnostic.config().signs
+
+    if type(signs) == "function" then
+      --TODO: Find a better way to get a namespace
+      local namespaces = vim.diagnostic.get_namespaces()
+      if not vim.tbl_isempty(namespaces) then
+        local ns_id = next(namespaces)
+        ---@cast ns_id -nil
+        signs = signs(ns_id, 0)
+      end
+    end
+
+    if type(signs) == "table" then
+      local identifier = severity:sub(1, 1)
+      if identifier == "H" then
+        identifier = "N"
+      end
+      sign = {
+        text = (signs.text or {})[vim.diagnostic.severity[identifier]],
+        texthl = "DiagnosticSign" .. severity,
+      }
+    elseif signs == true then
+      sign = get_legacy_sign(severity)
+    end
+  else -- before 0.10
+    sign = get_legacy_sign(severity)
+  end
+
+  if type(sign) ~= "table" then
+    sign = {}
+  end
+  return sign
+end
+
+---@class (exact) neotree.Component.Common.Diagnostics : neotree.Component
+---@field [1] "diagnostics"?
+---@field errors_only boolean?
+---@field hide_when_expanded boolean?
+---@field symbols table<string, string>?
+---@field highlights table<string, string>?
+
+---@param config neotree.Component.Common.Diagnostics
+M.diagnostics = function(config, node, state)
+  local diag = state.diagnostics_lookup or {}
+  local diag_state = utils.index_by_path(diag, node:get_id())
+  if config.hide_when_expanded and node.type == "directory" and node:is_expanded() then
+    return {}
+  end
+  if not diag_state then
+    return {}
+  end
+  if config.errors_only and diag_state.severity_number > 1 then
+    return {}
+  end
+  ---@type string
+  local severity = diag_state.severity_string
+  local sign = get_diagnostic_sign(severity)
+
+  -- check for overrides in the component config
+  local severity_lower = severity:lower()
+  if config.symbols and config.symbols[severity_lower] then
+    sign.texthl = sign.texthl or ("Diagnostic" .. severity)
+    sign.text = config.symbols[severity_lower]
+  end
+  if config.highlights and config.highlights[severity_lower] then
+    sign.text = sign.text or severity:sub(1, 1)
+    sign.texthl = config.highlights[severity_lower]
+  end
+
+  if sign.text and sign.texthl then
+    return {
+      text = to2char(sign.text),
+      highlight = sign.texthl,
+    }
+  else
+    return {
+      text = severity:sub(1, 1),
+      highlight = "Diagnostic" .. severity,
+    }
+  end
+end
+
+---@class (exact) neotree.Component.Common.GitStatus : neotree.Component
+---@field [1] "git_status"?
+---@field hide_when_expanded boolean?
+---@field symbols table<string, string>?
+
+---@param config neotree.Component.Common.GitStatus
+M.git_status = function(config, node, state)
+  local node_is_dir = node.type == "directory"
+  if node.type == "message" then
+    return {}
+  end
+
+  if node_is_dir and config.hide_when_expanded and node:is_expanded() then
+    return {}
+  end
+
+  local path = node.path
+  local worktree_root = git.find_existing_worktree(path)
+  local status, status_from_diff = git.find_existing_status_code(path, state.git_base_by_worktree)
+
+  if not status then
+    return {}
+  end
+
+  if type(status) == "table" then
+    status = status[1]
+  end
+
+  local symbols = config.symbols or {}
+  -- Whether the item is staged, unstaged, ignored/untracked, or from a base
+  local stage_sb
+  local stage_hl
+
+  -- What changed are in staging/working tree respectively
+  local staged_change_sb
+  local staged_change_hl
+  local worktree_change_sb
+  local worktree_change_hl
+
+  -- https://git-scm.com/docs/git-status#_output
+  -------------------------------------------------
+  -- ?           ?    untracked
+  -- !           !    ignored
+  if status == "?" then
+    stage_sb = symbols.untracked
+    stage_hl = highlights.GIT_UNTRACKED
+    return {
+      text = to2char(stage_sb),
+      highlight = stage_hl,
+    }
+  end
+
+  if status == "!" then
+    stage_sb = symbols.ignored
+    stage_hl = highlights.GIT_IGNORED
+    return {
+      text = to2char(stage_sb),
+      highlight = stage_hl,
+    }
+  end
+
+  -- x == staging area status
+  -- y == working area status
+  local x, y = status:sub(1, 1), status:sub(2, 2)
+  local is_conflict = false
+  if y == "." then
+    stage_sb = symbols.staged
+    stage_hl = highlights.GIT_STAGED
+  elseif x == "." then
+    stage_sb = symbols.unstaged
+    stage_hl = highlights.GIT_UNSTAGED
+  elseif git_parser.status_code_is_conflict(x, y) then
+    is_conflict = true
+    stage_sb = symbols.conflict
+    stage_hl = highlights.GIT_CONFLICT
+  end
+
+  -- all variations of merge conflicts
+  -- ----------------------------------------------
+  -- D           D    unmerged, both deleted
+  -- A           A    unmerged, both added
+  -- U           U    unmerged, both modified
+  -- A           U    unmerged, added by us
+  -- U           D    unmerged, deleted by them
+  -- U           A    unmerged, added by them
+  -- D           U    unmerged, deleted by us
+
+  -------------------------------------------------
+  --          [AMD]   not updated
+  -- M        [ MTD]  updated in index
+  -- T        [ MTD]  type changed in index
+  -- A        [ MTD]  added to index
+  -- D                deleted from index
+  -- R        [ MTD]  renamed in index
+  -- C        [ MTD]  copied in index
+  -- [MTARC]          index and work tree matches
+  -- [ MTARC]    M    work tree changed since index
+  -- [ MTARC]    T    type changed in work tree since index
+  -- [ MTARC]    D    deleted in work tree
+  --             R    renamed in work tree
+  --             C    copied in work tree
+  if #x > 0 and x ~= "." then
+    if x == "M" or x == "U" then
+      staged_change_sb = symbols.modified
+      staged_change_hl = highlights.GIT_MODIFIED
+    elseif x == "R" then
+      staged_change_sb = symbols.renamed
+      staged_change_hl = highlights.GIT_RENAMED
+    elseif x == "D" then
+      staged_change_sb = symbols.deleted
+      staged_change_hl = highlights.GIT_DELETED
+    else
+      staged_change_sb = symbols.added
+      staged_change_hl = highlights.GIT_ADDED
+    end
+  end
+
+  if not is_conflict and #y > 0 and y ~= "." then
+    if y == "M" or y == "U" then
+      worktree_change_sb = symbols.modified
+      worktree_change_hl = highlights.GIT_MODIFIED
+    elseif y == "R" then
+      worktree_change_sb = symbols.renamed
+      worktree_change_hl = highlights.GIT_RENAMED
+    elseif y == "D" then
+      worktree_change_sb = symbols.deleted
+      worktree_change_hl = highlights.GIT_DELETED
+    else
+      worktree_change_sb = symbols.added
+      worktree_change_hl = highlights.GIT_ADDED
+    end
+  end
+
+  if not staged_change_sb and not worktree_change_sb then
+    return {
+      text = "[" .. status .. "]",
+      highlight = config.highlight or worktree_change_hl or staged_change_hl,
+    }
+  end
+
+  local components = {}
+  if staged_change_sb and #staged_change_sb > 0 then
+    components[#components + 1] = {
+      text = to2char(staged_change_sb),
+      highlight = staged_change_hl,
+    }
+  end
+  if worktree_change_sb and #worktree_change_sb > 0 then
+    components[#components + 1] = {
+      text = to2char(worktree_change_sb),
+      highlight = worktree_change_hl,
+    }
+  end
+  local display_stage_sb = #components < 2 or is_conflict
+  if display_stage_sb and stage_sb and #stage_sb > 0 then
+    components[#components + 1] = {
+      text = to2char(stage_sb),
+      highlight = stage_hl,
+    }
+  end
+  return components
+end
+
+---@class neotree.Component.Common.FilteredBy
+---@field [1] "filtered_by"?
+---@param node neotree.FileNode
+M.filtered_by = function(_, node, state)
+  local fby = node.filtered_by
+  if not state.filtered_items or type(fby) ~= "table" then
+    return {}
+  end
+  repeat
+    if fby.name then
+      return {
+        text = "(hide by name)",
+        highlight = highlights.HIDDEN_BY_NAME,
+      }
+    elseif fby.pattern then
+      return {
+        text = "(hide by pattern)",
+        highlight = highlights.HIDDEN_BY_NAME,
+      }
+    elseif fby.gitignored then
+      return {
+        text = "(gitignored)",
+        highlight = highlights.GIT_IGNORED,
+      }
+    elseif fby.dotfiles then
+      return {
+        text = "(dotfile)",
+        highlight = highlights.DOTFILE,
+      }
+    elseif fby.ignored then
+      local _, fname = utils.split_path(fby.ignore_file)
+      return {
+        text = ("(ignored by %s)"):format(fname),
+        highlight = highlights.IGNORED,
+      }
+    elseif fby.hidden then
+      return {
+        text = "(hidden)",
+        highlight = highlights.WINDOWS_HIDDEN,
+      }
+    end
+    fby = fby.parent
+  until not state.filtered_items.children_inherit_highlights or not fby
+  return {}
+end
+
+---@class (exact) neotree.Component.Common.Icon : neotree.Component
+---@field [1] "icon"?
+---@field default string The default icon for a node.
+---@field folder_empty string The string to display to represent an empty folder.
+---@field folder_empty_open string The icon to display to represent an empty but open folder.
+---@field folder_open string The icon to display for an open folder.
+---@field folder_closed string The icon to display for a closed folder.
+---@field use_filtered_colors boolean Whether to use the same highlight as filtered_by when the item is filtered.
+---@field provider neotree.IconProvider?
+
+---@param config neotree.Component.Common.Icon
+M.icon = function(config, node, state)
+  -- calculate default icon
+  ---@type neotree.Render.Node
+  local icon =
+    { text = config.default or " ", highlight = config.highlight or highlights.FILE_ICON }
+  if node.type == "directory" then
+    icon.highlight = highlights.DIRECTORY_ICON
+    if node.loaded and not node:has_children() then
+      icon.text = not node.empty_expanded and config.folder_empty or config.folder_empty_open
+    elseif node:is_expanded() then
+      icon.text = config.folder_open or "-"
+    else
+      icon.text = config.folder_closed or "+"
+    end
+  end
+
+  -- use icon provider if available
+  if config.provider then
+    icon = config.provider(icon, node, state) or icon
+  end
+
+  icon.text = icon.text .. " " -- add padding
+  if config.use_filtered_colors then
+    local filtered_by = M.filtered_by(config, node, state)
+    icon.highlight = filtered_by.highlight or icon.highlight --  prioritize filtered highlighting
+  end
+
+  return icon
+end
+
+---@class (exact) neotree.Component.Common.Modified : neotree.Component
+---@field [1] "modified"?
+---@field symbol string?
+
+---@param config neotree.Component.Common.Modified
+M.modified = function(config, node, state)
+  local opened_buffers = state.opened_buffers or {}
+  local buf_info = utils.index_by_path(opened_buffers, node.path)
+
+  if buf_info and buf_info.modified then
+    return {
+      text = (to2char(config.symbol) or "[+]"),
+      highlight = config.highlight or highlights.MODIFIED,
+    }
+  else
+    return {}
+  end
+end
+
+---@class (exact) neotree.Component.Common.Name : neotree.Component
+---@field [1] "name"?
+---@field trailing_slash boolean?
+---@field use_git_status_colors boolean?
+---@field use_filtered_colors boolean? Whether to use the same highlight as filtered_by when the item is filtered.
+---@field highlight_opened_files boolean|"all"?
+---@field right_padding integer?
+
+---@param config neotree.Component.Common.Name
+M.name = function(config, node, state)
+  local highlight = config.highlight or highlights.FILE_NAME
+  local text = node.name
+  if node.type == "directory" then
+    highlight = highlights.DIRECTORY_NAME
+    if config.trailing_slash and text ~= "/" then
+      text = text .. "/"
+    end
+  end
+
+  if node:get_depth() == 1 and node.type ~= "message" then
+    highlight = highlights.ROOT_NAME
+    if state.current_position == "current" and state.sort and state.sort.label == "Name" then
+      local icon = state.sort.direction == 1 and "▲" or "▼"
+      text = text .. "  " .. icon
+    end
+  else
+    if config.use_filtered_colors then
+      local filtered_by = M.filtered_by(config, node, state)
+      highlight = filtered_by.highlight or highlight
+    end
+    if config.use_git_status_colors then
+      local git_status = state.components.git_status({}, node, state)
+      if git_status and git_status.highlight then
+        highlight = git_status.highlight
+      end
+    end
+  end
+
+  local hl_opened = config.highlight_opened_files
+  if hl_opened then
+    local opened_buffers = state.opened_buffers or {}
+    if
+      (hl_opened == "all" and opened_buffers[node.path])
+      or (opened_buffers[node.path] and opened_buffers[node.path].loaded)
+    then
+      highlight = highlights.FILE_NAME_OPENED
+    end
+  end
+
+  if type(config.right_padding) == "number" then
+    if config.right_padding > 0 then
+      text = text .. string.rep(" ", config.right_padding)
+    end
+  else
+    text = text
+  end
+
+  return {
+    text = text,
+    highlight = highlight,
+  }
+end
+
+---@class (exact) neotree.Component.Common.Indent : neotree.Component
+---@field [1] "indent"?
+---@field expander_collapsed string?
+---@field expander_expanded string?
+---@field expander_highlight string?
+---@field indent_marker string?
+---@field indent_size integer?
+---@field last_indent_marker string?
+---@field padding integer?
+---@field with_expanders boolean?
+---@field with_markers boolean?
+
+---@param config neotree.Component.Common.Indent
+M.indent = function(config, node, state)
+  if not state.skip_marker_at_level then
+    state.skip_marker_at_level = {}
+  end
+
+  local strlen = vim.fn.strdisplaywidth
+  local skip_marker = state.skip_marker_at_level
+  ---@cast skip_marker -nil
+  local indent_size = config.indent_size or 2
+  local padding = config.padding or 0
+  local level = node.level
+  local with_markers = config.with_markers
+  local with_expanders = config.with_expanders == nil and file_nesting.is_enabled()
+    or config.with_expanders
+  local marker_highlight = config.highlight or highlights.INDENT_MARKER
+  local expander_highlight = config.expander_highlight or config.highlight or highlights.EXPANDER
+
+  local function get_expander()
+    if with_expanders and utils.is_expandable(node) then
+      return node:is_expanded() and (config.expander_expanded or "")
+        or (config.expander_collapsed or "")
+    end
+  end
+
+  if indent_size == 0 or level < 2 or not with_markers then
+    local len = indent_size * level + padding
+    local expander = get_expander()
+    if level == 0 or not expander then
+      return {
+        text = string.rep(" ", len),
+      }
+    end
+    return {
+      text = string.rep(" ", len - strlen(expander) - 1) .. expander .. " ",
+      highlight = expander_highlight,
+    }
+  end
+
+  local indent_marker = config.indent_marker or "│"
+  local last_indent_marker = config.last_indent_marker or "└"
+
+  skip_marker[level] = node.is_last_child
+  local indent = {}
+  if padding > 0 then
+    table.insert(indent, { text = string.rep(" ", padding) })
+  end
+
+  for i = 1, level do
+    local char = ""
+    local spaces_count = indent_size
+    local highlight = nil
+
+    if i > 1 and not skip_marker[i] or i == level then
+      spaces_count = spaces_count - 1
+      char = indent_marker
+      highlight = marker_highlight
+      if i == level then
+        local expander = get_expander()
+        if expander then
+          char = expander
+          highlight = expander_highlight
+        elseif node.is_last_child then
+          char = last_indent_marker
+          spaces_count = spaces_count - (vim.api.nvim_strwidth(last_indent_marker) - 1)
+        end
+      end
+    end
+
+    table.insert(indent, {
+      text = char .. string.rep(" ", spaces_count),
+      highlight = highlight,
+      no_next_padding = true,
+    })
+  end
+
+  return indent
+end
+
+local truncate_string = function(str, max_length)
+  if #str <= max_length then
+    return str
+  end
+  return str:sub(1, max_length - 1) .. "…"
+end
+
+local get_header = function(state, label, size)
+  if state.sort and state.sort.label == label then
+    local icon = state.sort.direction == 1 and "▲" or "▼"
+    size = size - 2
+    ---diagnostic here is wrong, printf has arbitrary args.
+    ---@diagnostic disable-next-line: redundant-parameter
+    return vim.fn.printf("%" .. size .. "s %s  ", truncate_string(label, size), icon)
+  end
+  return vim.fn.printf("%" .. size .. "s  ", truncate_string(label, size))
+end
+
+---@class (exact) neotree.Component.Common.FileSize : neotree.Component
+---@field [1] "file_size"?
+---@field width integer?
+
+---@param config neotree.Component.Common.FileSize
+M.file_size = function(config, node, state)
+  -- Root node gets column labels
+  if node:get_depth() == 1 then
+    return {
+      text = get_header(state, "Size", config.width),
+      highlight = highlights.FILE_STATS_HEADER,
+    }
+  end
+
+  local text = "-"
+  if node.type == "file" then
+    local stat = utils.get_stat(node)
+    local size = stat and stat.size or nil
+    if size then
+      local success, human = pcall(utils.human_size, size)
+      if success then
+        text = human or text
+      end
+    end
+  end
+
+  return {
+    text = vim.fn.printf("%" .. config.width .. "s  ", truncate_string(text, config.width)),
+    highlight = config.highlight or highlights.FILE_STATS,
+  }
+end
+
+---@class (exact) neotree.Component.Common._Time : neotree.Component
+---@field format neotree.DateFormat
+---@field width integer?
+
+---@param config neotree.Component.Common._Time
+local file_time = function(config, node, state, stat_field)
+  -- Root node gets column labels
+  if node:get_depth() == 1 then
+    local label = stat_field
+    if stat_field == "mtime" then
+      label = "Last Modified"
+    elseif stat_field == "birthtime" then
+      label = "Created"
+    end
+    return {
+      text = get_header(state, label, config.width),
+      highlight = highlights.FILE_STATS_HEADER,
+    }
+  end
+
+  local stat = utils.get_stat(node)
+  local value = stat and stat[stat_field]
+  local seconds = value and value.sec or nil
+  local display = seconds and utils.date(config.format, seconds) or "-"
+
+  return {
+    text = vim.fn.printf("%" .. config.width .. "s  ", truncate_string(display, config.width)),
+    highlight = config.highlight or highlights.FILE_STATS,
+  }
+end
+
+---@class (exact) neotree.Component.Common.LastModified : neotree.Component.Common._Time
+---@field [1] "last_modified"?
+
+---@param config neotree.Component.Common.LastModified
+M.last_modified = function(config, node, state)
+  return file_time(config, node, state, "mtime")
+end
+
+---@class (exact) neotree.Component.Common.Created : neotree.Component.Common._Time
+---@field [1] "created"?
+
+---@param config neotree.Component.Common.Created
+M.created = function(config, node, state)
+  return file_time(config, node, state, "birthtime")
+end
+
+-- Compute relative path between two absolute paths
+-- Workaround for https://github.com/nvim-lua/plenary.nvim/issues/411
+local relative_path = function(from, to)
+  if utils.abspath_prefix(from) ~= utils.abspath_prefix(to) then
+    return from
+  end
+
+  local f = from
+  local t = to
+  local steps_out_count = 0
+  while f ~= t do
+    if #f > #t then
+      steps_out_count = steps_out_count + 1
+      f = utils.split_path(f)
+    elseif #f < #t then
+      t = utils.split_path(t)
+    else
+      steps_out_count = steps_out_count + 1
+      f = utils.split_path(f)
+      t = utils.split_path(t)
+    end
+  end
+
+  local common_dir = assert(f)
+  local steps_out = string.rep(".." .. utils.path_separator, steps_out_count)
+  local relpath = steps_out .. to:sub(#common_dir + 2)
+  return relpath
+end
+
+---@param node neotree.FileNode
+local get_relative_link_target = function(node, state)
+  local cwd = state.path
+  local path = node.type == "directory" and node.path or utils.split_path(node.path)
+  local target = utils.normalize_path(utils.path_join(path, node.link_to))
+
+  -- If target is inside cwd, make it relative
+  if utils.is_subpath(cwd, target) then
+    return relative_path(node.path, target)
+  end
+
+  return node.link_to
+end
+
+---@class (exact) neotree.Component.Common.SymlinkTarget : neotree.Component
+---@field [1] "symlink_target"?
+---@field text_format string?
+---@field target_display "auto"|"force_relative"|"force_absolute"?
+
+---@param config neotree.Component.Common.SymlinkTarget
+M.symlink_target = function(config, node, state)
+  if not node.is_link then
+    return {}
+  end
+
+  local target_display = config.target_display or "auto"
+  local target
+
+  if target_display == "force_absolute" then
+    if utils.abspath_prefix(node.link_to) then
+      target = node.link_to
+    else
+      local parent = utils.split_path(node.path)
+      target = utils.normalize_path(utils.path_join(parent, node.link_to))
+    end
+  elseif target_display == "force_relative" then
+    target = get_relative_link_target(node, state)
+  else -- "auto"
+    -- node.link_to already comes from uv.fs_readlink() in file-items.lua
+    target = node.link_to
+  end
+
+  return {
+    text = (config.text_format or "-> %s"):format(target),
+    highlight = config.highlight or highlights.SYMBOLIC_LINK_TARGET,
+  }
+end
+
+---@class (exact) neotree.Component.Common.Type : neotree.Component
+---@field [1] "type"?
+---@field width integer?
+
+---@param config neotree.Component.Common.Type
+M.type = function(config, node, state)
+  local text = node.ext or node.type
+  -- Root node gets column labels
+  if node:get_depth() == 1 then
+    return {
+      text = get_header(state, "Type", config.width),
+      highlight = highlights.FILE_STATS_HEADER,
+    }
+  end
+
+  return {
+    text = vim.fn.printf("%" .. config.width .. "s  ", truncate_string(text, config.width)),
+    highlight = highlights.FILE_STATS,
+  }
+end
+
+return M
