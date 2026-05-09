@@ -436,14 +436,26 @@ local prepare_node = function(item, state)
     return line
   end
 
-  local remaining_cols = state.win_width
-  if remaining_cols == nil then
-    if state.winid then
-      remaining_cols = vim.api.nvim_win_get_width(state.winid)
-    else
-      local default_width = utils.resolve_config_option(state, "window.width", 40)
-      remaining_cols = default_width
-    end
+  -- Always read the live window width here. Upstream cached
+  -- `state.win_width` and used the cache, but the cache went stale
+  -- whenever an outside actor (auto-finder's pin enforcement, the
+  -- user dragging a window border, `:wincmd =`) resized the panel
+  -- between renders. The cache value would still say "expanded
+  -- width = 60" after the window was clamped back to 38, and
+  -- right-aligned components landed at column 60 — past the
+  -- visible panel edge. This was the entire reason the v0.1.x
+  -- wrapper kept growing more sync helpers in `panel/host.lua`.
+  --
+  -- The cache writes at lines 1361 / 1427 / 1550 still happen for
+  -- post-render bookkeeping (the resize_timer at lines 72-78 reads
+  -- `state.win_width` to detect "did the window change since the
+  -- last render"). Those writes are correct as recorded snapshots;
+  -- the bug was only this read trusting the snapshot.
+  local remaining_cols
+  if state.winid and vim.api.nvim_win_is_valid(state.winid) then
+    remaining_cols = vim.api.nvim_win_get_width(state.winid)
+  else
+    remaining_cols = utils.resolve_config_option(state, "window.width", 40)
   end
 
   local wanted_width = 0
