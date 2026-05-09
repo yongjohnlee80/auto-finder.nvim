@@ -41,10 +41,23 @@ function M.setup(user_opts)
   -- Build / rebuild the section registry.
   require("auto-finder.sections").setup(cfg.sections)
 
+  -- Forward the consumer's `cfg.neo_tree` table to our forked
+  -- neo-tree's setup. Phase 5: this is what gets consumer-side
+  -- `filtered_items`, `components`, `window.auto_expand_width`, etc.
+  -- to the fork rather than the upstream `neo-tree.nvim` plugin —
+  -- which used to lose the race because both shipped `lua/neo-tree.lua`.
+  -- Calling our setup() unconditionally is idempotent (neo-tree's
+  -- ensure_config caches the merge result and won't re-merge unless
+  -- new_user_config was staged).
+  pcall(function()
+    require("auto-finder.neotree").setup(cfg.neo_tree or {})
+  end)
+
   -- If `repos` is enabled, register the auto-finder-repos source with
   -- neo-tree so `cmd.execute({ source = "auto-finder-repos" })` works.
   -- Order: section registry first (so we know whether repos is enabled),
-  -- then neo-tree registration before any section mount can fire.
+  -- then neo-tree setup (just above), THEN source registration before
+  -- any section mount can fire.
   if require("auto-finder.sections")._by_name["repos"] then
     M._register_neotree_workspace_source(cfg.repos)
   end

@@ -66,6 +66,21 @@ M.defaults = {
   -- time.
   repos = {},
   hijack_directories = true,
+  -- Forwarded as-is to `require("auto-finder.neotree").setup()`
+  -- before any section mounts. The forked neo-tree no longer needs
+  -- a separate consumer plugin spec — auto-finder's `setup()` calls
+  -- the fork's `setup()` with whatever you put here. Use it for
+  -- `window.auto_expand_width`, `filesystem.filtered_items`,
+  -- `filesystem.components`, `default_component_configs`, etc.
+  --
+  -- Phase 5 of the fork-neo-tree refactor (v0.1.3): consumer-side
+  -- `lua/plugins/neo-tree.lua` was deleted in autovim and its opts
+  -- moved here, because with both upstream `neo-tree.nvim` and
+  -- auto-finder's `lua/neo-tree/` shim shipping the same require
+  -- path, runtimepath ordering picked one or the other
+  -- non-deterministically. Routing through `cfg.neo_tree` gets the
+  -- consumer's opts to OUR fork unambiguously.
+  neo_tree = {},
 }
 
 ---@param cfg AutoFinderConfig

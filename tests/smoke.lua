@@ -42,16 +42,13 @@ end
 
 local function eq(a, b) return a == b, string.format("expected %s, got %s", tostring(b), tostring(a)) end
 
--- The forked neo-tree (auto-finder.neotree) needs a setup call
--- before we drive its command surface. `window.auto_expand_width =
--- true` mirrors AutoVim's consumer configuration so test [7d] can
--- verify that auto-finder snapshots that value at setup and restores
--- it on `panel reset` after a pin toggle.
---
--- The shim at `lua/neo-tree.lua` re-exports auto-finder.neotree, so
--- `require("neo-tree")` and `require("auto-finder.neotree")` resolve
--- to the same module. We use the fork's namespace explicitly here
--- so the test reads as "set up the fork", not "set up upstream".
+-- v0.1.3+: the forked neo-tree's setup is invoked by
+-- `auto-finder.setup()` via `cfg.neo_tree`. We pre-call it here just
+-- to confirm idempotency — auto-finder's setup() will re-call with
+-- whatever's in `cfg.neo_tree` and the merge_config path caches
+-- correctly. `window.auto_expand_width = true` mirrors AutoVim's
+-- consumer configuration so test [7d] can verify pin/auto-expand
+-- interaction.
 require("auto-finder.neotree").setup({
   window = { auto_expand_width = true },
   filesystem = { hijack_netrw_behavior = "disabled" },
@@ -68,6 +65,14 @@ local setup_ok, err = pcall(af.setup, {
   width = { default = 38, min = 25, max = 100 },
   default_section = 1,
   sections = { "config", "files" },
+  -- v0.1.3+: cfg.neo_tree forwards to auto-finder.neotree.setup().
+  -- Carrying the same opts the smoke prelude staged so test [7d]'s
+  -- pin/auto-expand assertion remains valid after auto-finder's
+  -- setup() re-applies neo-tree config.
+  neo_tree = {
+    window = { auto_expand_width = true },
+    filesystem = { hijack_netrw_behavior = "disabled" },
+  },
 })
 ok("setup returns without error", setup_ok, err)
 ok("state.config populated", af.state.config ~= nil)
@@ -220,6 +225,45 @@ ok("neo.config.window.auto_expand_width unchanged by pin (still true)",
 af.reset_width()
 ok("user_width cleared after reset", af.state.user_width == nil)
 af.focus(1)  -- back to files for the rest of the suite
+
+-- ─── 7e. right-aligned-icons regression guard ─────────────────────
+-- Bug from the v0.1.x wrapper era + Phase 4 manual testing: the
+-- forked renderer inherited upstream's clamp at `position == "current"`
+-- that capped `remaining_cols` at `longest_node + 4`. Right-aligned
+-- components (modified marker, diagnostics, git_status, file_size)
+-- positioned against THAT cap, leaving the right portion of any
+-- panel wider than the longest filename empty.
+--
+-- Removed the clamp in v0.1.3 (renderer.lua line ~462). This test
+-- guards the source structure: if anyone re-introduces the clamp
+-- via an upstream sync, this fails with a clear pointer.
+--
+-- A behavioral test (mount, render, inspect rendered line widths)
+-- was tried first but was timing-dependent on neo-tree's async
+-- mount and unreliable in headless. The source-grep is structurally
+-- reliable and unambiguous about the bug it's guarding.
+print("\n[7e] regression: position=current no longer clamps to longest+4")
+
+local renderer_path = vim.fn.expand(
+  "/home/johno/Source/Projects/nvim-plugins/auto-finder.nvim/lua/auto-finder/neotree/ui/renderer.lua")
+local renderer_src = vim.fn.readfile(renderer_path)
+local clamp_line, clamp_lineno
+for i, line in ipairs(renderer_src) do
+  -- Match the pattern `math.min(remaining_cols, …, longest_node + 4)`
+  -- in any form. Comment-only references are fine — those are the
+  -- "we removed this on purpose" notes.
+  if not line:match("^%s*%-%-")
+      and (line:match("math%.min%s*%(%s*remaining_cols.*longest")
+        or (line:match("remaining_cols%s*=%s*math%.min")
+            and line:match("longest"))) then
+    clamp_line = line
+    clamp_lineno = i
+    break
+  end
+end
+ok("forked renderer does NOT clamp remaining_cols to longest_node+4",
+  clamp_line == nil,
+  clamp_line and ("found clamp at renderer.lua:" .. clamp_lineno .. " → " .. clamp_line) or "")
 
 -- 7c. New panel verbs: dynamic alias and panel show
 print("\n[7c] panel dynamic + panel show")

@@ -459,10 +459,18 @@ local prepare_node = function(item, state)
   end
 
   local wanted_width = 0
-  if state.current_position == "current" then
-    local longest = state.longest_node or 0
-    remaining_cols = math.min(remaining_cols, longest + 4)
-  end
+  -- Auto-finder fork: removed the upstream `state.current_position
+  -- == "current"` clamp that capped `remaining_cols` at
+  -- `longest_node + 4`. That clamp made sense for upstream's
+  -- `position = "current"` use case (mounting into someone else's
+  -- buffer where you don't own the trailing space) but in our case
+  -- we own the panel — anything past the longest filename SHOULD
+  -- be available for right-aligned components (modified marker,
+  -- diagnostics, git_status, file_size). The clamp left the right
+  -- portion of the panel empty no matter how wide it grew.
+  --
+  -- `remaining_cols` is now just the live window width; right-
+  -- aligned components position against the actual panel edge.
 
   local should_pad = false
 
