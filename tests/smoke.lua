@@ -98,6 +98,11 @@ ok("resolve_width(cols=600) returns same default (no percentage)",
 af.open(true)
 local panel = af.state.panel_winid
 ok("panel_winid set", panel ~= nil and vim.api.nvim_win_is_valid(panel))
+-- v0.1.4: `w:auto_finder_panel` marker so sibling plugins (notably
+-- auto-agents's editor-floor invariant) can identify the panel
+-- without depending on filetype, which churns across our sections.
+ok("panel carries w:auto_finder_panel = 1",
+  panel and vim.w[panel].auto_finder_panel == 1)
 local live_w = panel and vim.api.nvim_win_get_width(panel) or -1
 -- `af.open(true)` opens AND focuses the default section (files). Mounting
 -- the filesystem source can fire auto_expand_width which grows the panel

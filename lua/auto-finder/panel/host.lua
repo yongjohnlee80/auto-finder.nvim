@@ -156,6 +156,15 @@ function M.ensure_open(cfg, state, force)
   state.panel_winid = winid
   set_panel_width(state, width)
 
+  -- Window-local marker mirroring auto-agents.nvim's
+  -- `w:auto_agents_panel` pattern. Sibling plugins (notably
+  -- auto-agents's editor-floor invariant) detect "this is auto-
+  -- finder's panel, not an editor window" by reading
+  -- `w:auto_finder_panel`. The filetype-based fallback they have
+  -- (`auto-finder` / `auto-finder-config`) covers older versions
+  -- without the marker, but the marker is the more robust signal.
+  pcall(vim.api.nvim_win_set_var, winid, "auto_finder_panel", 1)
+
   -- Window-local appearance: drop signs/numbers/foldcolumn — the
   -- explorer doesn't benefit from any of them.
   vim.api.nvim_set_option_value("number", false, { win = winid })
