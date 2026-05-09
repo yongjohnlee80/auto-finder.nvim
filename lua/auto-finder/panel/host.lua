@@ -289,6 +289,13 @@ function M.focus(cfg, state, key)
   end
 
   M.refresh_winbar(state)
+  -- Catch-up redraw: a `panel resize N` issued while this section was
+  -- hidden (e.g. user was on `config` when they resized, then switched
+  -- to `files`) leaves the tree's lines computed against the old
+  -- width because tree_is_visible was false during the resize-time
+  -- redraw. Poke once on focus so right-aligned components reflow to
+  -- the current panel width before the user even sees the section.
+  poke_neotree_redraw()
   return true, nil
 end
 
