@@ -21,7 +21,7 @@
 ---worktree.nvim).
 ---@module 'auto-finder-repos'
 
-local renderer = require("neo-tree.ui.renderer")
+local renderer = require("auto-finder.neotree.ui.renderer")
 
 local M = {
   name = "auto-finder-repos",
@@ -285,7 +285,7 @@ local function git_common_dir(repo)
 end
 
 local function refresh_open_window()
-  local mgr_ok, manager = pcall(require, "neo-tree.sources.manager")
+  local mgr_ok, manager = pcall(require, "auto-finder.neotree.sources.manager")
   if not mgr_ok then return end
   local state = manager.get_state and manager.get_state(M.name)
   if state and state.winid and vim.api.nvim_win_is_valid(state.winid) then

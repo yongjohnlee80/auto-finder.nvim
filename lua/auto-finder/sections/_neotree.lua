@@ -23,7 +23,7 @@ local M = {}
 ---once on first section load so any caller of `get_expanded_nodes(nil)`
 ---gets `{}` back instead of crashing the whole UI.
 local function patch_neotree_renderer_nil_tree()
-  local ok, renderer = pcall(require, "neo-tree.ui.renderer")
+  local ok, renderer = pcall(require, "auto-finder.neotree.ui.renderer")
   if not ok or type(renderer) ~= "table" then return end
   if renderer._auto_finder_patched then return end
   local orig = renderer.get_expanded_nodes
@@ -48,7 +48,7 @@ local function mount(panel_winid, source, section_label)
   -- focus the panel first so the buffer lands here.
   pcall(vim.api.nvim_set_current_win, panel_winid)
 
-  local ok, cmd = pcall(require, "neo-tree.command")
+  local ok, cmd = pcall(require, "auto-finder.neotree.command")
   if not ok then
     vim.notify(
       "auto-finder: neo-tree is not installed; the '" .. section_label ..
@@ -76,13 +76,13 @@ local function mount(panel_winid, source, section_label)
   end
   -- Wait briefly for neo-tree's async mount to settle. The buffer-
   -- swap into our panel is synchronous, but on the very first mount
-  -- the buffer may not yet have filetype="neo-tree" at this exact
+  -- the buffer may not yet have filetype="auto-finder.neotree" at this exact
   -- tick — caching the scratch bufnr in that case would let the
   -- bounce-back guard restore the wrong thing later.
   vim.wait(200, function()
     if not vim.api.nvim_win_is_valid(panel_winid) then return false end
     local b = vim.api.nvim_win_get_buf(panel_winid)
-    return vim.bo[b].filetype == "neo-tree"
+    return vim.bo[b].filetype == "auto-finder.neotree"
   end, 5)
 
   -- Re-sync neo-tree's auto_expand_width to whatever the current pin

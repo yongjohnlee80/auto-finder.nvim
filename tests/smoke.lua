@@ -6,17 +6,27 @@
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 for _, p in ipairs({
   "/home/johno/Source/Projects/nvim-plugins/auto-finder.nvim",
-  LAZY .. "/neo-tree.nvim",
   LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
 }) do
   vim.opt.runtimepath:prepend(p)
 end
+-- Auto-finder ships its own forked neo-tree at lua/auto-finder/neotree.
+-- Upstream `neo-tree.nvim` is intentionally NOT on the runtimepath
+-- here so the test exercises the actual fork rather than the
+-- bundled-in-lazy upstream copy.
 
 vim.o.columns = 200
 vim.o.lines = 60
 vim.o.swapfile = false
 vim.o.hidden = true
+
+-- Isolate from the user's real nvim state. Without this, test [2]
+-- loads `~/.config/nvim/.auto-finder/config.json` (the user's actual
+-- pinned width from real sessions) and the "panel width = default
+-- (38)" assertion fails as soon as the user has ever pinned a width.
+vim.fn.delete("/tmp/auto-finder-smoke-config-default", "rf")
+vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-default"
 
 local fail_count = 0
 local pass_count = 0
@@ -32,12 +42,17 @@ end
 
 local function eq(a, b) return a == b, string.format("expected %s, got %s", tostring(b), tostring(a)) end
 
--- neo-tree needs a setup call before we drive its command surface.
--- We force `window.auto_expand_width = true` here to mirror what
--- real consumers (AutoVim) configure — and so test [7d] can verify
--- that auto-finder snapshots that value at setup time and restores
+-- The forked neo-tree (auto-finder.neotree) needs a setup call
+-- before we drive its command surface. `window.auto_expand_width =
+-- true` mirrors AutoVim's consumer configuration so test [7d] can
+-- verify that auto-finder snapshots that value at setup and restores
 -- it on `panel reset` after a pin toggle.
-require("neo-tree").setup({
+--
+-- The shim at `lua/neo-tree.lua` re-exports auto-finder.neotree, so
+-- `require("neo-tree")` and `require("auto-finder.neotree")` resolve
+-- to the same module. We use the fork's namespace explicitly here
+-- so the test reads as "set up the fork", not "set up upstream".
+require("auto-finder.neotree").setup({
   window = { auto_expand_width = true },
   filesystem = { hijack_netrw_behavior = "disabled" },
 })
@@ -79,7 +94,11 @@ af.open(true)
 local panel = af.state.panel_winid
 ok("panel_winid set", panel ~= nil and vim.api.nvim_win_is_valid(panel))
 local live_w = panel and vim.api.nvim_win_get_width(panel) or -1
-ok("panel width matches default (38)", live_w == 38, "live=" .. live_w)
+-- `af.open(true)` opens AND focuses the default section (files). Mounting
+-- the filesystem source can fire auto_expand_width which grows the panel
+-- past the resting default. So we assert ≥ default rather than equality
+-- here. Pin enforcement is verified end-to-end in test [7] / [7b].
+ok("panel width >= default (38)", live_w >= 38, "live=" .. live_w)
 ok("winfixwidth set", panel and vim.wo[panel].winfixwidth == true)
 
 -- ───────────────────────── 3. focus(1) mounts neo-tree ─────────────

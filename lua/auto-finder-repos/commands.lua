@@ -6,9 +6,9 @@
 ---ported into auto-finder for the v0.1.2 repos section.
 ---@module 'auto-finder-repos.commands'
 
-local cc = require("neo-tree.sources.common.commands")
+local cc = require("auto-finder.neotree.sources.common.commands")
 local source = require("auto-finder-repos")
-local utils = require("neo-tree.utils")
+local utils = require("auto-finder.neotree.utils")
 
 local M = {}
 

@@ -8,8 +8,8 @@
 ---ported into auto-finder for the v0.1.2 repos section.
 ---@module 'auto-finder-repos.components'
 
-local highlights = require("neo-tree.ui.highlights")
-local common = require("neo-tree.sources.common.components")
+local highlights = require("auto-finder.neotree.ui.highlights")
+local common = require("auto-finder.neotree.sources.common.components")
 
 local M = {}
 

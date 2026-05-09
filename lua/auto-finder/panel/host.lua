@@ -60,7 +60,7 @@ end
 ---@param width integer
 local function set_panel_width(state, width)
   state.panel_width = width
-  local ok, neo = pcall(require, "neo-tree")
+  local ok, neo = pcall(require, "auto-finder.neotree")
   if ok and type(neo.config) == "table" and type(neo.config.window) == "table" then
     neo.config.window.width = width
   end
@@ -70,7 +70,7 @@ local function set_panel_width(state, width)
   -- positions them against a stale state.win_width that was set
   -- when auto_expand_width grew the window above auto-finder's
   -- pin.
-  local ok_mgr, manager = pcall(require, "neo-tree.sources.manager")
+  local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
   if ok_mgr and type(manager._for_each_state) == "function"
       and state.panel_winid and vim.api.nvim_win_is_valid(state.panel_winid) then
     pcall(manager._for_each_state, nil, function(s)
@@ -124,7 +124,7 @@ function M.ensure_open(cfg, state, force)
   local placement = "topleft"
   -- The new vsplit inherits the source window's buffer. If we were sitting
   -- in a neo-tree window (e.g. the autostart from `nvim .`), the panel
-  -- would arrive carrying a buffer with `filetype = "neo-tree"` and a
+  -- would arrive carrying a buffer with `filetype = "auto-finder.neotree"` and a
   -- `neo_tree_position` buffer var. neo-tree's command override
   -- (command/init.lua:155) then rewrites any subsequent
   -- `position = "current"` to whatever the inherited buffer says — and
@@ -297,7 +297,7 @@ local original_auto_expand = nil
 
 local function snapshot_auto_expand_default()
   if original_auto_expand ~= nil then return end
-  local ok, neo = pcall(require, "neo-tree")
+  local ok, neo = pcall(require, "auto-finder.neotree")
   if not ok then
     original_auto_expand = false  -- neo-tree's own default (defaults.lua:391)
     return
@@ -332,7 +332,7 @@ end
 local function set_neotree_auto_expand(enabled)
   snapshot_auto_expand_default()
   -- 1. Update the global config so future state creations inherit it.
-  local ok_neo, neo = pcall(require, "neo-tree")
+  local ok_neo, neo = pcall(require, "auto-finder.neotree")
   if ok_neo and type(neo.ensure_config) == "function" then
     pcall(neo.ensure_config)
   end
@@ -342,7 +342,7 @@ local function set_neotree_auto_expand(enabled)
   -- 2. Mutate every live filesystem state so the next render — even
   -- one already mid-flight from neo-tree's setup pipeline — picks up
   -- the new value. This is what actually breaks the ping-pong.
-  local ok_mgr, manager = pcall(require, "neo-tree.sources.manager")
+  local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
   if ok_mgr and type(manager._for_each_state) == "function" then
     pcall(manager._for_each_state, "filesystem", function(state)
       if type(state.window) == "table" then

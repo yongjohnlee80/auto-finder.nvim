@@ -80,7 +80,7 @@ function M.setup(user_opts)
   -- recover after the next resize/reset call.
   require("auto-finder.panel.host")._sync_neotree_auto_expand(M.state)
   if persisted.files then
-    local ok, neo = pcall(require, "neo-tree")
+    local ok, neo = pcall(require, "auto-finder.neotree")
     if ok and type(neo.config) == "table" then
       neo.config.filesystem = neo.config.filesystem or {}
       neo.config.filesystem.filtered_items = neo.config.filesystem.filtered_items or {}
@@ -176,7 +176,7 @@ end
 ---`default_config` and the consumer's `cfg.repos` are layered on top.
 ---@param extra table?  -- consumer overrides to merge atop the source defaults
 function M._register_neotree_workspace_source(extra)
-  local ok_neo, neo = pcall(require, "neo-tree")
+  local ok_neo, neo = pcall(require, "auto-finder.neotree")
   if not ok_neo then return end
   if type(neo.ensure_config) == "function" then
     pcall(neo.ensure_config)
@@ -226,7 +226,7 @@ function M._register_neotree_workspace_source(extra)
   -- Run the manager-side setup so `manager.get_state("auto-finder-repos")`
   -- can find us, and so the source's own `setup()` (no-op for us) is
   -- invoked symmetrically with neo-tree's built-in sources.
-  local ok_mgr, manager = pcall(require, "neo-tree.sources.manager")
+  local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
   if ok_mgr and type(manager.setup) == "function" then
     pcall(manager.setup, "auto-finder-repos", source_config, neo.config, src)
   end

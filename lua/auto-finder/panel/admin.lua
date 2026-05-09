@@ -54,9 +54,9 @@ end
 ---@param show boolean
 ---@return string|nil err
 local function set_files_filter(what, show)
-  local ok, neo = pcall(require, "neo-tree")
-  if not ok then return "neo-tree is not installed" end
-  if type(neo.config) ~= "table" then return "neo-tree config is not loaded yet" end
+  local ok, neo = pcall(require, "auto-finder.neotree")
+  if not ok then return "auto-finder.neotree is not installed" end
+  if type(neo.config) ~= "table" then return "auto-finder.neotree config is not loaded yet" end
   neo.config.filesystem = neo.config.filesystem or {}
   local fi = neo.config.filesystem.filtered_items or {}
   if what == "hidden" then
