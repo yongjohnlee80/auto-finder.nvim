@@ -388,6 +388,18 @@ ok("narrow winbar drops unfocused labels",
   narrow:find("config") == nil,
   narrow)
 
+-- Winbar prefix should identify the panel context — "Finder (<focused>)"
+-- in full mode, "AF │" in compact (smoke regression for the v0.1.3
+-- "guard the winbar" fix; without it users couldn't tell at a glance
+-- whether they were sitting in our panel vs a hijacked snacks/oil
+-- split that happened to have a similar look).
+ok("winbar full-mode shows 'Finder (<focused-section>)' prefix",
+  rendered:find("Finder %(files%)") ~= nil,
+  rendered)
+ok("winbar compact-mode shows 'AF' prefix",
+  narrow:find("AF") ~= nil,
+  narrow)
+
 local admin = require("auto-finder.panel.admin")
 -- complete_at on an empty prompt → top-level verbs.
 local _, top_cands = admin._complete_at("", 0)

@@ -28,11 +28,26 @@ end
 function M.render(focused, sections, available_width)
   if not sections or #sections == 0 then return "" end
 
+  -- Find the focused section's name so the prefix can identify which
+  -- panel context the buffer is showing — e.g. "Finder (files)".
+  -- Acts as both visual confirmation that this window is the auto-
+  -- finder panel (as opposed to a hijacked snacks/oil/neo-tree split)
+  -- and a quick reference for the active section.
+  local focused_name = "?"
+  for _, s in ipairs(sections) do
+    if s.number == focused then
+      focused_name = s.name
+      break
+    end
+  end
+  local prefix_full = string.format(" Finder (%s) │", focused_name)
+  local prefix_compact = " AF │"
+
   -- Three rendering modes by available width:
   --
-  --   FULL    " 0: config "  " 1: files " ...   labels for everyone
-  --   FOCUSED " 0 "  "[1: files]"  " 2 " ...    label only for focused
-  --   COMPACT " 0 "  "[1]"  " 2 "  " 3 " ...    just numbers, focused bracketed
+  --   FULL    "Finder (files) │ 0: config  [1: files] ..."   labels for everyone
+  --   FOCUSED "Finder (files) │ 0  [1: files] ..."           label only for focused
+  --   COMPACT "AF │ 0  [1]  2 ..."                           prefix shrinks too
   --
   -- We pick the widest one that fits in `available_width`.
   local function len_full()
@@ -40,7 +55,7 @@ function M.render(focused, sections, available_width)
     for _, s in ipairs(sections) do
       n = n + 4 + #tostring(s.number) + #s.name
     end
-    return n + (#sections - 1)
+    return #prefix_full + 1 + n + (#sections - 1)
   end
   local function len_focused_only()
     local n = 0
@@ -51,7 +66,7 @@ function M.render(focused, sections, available_width)
         n = n + 3  -- " N "
       end
     end
-    return n + (#sections - 1)
+    return #prefix_full + 1 + n + (#sections - 1)
   end
 
   local mode = "full"
@@ -61,6 +76,7 @@ function M.render(focused, sections, available_width)
     end
   end
 
+  local prefix = mode == "compact" and prefix_compact or prefix_full
   local parts = {}
   for _, s in ipairs(sections) do
     local text
@@ -83,13 +99,17 @@ function M.render(focused, sections, available_width)
         s.number, text)
     )
   end
-  return table.concat(parts, " ")
+  return string.format("%%#AutoFinderPanelTitle#%s%%* %s",
+    prefix, table.concat(parts, " "))
 end
 
 ---Ensure default highlight links exist. Idempotent.
 function M.ensure_highlights()
   if vim.fn.hlexists("AutoFinderSectionActive") == 0 then
     vim.api.nvim_set_hl(0, "AutoFinderSectionActive", { link = "Title", default = true })
+  end
+  if vim.fn.hlexists("AutoFinderPanelTitle") == 0 then
+    vim.api.nvim_set_hl(0, "AutoFinderPanelTitle", { link = "Special", default = true })
   end
 end
 
