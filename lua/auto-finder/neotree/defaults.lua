@@ -4,11 +4,14 @@ local config = {
   -- Only sources listed here will be loaded.
   -- You can also add an external source by adding it's name to this list.
   -- The name used here must be the same name you would use in a require() call.
+  -- Auto-finder fork: dropped `buffers`, `git_status`, and
+  -- `document_symbols` SOURCES (the standalone tree-of-X panels). The
+  -- `git_status` COMPONENT (M/?/A markers next to filenames in the
+  -- file tree) is kept under `sources/common/components.lua`.
+  -- Auto-finder's own custom source `auto-finder-repos` is registered
+  -- via `auto-finder.init.M._register_neotree_workspace_source`.
   sources = {
     "filesystem",
-    "buffers",
-    "git_status",
-    -- "document_symbols",
   },
   add_blank_line_at_top = false, -- Add a blank line at the top of the tree.
   auto_clean_after_session_restore = false, -- Automatically clean up broken neo-tree buffers saved in sessions
@@ -72,8 +75,6 @@ local config = {
                                            -- of the top visible node when scrolled down.
     sources = {
       { source = "filesystem" },
-      { source = "buffers" },
-      { source = "git_status" },
     },
     content_layout = "start", -- only with `tabs_layout` = "equal", "active"
     --                start  : |/ 󰓩 bufname     \/...

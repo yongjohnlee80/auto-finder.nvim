@@ -97,11 +97,12 @@ M.migrate = function(config)
   removed("filesystem.filters.gitignore_source")
   removed("filesystem.filter_items.gitignore_source")
   renamed_value("filesystem.hijack_netrw_behavior", "open_split", "open_current")
-  for _, source in ipairs({ "filesystem", "buffers", "git_status" }) do
-    renamed_value(source .. "window.position", "split", "current")
-  end
+  -- Auto-finder fork: scoped to `filesystem` only. The `buffers` and
+  -- `git_status` SOURCES are gone; their deprecation paths drop with
+  -- them. (Anyone migrating from upstream neo-tree configs would have
+  -- already removed those source-specific keys.)
+  renamed_value("filesystem.window.position", "split", "current")
   moved_inside("filesystem.follow_current_file", "enabled")
-  moved_inside("buffers.follow_current_file", "enabled")
 
   -- v3.x
   removed("close_floats_on_escape_key")

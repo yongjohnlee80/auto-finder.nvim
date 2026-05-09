@@ -289,31 +289,11 @@ function M.check_config(config)
           validate("fuzzy_finder_mappings", window.fuzzy_finder_mappings, "table") -- TODO: More specific validation
         end)
       end)
-      validate("buffers", cfg.buffers, function(buffers)
-        validate("bind_to_cwd", buffers.bind_to_cwd, "boolean")
-        validate(
-          "follow_current_file",
-          buffers.follow_current_file,
-          schema.Filesystem.FollowCurrentFile
-        )
-        validate("group_empty_dirs", buffers.group_empty_dirs, "boolean")
-        validate("show_unloaded", buffers.show_unloaded, "boolean")
-        validate("terminals_first", buffers.terminals_first, "boolean")
-        validate("renderers", buffers.renderers, schema.Renderers)
-        validate("window", buffers.window, schema.Window)
-      end)
-      validate("git_status", cfg.git_status, function(git_status)
-        validate("renderers", git_status.renderers, schema.Renderers)
-        validate("window", git_status.window, schema.Window)
-      end)
-      validate("document_symbols", cfg.document_symbols, function(ds)
-        validate("follow_cursor", ds.follow_cursor, "boolean")
-        validate("client_filters", ds.client_filters, { "string", "table" }) -- TODO: More specific validation
-        validate("custom_kinds", ds.custom_kinds, "table") -- TODO: More specific validation
-        validate("kinds", ds.kinds, "table")
-        validate("renderers", ds.renderers, schema.Renderers)
-        validate("window", ds.window, schema.Window)
-      end)
+      -- Auto-finder fork: dropped validators for `buffers`,
+      -- `git_status`, and `document_symbols` SOURCES (we don't ship
+      -- those panels). The `git_status` COMPONENT inside the file
+      -- renderer is unaffected — its config validation lives under
+      -- `default_component_configs.git_status` below.
       validate("clipboard", cfg.clipboard, function(clip)
         validate("sync", clip.sync, function(sync)
           if type(sync) == "string" then
