@@ -73,12 +73,20 @@ local function set_files_filter(what, show)
     return "unknown filter '" .. tostring(what) .. "' (try hidden|dotfiles)"
   end
   neo.config.filesystem.filtered_items = fi
-  -- Persist so the filter survives nvim restart.
-  local store = require("auto-finder.store")
-  if what == "hidden" then
-    store.update({ files = { hide_gitignored = not show } })
-  else
-    store.update({ files = { hide_dotfiles = not show } })
+  -- Persist via the canonical auto-core.files prefs so a `files
+  -- show/hide` toggle here also propagates to other consumers
+  -- (md-harpoon's snacks-picker invocation, future plugins). No
+  -- more local store.update — the canonical prefs live in
+  -- state.namespace("core") files.show_hidden / files.show_dotfiles.
+  -- Note the negative→positive flip: store used `hide_*`, auto-core
+  -- uses `show_*`.
+  local ok_core, core = pcall(require, "auto-core")
+  if ok_core and core and core.files then
+    if what == "hidden" then
+      core.files.set_show_hidden(show == true)
+    else
+      core.files.set_show_dotfiles(show == true)
+    end
   end
   return nil
 end

@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.1.4"
+M.version = "0.2.0"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -62,15 +62,35 @@ function M.setup(user_opts)
     M._register_neotree_workspace_source(cfg.repos)
   end
 
-  -- Restore persisted user state (panel pin, last section, files
-  -- filter prefs). Missing or malformed files fall back to defaults
-  -- silently — see auto-finder.store for the schema.
+  -- v0.2.0 step 2/4: panel.user_width and panel.last_section now live
+  -- in auto-core.state.namespace("auto-finder") with json persist —
+  -- see lua/auto-finder/state.lua. The legacy
+  -- `<config>/.auto-finder/config.json` keeps the `files.*` filter
+  -- prefs for now; future cleanup migrates them.
+  --
+  -- Sequence:
+  --   1. Claim the namespace (idempotent).
+  --   2. **Validated** seed from the legacy store's `panel` block —
+  --      width-range against cfg.width.min/max here, section-registry
+  --      against the live registry. Out-of-range values warn and fall
+  --      through to namespace default. (The store save path strips
+  --      panel.user_width / panel.last_section on next save, so legacy
+  --      values eventually drain from the JSON file.)
+  --   3. Read the namespace back into M.state.user_width / M.state.section
+  --      so the existing reader sites (winbar status, neo-tree pin
+  --      check, M.open default-section fallback) keep working unchanged.
+  --   4. Install watchers that re-mirror namespace → M.state on every
+  --      mutation. Setters in panel/host.lua go through state_mod.set_*
+  --      and trigger this.
+  local state_mod = require("auto-finder.state")
+  state_mod.setup()
+
   local persisted = require("auto-finder.store").load()
   if persisted.panel then
     if type(persisted.panel.user_width) == "number"
         and persisted.panel.user_width >= cfg.width.min
         and persisted.panel.user_width <= cfg.width.max then
-      M.state.user_width = persisted.panel.user_width
+      state_mod.set_user_width(persisted.panel.user_width)
     end
     -- Restore the last-active section so the panel reopens on the
     -- same slot the user was on. Validated against the live section
@@ -78,13 +98,186 @@ function M.setup(user_opts)
     -- falls back to default_section.
     if type(persisted.panel.last_section) == "number"
         and require("auto-finder.sections").resolve(persisted.panel.last_section) then
-      M.state.section = persisted.panel.last_section
+      state_mod.set_last_section(persisted.panel.last_section)
     end
     -- The `side` field was removed from the config. We deliberately do
     -- NOT apply persisted.panel.side here — the panel is always
     -- left-anchored now. Old store files containing `side` are left
     -- intact on disk so a downgrade still finds them.
   end
+
+  -- Read namespace values into the live runtime mirrors.
+  M.state.user_width = state_mod.get_user_width()
+  M.state.section    = state_mod.get_last_section()
+
+  -- v0.2.0 step 3: claim the auto-core.ui.panel singleton. The marker
+  -- name "auto-finder" produces `w:auto_finder_panel` after auto-core's
+  -- `[^%w_]` -> `_` substitution — identical to the prior local marker
+  -- so external readers (auto-agents's editor-floor invariant +
+  -- filetype-fallback) keep working without changes. Panel also stamps
+  -- the canonical `w:auto_core_panel_name = "auto-finder"` in parallel
+  -- (the new universal hook).
+  --
+  -- on_open / on_close mirror the auto-core-owned winid back into
+  -- M.state.panel_winid so the existing reader sites (panel_is_open
+  -- in panel/host.lua, refresh_winbar's winid lookup, etc.) keep
+  -- working unchanged.
+  local panel_mod = require("auto-core").ui.panel
+  M._panel = panel_mod.new({
+    name     = "auto-finder",
+    side     = "left",  -- hard-coded; the right slot is auto-agents.
+    width    = {
+      default = cfg.width.default,
+      min     = cfg.width.min,
+      max     = cfg.width.max,
+    },
+    -- filetype intentionally nil: each section mounts its own buffer
+    -- with its own filetype (`auto-finder` for the neo-tree mounts,
+    -- `auto-finder-config` for the prompt section). Setting a host
+    -- filetype on the scratch placeholder would conflict with the
+    -- inherit-guard test ([9]) and confuse neo-tree's command
+    -- override which keys off the source-window's filetype.
+    on_open  = function(winid)
+      M.state.panel_winid = winid
+      M.state.panel_width = vim.api.nvim_win_get_width(winid)
+    end,
+    on_close = function()
+      M.state.panel_winid = nil
+      -- Section on_close fanout: every cached section gets a chance
+      -- to tear down external resources before the panel buffers go
+      -- stale (notably: the files section deletes its cached
+      -- neo-tree buffer so the next reopen re-mounts fresh; without
+      -- this, neo-tree's win_enter redirect crashes on
+      -- `attempt to index local 'tree' (a nil value)`).
+      --
+      -- We mutate `_bufs` in place rather than reassigning so the
+      -- `state.section_buffers` alias stays valid.
+      if M._registry then
+        for _, s in ipairs(M._registry.sections) do
+          local b = M._registry._bufs[s.number]
+          if b and vim.api.nvim_buf_is_valid(b) and s.on_close then
+            pcall(s.on_close, b)
+          end
+        end
+        for k in pairs(M._registry._bufs) do
+          M._registry._bufs[k] = nil
+        end
+      end
+    end,
+  })
+  -- Apply any persisted width pin so the very first open uses it.
+  if M.state.user_width then M._panel:resize(M.state.user_width) end
+
+  -- v0.2.0 step 4: attach the auto-core section registry. Each
+  -- auto-finder section is adapted to auto-core's contract — the
+  -- only signature delta is `panel_winid` (integer) -> `panel`
+  -- (object); auto-core's `panel.winid` field is the equivalent.
+  -- The registry owns: bufnr cache, buffer-local `0..9`/`q` keymaps,
+  -- buffer-swap via with_unfixed_buf, winbar refresh on every focus.
+  --
+  -- We override the winbar click router (auto-core's `attach()`
+  -- registers one that calls `registry:focus(N)` directly) so clicks
+  -- go through `M.focus(N)` instead — that's the single dispatch
+  -- point that ALSO mirrors `state.section` and persists
+  -- `last_section` to the namespace.
+  local section_mod  = require("auto-core").ui.section
+  local sections_list = require("auto-finder.sections").enabled()
+  local section_defs = {}
+  for _, s in ipairs(sections_list) do
+    section_defs[#section_defs + 1] = {
+      number     = s.number,
+      name       = s.name,
+      get_buffer = function(panel) return s.get_buffer(panel.winid) end,
+      on_focus   = s.on_focus and function(panel, bufnr)
+        return s.on_focus(panel.winid, bufnr)
+      end or nil,
+      on_close   = s.on_close and function(_bufnr)
+        return s.on_close()
+      end or nil,
+    }
+  end
+  M._registry = section_mod.attach(M._panel, section_defs, {
+    default = M.state.section or cfg.default_section,
+  })
+  -- Wrap `registry:focus` so EVERY focus dispatch (admin REPL,
+  -- winbar click, buffer-local 0..9 keymap, programmatic
+  -- `M._registry:focus(N)`) runs the auto-finder-specific tail:
+  -- mirror `state.section`, persist `last_section` to the namespace,
+  -- and pump a catch-up neo-tree redraw. Auto-core's `attach()`
+  -- already wires the click router to call `registry:focus(N)` and
+  -- its `apply_keymap` does the same, so wrapping here covers both
+  -- without overrides.
+  do
+    local _original_focus = M._registry.focus
+    local _post_focus = function(active)
+      M.state.section = active
+      pcall(require("auto-finder.state").set_last_section, active)
+      local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
+      if ok_mgr and type(manager.redraw) == "function" then
+        pcall(manager.redraw, nil)
+      end
+    end
+    M._registry.focus = function(self, key)
+      local ok, err = _original_focus(self, key)
+      if ok then _post_focus(self.active) end
+      return ok, err
+    end
+  end
+  -- Legacy `M.state.section_buffers` becomes a live alias of the
+  -- registry's bufnr cache so `M.reload()` and any external readers
+  -- (e.g. consumer scripts) keep working without changes. We mutate
+  -- in place (never re-assign) elsewhere so the alias never goes
+  -- stale.
+  M.state.section_buffers = M._registry._bufs
+
+  -- Watchers keep M.state synced + drive panel side-effects on every
+  -- namespace mutation (admin REPL, future remote API, :checkhealth
+  -- probe, etc.). The panel:resize call is idempotent + cheap when
+  -- the panel is closed (auto-core stores user_width on the instance
+  -- and applies it at next open).
+  state_mod.watch_user_width(function(payload)
+    M.state.user_width = payload.new
+    if M._panel then
+      if payload.new then
+        M._panel:resize(payload.new)
+      else
+        M._panel:reset_width()
+      end
+    end
+    require("auto-finder.panel.host")._refresh_after_resize(M.state)
+  end)
+  state_mod.watch_last_section(function(payload)
+    M.state.section = payload.new
+  end)
+
+  -- v0.2.0 step 4: subscribe to `worktree:switched` so the repos
+  -- panel rebases automatically when the active worktree changes.
+  -- Today the event is published only by direct `auto-core.git.
+  -- worktree` callers; once worktree.nvim migrates (the next
+  -- consumer in the family migration order), `<leader>gw` and
+  -- friends will fire it too.
+  require("auto-core").events.subscribe("worktree:switched",
+    function(_payload)
+      if not M._registry then return end
+      -- Find the repos section if enabled.
+      local repos_def
+      for _, s in ipairs(M._registry.sections) do
+        if s.name == "repos" then repos_def = s; break end
+      end
+      if not repos_def then return end
+      -- Drop the cached repos bufnr (fires on_close so neo-tree's
+      -- state cleanup runs). Mutate `_bufs` in place so the
+      -- `state.section_buffers` alias stays valid.
+      local b = M._registry._bufs[repos_def.number]
+      if b and vim.api.nvim_buf_is_valid(b) and repos_def.on_close then
+        pcall(repos_def.on_close, b)
+      end
+      M._registry._bufs[repos_def.number] = nil
+      -- Re-focus to remount immediately if repos is currently active.
+      if M._registry.active == repos_def.number then
+        pcall(function() M._registry:focus(repos_def.number) end)
+      end
+    end)
   -- Phase 3c note: previously re-synced
   -- `state.window.auto_expand_width` here so a session restart with
   -- a saved pin wouldn't expand on first files focus. The forked
@@ -92,17 +285,74 @@ function M.setup(user_opts)
   -- the persisted pin is already in `M.state.user_width` by this
   -- point in setup, so the renderer sees the pin from its very
   -- first call. No manual sync needed.
-  if persisted.files then
-    local ok, neo = pcall(require, "auto-finder.neotree")
-    if ok and type(neo.config) == "table" then
-      neo.config.filesystem = neo.config.filesystem or {}
-      neo.config.filesystem.filtered_items = neo.config.filesystem.filtered_items or {}
-      local fi = neo.config.filesystem.filtered_items
-      if persisted.files.hide_dotfiles ~= nil then
-        fi.hide_dotfiles = persisted.files.hide_dotfiles
+  -- File-filter prefs hydration. Canonical source of truth is now
+  -- `auto-core.files.{show_hidden,show_dotfiles}` (see auto-core
+  -- module of the same name). Legacy `persisted.files.*` from
+  -- `<config>/.auto-finder/config.json` is one-shot migrated to the
+  -- canonical store on first run after upgrade — older nvims that
+  -- pre-date auto-core fall through harmlessly.
+  --
+  -- Naming flip: the legacy schema used `hide_*` (true = hide);
+  -- auto-core uses `show_*` (true = show). Negate at the boundary.
+  do
+    local ok_core, core = pcall(require, "auto-core")
+    if ok_core and core and core.files then
+      -- One-shot migration from legacy store, if values present.
+      if persisted.files then
+        if persisted.files.hide_dotfiles ~= nil then
+          core.files.set_show_dotfiles(not persisted.files.hide_dotfiles)
+        end
+        if persisted.files.hide_gitignored ~= nil then
+          core.files.set_show_hidden(not persisted.files.hide_gitignored)
+        end
       end
-      if persisted.files.hide_gitignored ~= nil then
-        fi.hide_gitignored = persisted.files.hide_gitignored
+      -- Apply the canonical values into neo-tree's runtime config.
+      local ok_neo, neo = pcall(require, "auto-finder.neotree")
+      if ok_neo and type(neo.config) == "table" then
+        neo.config.filesystem = neo.config.filesystem or {}
+        neo.config.filesystem.filtered_items =
+          neo.config.filesystem.filtered_items or {}
+        local fi = neo.config.filesystem.filtered_items
+        fi.hide_dotfiles   = not core.files.get_show_dotfiles()
+        fi.hide_gitignored = not core.files.get_show_hidden()
+        if core.files.get_show_dotfiles() or core.files.get_show_hidden() then
+          fi.visible = true
+        end
+      end
+      -- Watch for external mutations (admin REPL, future remote
+      -- API) and re-apply to neo-tree's filtered_items at runtime.
+      local function _resync_filter()
+        local ok_n, n = pcall(require, "auto-finder.neotree")
+        if not ok_n or type(n.config) ~= "table" then return end
+        n.config.filesystem = n.config.filesystem or {}
+        n.config.filesystem.filtered_items =
+          n.config.filesystem.filtered_items or {}
+        local f = n.config.filesystem.filtered_items
+        f.hide_dotfiles   = not core.files.get_show_dotfiles()
+        f.hide_gitignored = not core.files.get_show_hidden()
+        -- Re-render the active files section so the filter changes
+        -- become visible without the user toggling sections.
+        pcall(function()
+          require("auto-finder.neotree.sources.manager").refresh("filesystem")
+        end)
+      end
+      core.files.watch_show_hidden(_resync_filter)
+      core.files.watch_show_dotfiles(_resync_filter)
+    elseif persisted.files then
+      -- auto-core not installed (legacy install) — apply directly
+      -- from the old store schema.
+      local ok_neo, neo = pcall(require, "auto-finder.neotree")
+      if ok_neo and type(neo.config) == "table" then
+        neo.config.filesystem = neo.config.filesystem or {}
+        neo.config.filesystem.filtered_items =
+          neo.config.filesystem.filtered_items or {}
+        local fi = neo.config.filesystem.filtered_items
+        if persisted.files.hide_dotfiles ~= nil then
+          fi.hide_dotfiles = persisted.files.hide_dotfiles
+        end
+        if persisted.files.hide_gitignored ~= nil then
+          fi.hide_gitignored = persisted.files.hide_gitignored
+        end
       end
     end
   end
@@ -218,8 +468,8 @@ function M._register_neotree_workspace_source(extra)
 
   local ok_src, src = pcall(require, "auto-finder-repos")
   if not ok_src then
-    vim.notify("auto-finder: failed to require 'auto-finder-repos': " .. tostring(src),
-      vim.log.levels.ERROR)
+    require("auto-finder.logger").error("init",
+      "failed to require 'auto-finder-repos': " .. tostring(src))
     return
   end
 
@@ -301,7 +551,7 @@ end
 ---@param force boolean?
 function M.open(force)
   if not M.state.config then
-    vim.notify("auto-finder: setup() must be called first", vim.log.levels.ERROR)
+    require("auto-finder.logger").error("init", "setup() must be called first")
     return
   end
   local host = require("auto-finder.panel.host")
@@ -333,7 +583,20 @@ function M.focus(key)
   if not M.state.config then
     return false, "auto-finder: setup() must be called first"
   end
-  return require("auto-finder.panel.host").focus(M.state.config, M.state, key)
+  if not M._registry then
+    return false, "auto-finder: registry not initialized"
+  end
+  -- Auto-finder-specific min-width preflight (cfg.width.min + 20,
+  -- stricter than auto-core's min+10). Run via the host wrapper which
+  -- delegates to M._panel:open() after the check passes; the
+  -- registry's own `panel:open()` call would otherwise use the
+  -- looser auto-core check.
+  local host = require("auto-finder.panel.host")
+  if not host.ensure_open(M.state.config, M.state, false) then
+    return false, "panel could not be opened"
+  end
+  -- Wrapped registry:focus runs the mirror/persist/redraw tail too.
+  return M._registry:focus(key)
 end
 
 ---Pin the panel width to N columns; survives :VimResized.

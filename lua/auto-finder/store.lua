@@ -1,19 +1,24 @@
----Persistent panel + filter state for auto-finder. Survives nvim
----restart so `panel resize N`, the active section, and per-session
----file-filter prefs don't reset every time.
+---Persistent file-filter state for auto-finder. Survives nvim restart
+---so the per-session show-dotfiles / show-gitignored toggles don't
+---reset every time.
+---
+---**v0.2.0 step 2/4:** `panel.user_width` (resize pin) and
+---`panel.last_section` (last-focused section index) MOVED to
+---`auto-core.state.namespace("auto-finder")` json persist — see
+---`lua/auto-finder/state.lua`. The save path below STRIPS those keys
+---so legacy values eventually drain from this file. The legacy
+---*loader* still surfaces them so init.lua's one-shot seed can copy
+---them into the namespace on first run after upgrade. Old store
+---files containing them are otherwise harmless (the loader returns
+---them; setup() seeds; save() strips on next mutation).
 ---
 ---Layout: a single JSON file at
 ---    `<stdpath('config')>/.auto-finder/config.json`
 ---
----Schema (current):
+---Schema (current — post-step-2):
 ---```json
 ---{
 ---  "version": 1,
----  "panel": {
----    "user_width":   <integer or null>,
----    "side":         "left" | "right" | null,    // legacy, ignored on load
----    "last_section": <integer or null>           // restored on next open
----  },
 ---  "files": {
 ---    "hide_dotfiles":   <bool or null>,
 ---    "hide_gitignored": <bool or null>
@@ -41,19 +46,20 @@ function M.load()
   return storage.read_json(FILENAME)
 end
 
----Write `state` as pretty-printed JSON. Strips unknown top-level
----keys so legacy / future / corrupted entries never accumulate.
----Missing values are persisted as JSON null and treated by the
----loader as "use default".
+---Write `state` as pretty-printed JSON. Strips unknown top-level keys
+---so legacy / future / corrupted entries never accumulate. v0.2.0
+---step 2: also strips `panel.user_width` and `panel.last_section` —
+---those live in `auto-core.state.namespace("auto-finder")` now.
+---Missing values are persisted as JSON null and treated by the loader
+---as "use default".
 ---@param state table
 function M.save(state)
   local sanitized = {
     version = 1,
-    panel = {
-      user_width   = (state.panel or {}).user_width,
-      side         = (state.panel or {}).side,
-      last_section = (state.panel or {}).last_section,
-    },
+    -- panel.user_width / panel.last_section are deliberately omitted —
+    -- they migrated to auto-core state.namespace in v0.2.0 step 2.
+    -- Future cleanup may drop the `panel` table entirely once `side`
+    -- (already legacy and ignored on load) ages out of users' files.
     files = {
       hide_dotfiles   = (state.files or {}).hide_dotfiles,
       hide_gitignored = (state.files or {}).hide_gitignored,

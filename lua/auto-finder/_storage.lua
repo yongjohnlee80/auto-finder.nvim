@@ -42,9 +42,8 @@ function M.read_json(filename)
   if raw == "" then return {} end
   local ok, decoded = pcall(vim.fn.json_decode, raw)
   if not ok or type(decoded) ~= "table" then
-    vim.notify(
-      "auto-finder._storage: failed to decode " .. path .. " — defaults will apply: " .. tostring(decoded),
-      vim.log.levels.WARN)
+    require("auto-finder.logger").warn("_storage",
+      "failed to decode " .. path .. " — defaults will apply: " .. tostring(decoded))
     return {}
   end
   return decoded
@@ -58,13 +57,13 @@ end
 function M.write_json(filename, data)
   local err = M.ensure_dir()
   if err then
-    vim.notify("auto-finder._storage: " .. err, vim.log.levels.WARN)
+    require("auto-finder.logger").warn("_storage", err)
     return
   end
   local ok, encoded = pcall(vim.fn.json_encode, data)
   if not ok then
-    vim.notify("auto-finder._storage: json_encode failed: " .. tostring(encoded),
-      vim.log.levels.WARN)
+    require("auto-finder.logger").warn("_storage",
+      "json_encode failed: " .. tostring(encoded))
     return
   end
   -- Lightweight pretty-print so the file is readable when opened.

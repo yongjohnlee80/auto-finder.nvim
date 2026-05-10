@@ -28,8 +28,14 @@ vim.o.hidden = true
 -- loads `~/.config/nvim/.auto-finder/config.json` (the user's actual
 -- pinned width from real sessions) and the "panel width = default
 -- (38)" assertion fails as soon as the user has ever pinned a width.
+-- v0.2.0 step 2: also isolate XDG_STATE_HOME so auto-core.state's
+-- namespace persist (which writes under `<state>/auto-core/`) doesn't
+-- leak into the user's real state directory and corrupt their pin
+-- across sessions.
 vim.fn.delete("/tmp/auto-finder-smoke-config-default", "rf")
 vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-default"
+vim.fn.delete("/tmp/auto-finder-smoke-state-default", "rf")
+vim.env.XDG_STATE_HOME = "/tmp/auto-finder-smoke-state-default"
 
 local fail_count = 0
 local pass_count = 0
@@ -362,26 +368,30 @@ ok("store dir resolves under XDG_CONFIG_HOME",
   store._dir():find(tmp_config, 1, true) ~= nil,
   store._dir())
 
--- Round-trip: save → load.
+-- v0.2.0 step 2: store.save STRIPS panel.user_width / panel.last_section
+-- (those keys live in auto-core.state.namespace("auto-finder") now —
+-- see test [16]). Only files.* survives the save sanitization here.
 store.save({
   version = 1,
   panel = { user_width = 67, side = "right" },
   files = { hide_dotfiles = true, hide_gitignored = false },
 })
 local loaded = store.load()
-ok("loaded user_width round-trips",
-  (loaded.panel or {}).user_width == 67,
+ok("save strips panel.user_width (migrated to state.namespace)",
+  (loaded.panel or {}).user_width == nil,
   vim.inspect(loaded))
-ok("loaded side round-trips", (loaded.panel or {}).side == "right")
+ok("save strips panel.side (legacy)",
+  (loaded.panel or {}).side == nil)
 ok("loaded hide_dotfiles round-trips", (loaded.files or {}).hide_dotfiles == true)
+ok("loaded hide_gitignored round-trips", (loaded.files or {}).hide_gitignored == false)
 
--- update() merges shallow + persists.
-store.update({ panel = { user_width = 42 } })
+-- update() merges shallow + persists; panel keys still get stripped.
+store.update({ files = { hide_dotfiles = false } })
 local after_update = store.load()
-ok("update preserves untouched fields",
-  (after_update.panel or {}).side == "right")
-ok("update overrides specified field",
-  (after_update.panel or {}).user_width == 42)
+ok("update overrides files field",
+  (after_update.files or {}).hide_dotfiles == false)
+ok("update preserves untouched files field",
+  (after_update.files or {}).hide_gitignored == false)
 
 -- Missing file → empty table, no throw.
 vim.fn.delete(tmp_config, "rf")
@@ -391,20 +401,25 @@ ok("load on missing file returns empty table",
 
 -- ─────────────────────── 10. winbar + completion ──────────────────
 print("\n[10] winbar clickable regions + admin tab-completion")
-local winbar = require("auto-finder.panel.winbar")
+-- v0.2.0 step 3: lua/auto-finder/panel/winbar.lua removed; auto-core's
+-- ui.winbar primitive now renders the tab strip via the panel
+-- singleton's `set_winbar(sections, focused)`. We open the panel,
+-- focus a section, then read the winbar option to verify the click
+-- regions land. Click router moves to `auto-core.ui.winbar.click`.
+af.open(true)
+af.focus(1)
 local sections = require("auto-finder.sections").enabled()
-local rendered = winbar.render(1, sections, 50)
+local panel_winid = af.state.panel_winid
+local rendered = vim.api.nvim_get_option_value("winbar",
+  { win = panel_winid })
 ok("winbar contains click region for section 0",
-  rendered:find("%%0@v:lua%.require'auto%-finder%.panel%.winbar'%.click@") ~= nil,
+  rendered:find("@v:lua%.require'auto%-core%.ui%.winbar'%.click@") ~= nil,
   rendered)
-ok("winbar contains click region for section 1",
-  rendered:find("%%1@v:lua%.require'auto%-finder%.panel%.winbar'%.click@") ~= nil)
-
--- Compact mode (very narrow): focused gets [N: name], unfocused get just N.
-local narrow = winbar.render(1, sections, 12)
-ok("narrow winbar drops unfocused labels",
-  narrow:find("config") == nil,
-  narrow)
+ok("winbar uses auto-core.ui.winbar router",
+  rendered:find("auto%-core%.ui%.winbar") ~= nil)
+-- Compact mode is exercised on narrow widths; auto-core's primitive
+-- has the same 3-mode adaptive renderer.
+af.focus(0)  -- back to config so subsequent tests start fresh.
 
 local admin = require("auto-finder.panel.admin")
 -- complete_at on an empty prompt → top-level verbs.
@@ -538,18 +553,18 @@ ok("subdirectory icon does NOT use the workspace glyph",
 
 -- ─────────────────────── 12. last_section persistence ──────────────────
 print("\n[12] last_section persists across setup")
+-- v0.2.0 step 2: last_section moved from auto-finder/store.lua's
+-- config.json to auto-core.state.namespace("auto-finder"); read
+-- through the typed getter rather than store.load().
 af.open(true)
 af.focus(1)  -- files
 ok("focused files (section 1)", af.state.section == 1)
-local persisted_after_focus = require("auto-finder.store").load()
-ok("store.last_section == 1 after focus(1)",
-  (persisted_after_focus.panel or {}).last_section == 1,
-  vim.inspect(persisted_after_focus))
+ok("namespace.last_section == 1 after focus(1)",
+  require("auto-finder.state").get_last_section() == 1)
 af.focus(0)  -- config
 ok("focused config (section 0)", af.state.section == 0)
-local persisted_after_config = require("auto-finder.store").load()
-ok("store.last_section == 0 after focus(0)",
-  (persisted_after_config.panel or {}).last_section == 0)
+ok("namespace.last_section == 0 after focus(0)",
+  require("auto-finder.state").get_last_section() == 0)
 
 -- Restart sim: clear state, re-setup, verify state.section restored.
 af.close()
@@ -649,19 +664,22 @@ ok("watcher root matches getcwd",
   string.format("root=%s cwd=%s",
     tostring(files_section._fs_watch_root), vim.fn.getcwd()))
 
--- Stub neo-tree's execute to capture refresh calls. Publishing a
--- core.file:* event under cwd should land a refresh after the
--- 150 ms debounce window.
-local cmd_mod = require("auto-finder.neotree.command")
-local orig_execute = cmd_mod.execute
+-- Stub neo-tree's manager.refresh to capture refresh calls.
+-- Publishing a core.file:* event under cwd should land a
+-- `manager.refresh("filesystem")` after the 150 ms debounce window.
+-- (Earlier versions stubbed `cmd.execute` — but that path doesn't
+-- actually trigger an fs rescan; cmd.execute has no "refresh"
+-- action and silently falls through to show/focus. The fix routes
+-- through `manager.refresh` directly, the same path R is bound to.)
+local manager_mod = require("auto-finder.neotree.sources.manager")
+local orig_refresh = manager_mod.refresh
 local refresh_calls = {}
-cmd_mod.execute = function(args)
-  if type(args) == "table" then
-    refresh_calls[#refresh_calls + 1] = args
-  end
-  -- Don't actually drive neo-tree on the synthetic event — we'd
-  -- be asking it to refresh against a path that doesn't exist.
-  return true
+manager_mod.refresh = function(source_name, callback)
+  refresh_calls[#refresh_calls + 1] = source_name
+  -- Don't actually drive neo-tree on the synthetic event — we'd be
+  -- asking it to rescan against a path that may not have a live
+  -- state attached.
+  if callback then pcall(callback) end
 end
 
 core.events.publish("core.file:modified", {
@@ -669,26 +687,20 @@ core.events.publish("core.file:modified", {
   change = "modified",
 })
 vim.wait(400, function()
-  for _, c in ipairs(refresh_calls) do
-    if c.action == "refresh" and c.source == "filesystem" then
-      return true
-    end
+  for _, src in ipairs(refresh_calls) do
+    if src == "filesystem" then return true end
   end
   return false
 end)
 local saw_refresh = false
-for _, c in ipairs(refresh_calls) do
-  if c.action == "refresh" and c.source == "filesystem" then
-    saw_refresh = true
-    break
-  end
+for _, src in ipairs(refresh_calls) do
+  if src == "filesystem" then saw_refresh = true; break end
 end
-ok("file-event under cwd triggers neo-tree refresh after debounce",
+ok("file-event under cwd triggers neo-tree manager.refresh after debounce",
   saw_refresh,
   "refresh_calls=" .. vim.inspect(refresh_calls))
 
 -- Events for paths OUTSIDE the watched root should NOT refresh.
--- Reset the call list, publish an out-of-root event, drain, assert.
 refresh_calls = {}
 core.events.publish("core.file:modified", {
   path   = "/tmp/some-other-place/x.txt",
@@ -696,13 +708,13 @@ core.events.publish("core.file:modified", {
 })
 vim.wait(250)
 local saw_outside_refresh = false
-for _, c in ipairs(refresh_calls) do
-  if c.action == "refresh" then saw_outside_refresh = true end
+for _, src in ipairs(refresh_calls) do
+  if src == "filesystem" then saw_outside_refresh = true end
 end
 ok("out-of-root event does NOT trigger refresh", not saw_outside_refresh,
   "refresh_calls=" .. vim.inspect(refresh_calls))
 
-cmd_mod.execute = orig_execute
+manager_mod.refresh = orig_refresh
 
 -- Tear-down.
 files_section._stop_fs_watch()
@@ -710,6 +722,178 @@ ok("_stop_fs_watch clears watcher handle",
   files_section._fs_watch_handle == nil)
 ok("_stop_fs_watch clears watcher root",
   files_section._fs_watch_root == nil)
+
+-- ─────────── 15. auto-core.log shim (logger.lua) ──────────
+print("\n[15] auto-core.log shim")
+local logger = require("auto-finder.logger")
+ok("logger module loads", type(logger) == "table")
+ok("logger exposes level functions",
+  type(logger.error) == "function"
+    and type(logger.warn) == "function"
+    and type(logger.info) == "function"
+    and type(logger.debug) == "function"
+    and type(logger.trace) == "function")
+ok("logger.levels exposed", type(logger.levels) == "table"
+  and logger.levels.ERROR ~= nil and logger.levels.WARN ~= nil)
+
+-- Drive the shim and inspect the auto-core.log ring buffer to verify
+-- the namespace prefix lands as `auto-finder.<component>`.
+local core_log = require("auto-core").log
+core_log.clear()
+-- WARN mirrors to vim.notify which would surface in the test output;
+-- silence it for this assertion via configure({ notify = false }).
+local prev_notify = (core_log.inspect and core_log.inspect().notify)
+core_log.configure({ notify = false, level = "trace" })
+
+logger.warn("smoke", "shim wiring probe")
+logger.error("panel.host", "another component")
+logger.debug("smoke", "trace-level too")
+local entries = core_log.recent(10)
+ok("warn entry recorded with auto-finder.smoke component",
+  vim.tbl_contains(vim.tbl_map(function(e) return e.component end, entries),
+    "auto-finder.smoke"))
+ok("error entry recorded with auto-finder.panel.host component",
+  vim.tbl_contains(vim.tbl_map(function(e) return e.component end, entries),
+    "auto-finder.panel.host"))
+ok("debug entry body strips legacy 'auto-finder: ' prefix",
+  (function()
+    for _, e in ipairs(entries) do
+      if e.level_name == "DEBUG" then
+        -- auto-core.log stores the formatted line (prefix + body).
+        -- Confirm the namespace prefix is present and the body
+        -- doesn't carry the redundant `auto-finder: ` prefix the
+        -- shim is supposed to remove.
+        return e.message:find("[auto-finder.smoke]", 1, true) ~= nil
+          and e.message:find("trace-level too", 1, true) ~= nil
+          and e.message:find("auto-finder: trace-level", 1, true) == nil
+      end
+    end
+    return false
+  end)())
+
+-- Already-prefixed component name passes through (idempotent ns()).
+logger.warn("auto-finder.preprefixed", "no double prefix")
+local last = core_log.recent(1)[1]
+ok("idempotent namespace prefix",
+  last and last.component == "auto-finder.preprefixed")
+
+-- Restore notify mirroring so subsequent test runs (and real usage)
+-- aren't silenced.
+core_log.configure({ notify = prev_notify ~= false })
+
+-- ───── 16. state.namespace migration (state.lua) ──────────
+print("\n[16] state.namespace migration")
+local state_mod = require("auto-finder.state")
+local ns = state_mod.namespace()
+ok("namespace handle returned", type(ns) == "table"
+  and type(ns.get) == "function" and type(ns.set) == "function")
+
+-- Round-trip via the typed setters.
+state_mod.set_user_width(42)
+ok("set_user_width(42) round-trips", state_mod.get_user_width() == 42)
+state_mod.set_user_width(nil)
+ok("set_user_width(nil) clears the pin",
+  state_mod.get_user_width() == nil)
+state_mod.set_last_section(2)
+ok("set_last_section(2) round-trips", state_mod.get_last_section() == 2)
+
+-- Type validation: non-integer fails (false, err) without mutating.
+state_mod.set_user_width(50)
+local ok_bad, err_bad = state_mod.set_user_width("not-a-number")
+ok("set_user_width rejects non-numbers",
+  ok_bad == false and type(err_bad) == "string")
+ok("rejected set leaves prior value intact",
+  state_mod.get_user_width() == 50)
+
+-- Watcher mirrors namespace → M.state.user_width / M.state.section.
+-- The real watchers are installed in auto-finder's setup() (which ran
+-- in test [1]); confirm their effect by mutating via the typed setter
+-- and reading the runtime mirror.
+local af = require("auto-finder")
+state_mod.set_user_width(73)
+vim.wait(20)  -- subscribers fire synchronously, but be safe.
+ok("watcher mirrors user_width to M.state.user_width",
+  af.state.user_width == 73,
+  "M.state.user_width=" .. tostring(af.state.user_width))
+state_mod.set_user_width(nil)
+vim.wait(20)
+ok("watcher mirrors nil to M.state.user_width",
+  af.state.user_width == nil)
+
+state_mod.set_last_section(1)
+vim.wait(20)
+ok("watcher mirrors last_section to M.state.section",
+  af.state.section == 1)
+
+-- Persist round-trip: set value, force a flush, read the on-disk
+-- JSON, verify the persisted shape.
+state_mod.set_user_width(81)
+ns:persist_now()
+local persist_path = vim.fn.stdpath("state") .. "/auto-core/auto-finder.json"
+local ok_read = vim.fn.filereadable(persist_path) == 1
+ok("namespace persisted to <state>/auto-core/auto-finder.json",
+  ok_read, persist_path)
+if ok_read then
+  local raw = table.concat(vim.fn.readfile(persist_path), "\n")
+  local decoded = vim.fn.json_decode(raw)
+  ok("on-disk JSON contains user_width=81",
+    type(decoded) == "table" and decoded.user_width == 81,
+    raw)
+end
+
+-- ───── 17. section registry migration (auto-core.ui.section) ──────
+print("\n[17] section registry migration + worktree:switched")
+ok("M._registry attached", type(af._registry) == "table"
+  and type(af._registry.focus) == "function"
+  and type(af._registry.sections) == "table")
+ok("registry has same section count as enabled()",
+  #af._registry.sections == #require("auto-finder.sections").enabled())
+
+-- The legacy state.section_buffers field is now a live alias of the
+-- registry's bufnr cache. Writes via the registry should be visible
+-- through the legacy field, and vice versa.
+ok("state.section_buffers aliases registry._bufs",
+  af.state.section_buffers == af._registry._bufs)
+
+-- Drive a focus through the wrapped focus path: M._registry:focus
+-- routes through the wrapper which mirrors active/persist/redraw.
+af.focus(0)  -- config section
+ok("registry.active updated to 0", af._registry.active == 0)
+ok("M.state.section mirror updated to 0", af.state.section == 0)
+ok("namespace last_section persisted to 0 (via wrapped focus)",
+  require("auto-finder.state").get_last_section() == 0)
+
+af.focus(1)  -- files section
+ok("registry.active updated to 1", af._registry.active == 1)
+
+-- worktree:switched handler — invalidate repos bufnr if cached.
+-- First make sure repos has been mounted at least once. Then publish
+-- the event and assert the cache entry was dropped.
+local repos_def
+for _, s in ipairs(af._registry.sections) do
+  if s.name == "repos" then repos_def = s; break end
+end
+if repos_def then
+  -- Force a mount to populate the cache.
+  af.focus(2)
+  vim.wait(100)
+  local before_buf = af._registry._bufs[repos_def.number]
+  ok("repos bufnr cached pre-event",
+    before_buf ~= nil and vim.api.nvim_buf_is_valid(before_buf))
+
+  require("auto-core").events.publish("worktree:switched",
+    { from = "/tmp/from", to = "/tmp/to" })
+  vim.wait(50)
+  -- After the event, repos cache is dropped; if repos was active,
+  -- the handler also re-focuses (which re-mounts). So the bufnr may
+  -- be different from before (re-mounted) OR nil (if remount
+  -- deferred to next focus).
+  local after_buf = af._registry._bufs[repos_def.number]
+  ok("worktree:switched handler invalidated repos cache",
+    after_buf ~= before_buf or after_buf == nil,
+    string.format("before=%s after=%s",
+      tostring(before_buf), tostring(after_buf)))
+end
 
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))

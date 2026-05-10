@@ -59,11 +59,14 @@ local function setup_live_refresh(section, source)
       if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
         return
       end
+      -- Drive neo-tree's source manager directly. cmd.execute has no
+      -- "refresh" action — it only handles "show", "focus", "close",
+      -- and falls through to a show/focus pass for anything else,
+      -- which doesn't trigger an fs rescan. The R keymap is bound to
+      -- this same `manager.refresh` (per
+      -- `sources/filesystem/init.lua` `handler = wrap(manager.refresh)`).
       pcall(function()
-        require("auto-finder.neotree.command").execute({
-          action = "refresh",
-          source = source,
-        })
+        require("auto-finder.neotree.sources.manager").refresh(source)
       end)
     end, LIVE_REFRESH_DEBOUNCE_MS)
   end
@@ -103,10 +106,8 @@ local function setup_live_refresh(section, source)
     else
       -- Soft-fail: log + continue. The section still works without
       -- auto-refresh.
-      vim.notify(
-        "auto-finder: fs.watch.start failed for '" .. cwd .. "': " ..
-          tostring(err),
-        vim.log.levels.DEBUG)
+      require("auto-finder.logger").debug("sections._neotree",
+        "fs.watch.start failed for '" .. cwd .. "': " .. tostring(err))
     end
   end
 
@@ -153,10 +154,9 @@ local function mount(panel_winid, source, section_label)
 
   local ok, cmd = pcall(require, "auto-finder.neotree.command")
   if not ok then
-    vim.notify(
-      "auto-finder: neo-tree is not installed; the '" .. section_label ..
-      "' section requires nvim-neo-tree/neo-tree.nvim",
-      vim.log.levels.ERROR)
+    require("auto-finder.logger").error("sections._neotree",
+      "neo-tree is not installed; the '" .. section_label ..
+      "' section requires nvim-neo-tree/neo-tree.nvim")
     return nil
   end
 
@@ -172,9 +172,8 @@ local function mount(panel_winid, source, section_label)
     reveal = false,
   })
   if not exec_ok then
-    vim.notify(
-      "auto-finder: neo-tree.execute failed for source '" .. source .. "': " .. tostring(err),
-      vim.log.levels.ERROR)
+    require("auto-finder.logger").error("sections._neotree",
+      "neo-tree.execute failed for source '" .. source .. "': " .. tostring(err))
     return nil
   end
   -- Wait briefly for neo-tree's async mount to settle. The buffer-

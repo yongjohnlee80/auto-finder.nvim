@@ -29,15 +29,13 @@ M._by_number = {}
 local function load_section(name, number)
   local ok, mod = pcall(require, "auto-finder.sections." .. name)
   if not ok then
-    vim.notify(
-      "auto-finder: failed to load section '" .. name .. "': " .. tostring(mod),
-      vim.log.levels.ERROR)
+    require("auto-finder.logger").error("sections",
+      "failed to load section '" .. name .. "': " .. tostring(mod))
     return nil
   end
   if type(mod) ~= "table" or type(mod.get_buffer) ~= "function" then
-    vim.notify(
-      "auto-finder: section '" .. name .. "' missing get_buffer()",
-      vim.log.levels.ERROR)
+    require("auto-finder.logger").error("sections",
+      "section '" .. name .. "' missing get_buffer()")
     return nil
   end
   -- Allow the section module itself to declare a `name`; fall back to
