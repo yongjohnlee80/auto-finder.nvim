@@ -92,15 +92,29 @@ control surface.
 ## Requirements
 
 - Neovim ≥ 0.10
-- [`nvim-neo-tree/neo-tree.nvim`](https://github.com/nvim-neo-tree/neo-tree.nvim)
+- [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim) `^0.1.0`
+  — foundation library (panel / state / log / ui.section / fs.watch / files
+  surfaces auto-finder consumes as of v0.2.0). Hard dep.
+- [`MunifTanjim/nui.nvim`](https://github.com/MunifTanjim/nui.nvim),
+  [`nvim-lua/plenary.nvim`](https://github.com/nvim-lua/plenary.nvim),
+  [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
+  — required by the bundled neo-tree fork (auto-finder ships its own fork
+  under `lua/auto-finder/neotree/` since v0.1.3; the upstream
+  `nvim-neo-tree/neo-tree.nvim` plugin is **no longer required and should
+  not be installed alongside** — it conflicts with the bundled fork).
 
 ## Install (lazy.nvim)
 
 ```lua
 {
   "yongjohnlee80/auto-finder.nvim",
-  version = "^0.1.0",
-  dependencies = { "nvim-neo-tree/neo-tree.nvim" },
+  version = "^0.2.0",  -- v0.2.0 is the auto-core consumer release
+  dependencies = {
+    "yongjohnlee80/auto-core.nvim",   -- foundation library; hard dep as of v0.2.0
+    "MunifTanjim/nui.nvim",           -- bundled neo-tree fork's deps
+    "nvim-lua/plenary.nvim",
+    "nvim-tree/nvim-web-devicons",
+  },
   opts = {
     -- Width spec (pick ONE of `default` or `percentage`):
     --   `default`     fixed column count for the resting panel width
@@ -128,6 +142,18 @@ control surface.
   },
 }
 ```
+
+> **Caret pin (`^0.2.0`)**: future v0.2.x releases auto-include without a
+> manual bump. The `auto-core` family follows an additive-only minor-bump
+> rule — no v0.X.Y release renames, removes, or break-shapes any existing
+> public surface. Crossing to a future v0.3.0 requires bumping the caret
+> deliberately.
+
+> **Already running upstream `neo-tree.nvim`?** Disable it explicitly so it
+> doesn't conflict with the bundled fork:
+> ```lua
+> { "nvim-neo-tree/neo-tree.nvim", enabled = false }
+> ```
 
 ## Commands
 
