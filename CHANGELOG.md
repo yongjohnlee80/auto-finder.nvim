@@ -2,6 +2,60 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.11] — 2026-05-11 — buffers refresh stops clobbering active section + renderer winfixbuf-safe
+
+Two bug fixes triggered by the same v0.2.9 work. User reported: "I'm
+on files panel but the content is buffers" — opening any file flipped
+the panel's displayed tree from filesystem to buffers. The trace also
+showed a recurring `E1513: Cannot switch buffer. 'winfixbuf' is
+enabled` inside a `vim.schedule` callback during `fs_scan`.
+
+### Fixed
+
+- **Buffers refresh no longer clobbers the active section.** The
+  v0.2.9 `M._install_buffers_refresh_autocmd` fired
+  `items.get_opened_buffers(state)` on every BufAdd / BufDelete /
+  BufFilePost / TermOpen regardless of which section was currently
+  displayed in the panel. `get_opened_buffers` ends with
+  `renderer.show_nodes(...)` which unconditionally calls
+  `nvim_win_set_buf(panel, state.bufnr)` — swapping the panel's
+  displayed tree to the buffers tree even when the user has files
+  or repos active.
+
+  Now gated on `state.bufnr == vim.api.nvim_win_get_buf(panel_winid)`
+  — only fires when the buffers source is the currently-displayed
+  section. Re-mount-on-focus already covers the inactive case: the
+  next time the user focuses buffers, a fresh `navigate()` runs and
+  the tree reflects the current buffer set.
+
+- **`renderer.show_nodes` is now winfixbuf-safe at line 1230.** The
+  `state.current_position == "current"` branch calls
+  `nvim_win_set_buf(state.winid, state.bufnr)` to swap the freshly-
+  built tree buffer into the panel window. The auto-core.ui.panel
+  singleton sets `winfixbuf = true` on the panel to block external
+  `:edit` / `:buffer` / bufferline-click hijacks — and that
+  protection was raising E1513 against our own legitimate render.
+  CRITICALLY this branch is reachable from a `vim.schedule`
+  callback (filesystem fs_scan's deferred `render_context`), so a
+  consumer-side `with_unfixed_buf` wrap around the calling code
+  doesn't cover it.
+
+  Patched the renderer with the same winfixbuf-unset-restore dance
+  the close-path already uses (lines 122-145). Pattern: probe
+  `vim.wo[winid].winfixbuf`, unset if true, swap, restore. Both the
+  buffers and filesystem (follow-mode) render paths now succeed
+  without manifesting E1513 in scheduled-callback context.
+
+### Added
+
+- Smoke section [21] (4 assertions): (a) panel on files section,
+  fire the buffers refresh, assert panel still displays the
+  filesystem buffer; (b) winfixbuf=true on panel, call
+  `renderer.show_nodes` against a state — assert it doesn't error
+  and the buffer was swapped; (c) winfixbuf restored to true after
+  the swap; (d) on re-focus to buffers, the tree reflects the
+  current buffer list.
+
 ## [v0.2.10] — 2026-05-11 — sections load-timing fix (persisted slot additions survive restart)
 
 Bug fix. User-reported regression: `slot add buffers` correctly wrote

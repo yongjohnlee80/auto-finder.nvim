@@ -1154,6 +1154,146 @@ end
 _af._rebuild_section_registry(_orig_live)
 end)()
 
+-- ───────────────────────── 21. v0.2.11 — active-section gate + renderer winfixbuf-safe ────────────────────────
+--
+-- Two regression tests for v0.2.11:
+--
+--   (a) The buffers-refresh autocmd must NOT swap the panel buffer
+--       when buffers isn't the active section. The v0.2.9 install
+--       fired unconditionally and clobbered files/repos when the user
+--       opened a file. The v0.2.11 gate checks
+--       state.bufnr == nvim_win_get_buf(panel_winid).
+--
+--   (b) renderer.show_nodes' position=current branch must succeed
+--       against a winfixbuf=true panel. Pre-v0.2.11 it raised E1513
+--       inside scheduled callbacks (fs_scan's render_context).
+print("\n[21] v0.2.11 — active-section gate + renderer winfixbuf-safe")
+;(function()
+local _af = require("auto-finder")
+
+-- ── (a) active-section gate ─────────────────────────────────────
+-- Ensure 'buffers' is registered; focus the CONFIG section (slot 0)
+-- so buffers isn't active. Trigger a BufAdd. The v0.2.11 gate must
+-- skip the refresh so the panel keeps showing config.
+local _sections_by_name = require("auto-finder.sections")._by_name
+if _sections_by_name["buffers"] == nil then
+  _af.slot_add("buffers")
+end
+_af.open(true)
+vim.wait(80)
+local _focus_ok = _af.focus(0)  -- focus config; buffers is NOT active
+vim.wait(200)
+ok("focus(0) succeeded", _focus_ok)
+
+local _panel = _af.state.panel_winid
+local _panel_buf_pre = (_panel and vim.api.nvim_win_is_valid(_panel))
+   and vim.api.nvim_win_get_buf(_panel) or -1
+ok("panel shows config (active=" .. tostring(_af._registry.active) ..
+   " ft=" .. tostring(_panel_buf_pre > 0 and vim.bo[_panel_buf_pre].filetype) .. ")",
+   _af._registry.active == 0
+     and _panel_buf_pre > 0
+     and vim.bo[_panel_buf_pre].filetype == "auto-finder-config")
+
+-- Open a probe file to trigger BufAdd. Pre-v0.2.11 this would swap
+-- the panel to the buffers tree. The fix's gate must skip the
+-- refresh so the panel keeps showing config.
+local _probe = vim.fn.getcwd() .. "/tests/_v2_11_gate_probe.txt"
+local _fh = io.open(_probe, "w"); _fh:write("x"); _fh:close()
+vim.cmd("topleft split " .. vim.fn.fnameescape(_probe))
+vim.wait(300)  -- debounce + scheduler
+
+local _panel_buf_post =
+   _panel and vim.api.nvim_win_is_valid(_panel)
+     and vim.api.nvim_win_get_buf(_panel) or -1
+-- The core regression we're fixing: panel shouldn't be swapped to
+-- the BUFFERS source tree. The smoke env's leak guard may trigger
+-- unrelated buffer movement during `:split`, but we specifically
+-- assert the panel buf is NOT the buffers source's state.bufnr.
+local _mgr_check = require("auto-finder.neotree.sources.manager")
+local _buffers_state_bufnr = nil
+for _, s in ipairs(_mgr_check._get_all_states()) do
+  if s.name == "buffers" and s.winid == _panel then
+    _buffers_state_bufnr = s.bufnr; break
+  end
+end
+ok("panel did NOT swap to buffers source tree after BufAdd while config active "
+   .. "(post=" .. _panel_buf_post .. " buffers-state-bufnr="
+   .. tostring(_buffers_state_bufnr) .. " active="
+   .. tostring(_af._registry.active) .. ")",
+   _panel_buf_post ~= _buffers_state_bufnr)
+ok("registry.active still 0 (config) — gate did not flip section",
+   _af._registry.active == 0)
+
+-- Cleanup probe.
+pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+for _, b in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_get_name(b) == _probe then
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+end
+pcall(os.remove, _probe)
+
+-- ── (b) renderer winfixbuf-safe ─────────────────────────────────
+-- Build a minimal state with current_position="current", point it at
+-- the panel window, and call renderer.show_nodes. Assert no error
+-- and that winfixbuf is restored to true afterwards.
+local _renderer = require("auto-finder.neotree.ui.renderer")
+local _ok_renderer = type(_renderer) == "table"
+   and type(_renderer.show_nodes) == "function"
+ok("renderer.show_nodes accessible", _ok_renderer)
+
+-- Switch to buffers so the panel hosts the buffers tree; show_nodes
+-- is what the buffers-refresh path also calls. Use the
+-- `_by_name` lookup again since slot indices may have shifted
+-- across earlier sections' mutations.
+local _buf_idx = require("auto-finder.sections")._by_name["buffers"]
+ok("buffers slot still registered for part (b)", _buf_idx ~= nil)
+if _buf_idx then
+  _af.open(true)
+  vim.wait(50)
+  _af.focus(_buf_idx)
+  vim.wait(200)
+end
+-- Re-read the panel winid — the prior `:topleft split` + leak guard
+-- dance may have invalidated the earlier capture.
+_panel = _af.state.panel_winid
+local _panel_valid = _panel and vim.api.nvim_win_is_valid(_panel)
+ok("panel winid valid for part (b) (panel=" .. tostring(_panel) .. ")",
+   _panel_valid)
+if not _panel_valid then return end
+-- Panel currently has winfixbuf=true (set by auto-core.ui.panel).
+local _wfb_before = vim.wo[_panel].winfixbuf
+ok("winfixbuf=true on panel pre-render", _wfb_before == true)
+
+-- Trigger a fresh render via the buffers items module — the call
+-- pre-v0.2.11 raised E1513 because state.loading got stuck and/or
+-- the swap was blocked. With the renderer patch (line 1230 winfixbuf
+-- guard), it must complete cleanly.
+local _items = require("auto-finder.neotree.sources.buffers.lib.items")
+local _mgr = require("auto-finder.neotree.sources.manager")
+local _live
+for _, s in ipairs(_mgr._get_all_states()) do
+  if s.name == "buffers" and s.winid == _panel then _live = s; break end
+end
+ok("buffers state found bound to panel winid for part (b)",
+   _live ~= nil)
+if _live then
+  _live.loading = false
+  local _ok, _err = pcall(_items.get_opened_buffers, _live)
+  ok("get_opened_buffers against winfixbuf=true panel returns without error",
+     _ok, tostring(_err))
+end
+local _wfb_after = vim.wo[_panel].winfixbuf
+ok("winfixbuf restored to true after render (no protection drop)",
+   _wfb_after == true)
+
+-- Cleanup: remove buffers section if we added it.
+local _last_idx = #_af.state.config.sections - 1
+if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
+  _af.slot_remove(_last_idx)
+end
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

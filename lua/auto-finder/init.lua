@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.2.10"
+M.version = "0.2.11"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -708,6 +708,37 @@ function M._install_buffers_refresh_autocmd(group)
     local ok_items, items = pcall(require,
       "auto-finder.neotree.sources.buffers.lib.items")
     if not ok_items then return end
+    -- v0.2.11 gate: only refresh when the buffers source is the
+    -- currently-DISPLAYED section in the panel. Otherwise
+    -- `get_opened_buffers` ends in `renderer.show_nodes` →
+    -- `nvim_win_set_buf(panel, state.bufnr)`, which clobbers
+    -- whichever section the user actually has up (regression
+    -- introduced in v0.2.9 — user reported: "I'm on files panel
+    -- but the content is buffers"). When buffers ISN'T active, we
+    -- skip; the next time the user focuses buffers, the section
+    -- re-mounts fresh via `section.get_buffer` and a complete
+    -- navigate() runs from scratch — no stale tree.
+    --
+    -- Active-section probe via the auto-finder registry rather than
+    -- `state.bufnr == nvim_win_get_buf(panel)`: the latter races with
+    -- the renderer's buffer reassignment during show_nodes (the
+    -- `position = "current"` branch reassigns state.bufnr via
+    -- get_buffer(bufname, state) and then swaps the window), so a
+    -- gate keyed on equality can read state.bufnr while it's
+    -- transiently mid-swap. The registry's `active` slot + the
+    -- section.name lookup is the contract — what the user clicked
+    -- through the winbar / DSL — not a derived value.
+    local registry = M._registry
+    if not registry then return end
+    local active_number = registry.active
+    if active_number == nil then return end
+    local buffers_active = false
+    for _, sect in ipairs(registry.sections or {}) do
+      if sect.name == "buffers" and sect.number == active_number then
+        buffers_active = true; break
+      end
+    end
+    if not buffers_active then return end
     for _, state in ipairs(mgr._get_all_states()) do
       if state.name == "buffers"
           and state.winid == panel_winid

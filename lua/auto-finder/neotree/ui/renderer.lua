@@ -1227,7 +1227,29 @@ M.acquire_window = function(state)
     end
     state.winid = winid
     state.bufnr = get_buffer(bufname, state)
+    -- Auto-finder fork (v0.2.11): same winfixbuf guard as the close
+    -- path above (lines 122-145). The auto-core.ui.panel singleton
+    -- sets `winfixbuf = true` on the panel window to block external
+    -- :edit / :buffer / bufferline-click hijacks. This swap is our
+    -- own LEGITIMATE neo-tree mount placing the tree buffer into the
+    -- panel — it must not be blocked. CRITICALLY: this branch can
+    -- run from a `vim.schedule` callback (notably filesystem
+    -- fs_scan's deferred `render_context` → `show_nodes`), so a
+    -- consumer-side `with_unfixed_buf` wrap around the calling code
+    -- doesn't cover it — the swap happens AFTER that wrapper exits.
+    -- Temporarily unset winfixbuf around the swap and restore.
+    local _was_fixed = false
+    do
+      local _ok, _val = pcall(function() return vim.wo[winid].winfixbuf end)
+      _was_fixed = _ok and _val == true
+      if _was_fixed then
+        pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = winid })
+      end
+    end
     vim.api.nvim_win_set_buf(state.winid, state.bufnr)
+    if _was_fixed and vim.api.nvim_win_is_valid(winid) then
+      pcall(vim.api.nvim_set_option_value, "winfixbuf", true, { win = winid })
+    end
   else
     local close_old_window = function(new_winid)
       if state.winid and new_winid ~= state.winid then
