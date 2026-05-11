@@ -38,6 +38,24 @@ function M.setup(user_opts)
   local cfg = require("auto-finder.config").apply(user_opts)
   M.state.config = cfg
 
+  -- v0.2.5: per-project sections override. If we already have a
+  -- workspace key (auto-core's worktree.nvim usually captures cwd
+  -- at session start and we run AFTER that), seed cfg.sections
+  -- from the persisted per-project record. New / unknown projects
+  -- keep the `cfg.sections` baseline from config.lua
+  -- (`{ "config", "files", "repos" }`). Workspace-root changes
+  -- mid-session swap via a `worktree:switched` subscription
+  -- installed further below in setup().
+  do
+    local state_mod = require("auto-finder.state")
+    state_mod.setup()  -- idempotent claim before the seed read
+    local wskey = M._workspace_key()
+    if wskey then
+      local persisted = state_mod.get_sections_for(wskey)
+      if persisted then cfg.sections = persisted end
+    end
+  end
+
   -- Build / rebuild the section registry. `cfg.section_modules`
   -- (added in v0.2.1) lets third-party plugins ship sections from
   -- arbitrary require paths; see `config.lua` for the shape.
@@ -492,6 +510,19 @@ function M.setup(user_opts)
   if require("auto-finder.sections")._by_name["files"] then
     M._install_files_follow_autocmd(group)
   end
+
+  -- v0.2.5: per-project section composition. Subscribe to
+  -- `worktree:switched` so a worktree switch re-loads the
+  -- persisted section list for that project (or falls back to
+  -- the cfg defaults for a fresh / unknown project). Soft-dep on
+  -- auto-core's event bus.
+  local ok_core, core = pcall(require, "auto-core")
+  if ok_core and type(core.events) == "table"
+      and type(core.events.subscribe) == "function" then
+    core.events.subscribe("worktree:switched", function()
+      vim.schedule(function() M._reseed_sections_for_workspace() end)
+    end)
+  end
 end
 
 ---Install a debounced BufEnter autocmd that calls the filesystem
@@ -779,36 +810,352 @@ end
 ---@param cfg AutoFinderConfig
 function M._inject_keymap_overrides(cfg)
   cfg.neo_tree = cfg.neo_tree or {}
-  cfg.neo_tree.filesystem = cfg.neo_tree.filesystem or {}
-  cfg.neo_tree.filesystem.window =
-    cfg.neo_tree.filesystem.window or {}
-  cfg.neo_tree.filesystem.window.mappings =
-    cfg.neo_tree.filesystem.window.mappings or {}
 
-  local m = cfg.neo_tree.filesystem.window.mappings
+  -- v0.2.5: build a per-source applier so filesystem AND buffers
+  -- share the same audit. `H` (toggle_hidden) is filesystem-only —
+  -- the buffers source doesn't display hidden gitignored files,
+  -- just open nvim buffers, so we skip it there.
+  local function apply_overrides(source_key, opts)
+    cfg.neo_tree[source_key] = cfg.neo_tree[source_key] or {}
+    cfg.neo_tree[source_key].window =
+      cfg.neo_tree[source_key].window or {}
+    cfg.neo_tree[source_key].window.mappings =
+      cfg.neo_tree[source_key].window.mappings or {}
 
-  -- ── B: open/split family routed through editor window ────────
-  -- Skip if the consumer already bound the key to something
-  -- (they may have a custom intent). We only fill defaults.
-  local function default(key, value)
-    if m[key] == nil then m[key] = value end
+    local m = cfg.neo_tree[source_key].window.mappings
+
+    -- Skip if the consumer already bound the key (custom intent
+    -- always wins). We only fill defaults.
+    local function default(key, value)
+      if m[key] == nil then m[key] = value end
+    end
+
+    -- ── B: open/split family routed through editor window ──────
+    default("<cr>",          M._route_open_to_editor("edit"))
+    default("<2-LeftMouse>", M._route_open_to_editor("edit"))
+    default("S",             M._route_open_to_editor("split"))
+    default("s",             M._route_open_to_editor("vsplit"))
+    default("t",             M._route_open_to_editor("tabnew"))
+
+    -- ── H: rewire toggle_hidden through auto-core.files ────────
+    if opts and opts.toggle_hidden then
+      default("H", M._toggle_hidden_via_core)
+    end
+
+    -- ── C: remove keys irrelevant to our model ─────────────────
+    -- neo-tree's documented unbind sentinel is the string "none".
+    default("e",     "none")
+    default("<",     "none")
+    default(">",     "none")
+    default(".",     "none")
+    default("<esc>", "none")
   end
-  default("<cr>",          M._route_open_to_editor("edit"))
-  default("<2-LeftMouse>", M._route_open_to_editor("edit"))
-  default("S",             M._route_open_to_editor("split"))
-  default("s",             M._route_open_to_editor("vsplit"))
-  default("t",             M._route_open_to_editor("tabnew"))
 
-  -- ── H: rewire toggle_hidden through auto-core.files ──────────
-  default("H", M._toggle_hidden_via_core)
+  apply_overrides("filesystem", { toggle_hidden = true })
+  apply_overrides("buffers",    { toggle_hidden = false })
+end
 
-  -- ── C: remove keys irrelevant to our model ───────────────────
-  -- neo-tree's documented unbind sentinel is the string "none".
-  default("e",     "none")
-  default("<",     "none")
-  default(">",     "none")
-  default(".",     "none")
-  default("<esc>", "none")
+-- ── v0.2.5 slot DSL (ADR 0008 addendum) ───────────────────────
+
+---Compute the per-workspace key used by per-project section
+---persistence. sha256 of the current `core.workspace_root`,
+---truncated to 16 hex chars — matches md-harpoon's per-project
+---pin keying so a single conceptual project surfaces under the
+---same key across the AutoVim family.
+---
+---Returns nil when auto-core isn't loaded OR workspace_root
+---hasn't been captured yet. Callers treat nil as "fall back to
+---the cfg.sections default — don't persist".
+---@return string?
+function M._workspace_key()
+  local ok, core = pcall(require, "auto-core")
+  if not ok or type(core) ~= "table"
+      or type(core.git) ~= "table"
+      or type(core.git.worktree) ~= "table"
+      or type(core.git.worktree.get_workspace_root) ~= "function" then
+    return nil
+  end
+  local root = core.git.worktree.get_workspace_root()
+  if type(root) ~= "string" or root == "" then return nil end
+  local ok_sha, sha = pcall(vim.fn.sha256, root)
+  if not ok_sha or type(sha) ~= "string" then return nil end
+  return sha:sub(1, 16)
+end
+
+---Discover the set of section types available to `slot add` /
+---`slot modify`. Sources:
+---  * bundled modules under `lua/auto-finder/sections/*.lua`
+---    (excluding leading-underscore helpers like `_neotree`,
+---    `_storage`, and the registry `init.lua`),
+---  * keys in `cfg.section_modules` (third-party registrations
+---    from v0.2.1).
+---Both produce strings that map cleanly to the `cfg.sections`
+---list — what `slot add <type>` accepts.
+---@return string[] sorted, deduped
+function M._available_section_types()
+  local seen, out = {}, {}
+
+  -- Bundled — scan our own lua/auto-finder/sections/ directory.
+  -- Resolves the dir from this file's own runtime path so the
+  -- discovery is portable across install layouts.
+  local this = debug.getinfo(1, "S").source:sub(2)        -- init.lua path
+  local sections_dir = vim.fn.fnamemodify(this, ":h") .. "/sections"
+  local handle = vim.uv.fs_scandir(sections_dir)
+  if handle then
+    while true do
+      local name, t = vim.uv.fs_scandir_next(handle)
+      if not name then break end
+      if t == "file" and name:match("%.lua$")
+          and not name:match("^_")       -- _neotree, _storage helpers
+          and name ~= "init.lua" then
+        local stem = name:gsub("%.lua$", "")
+        if not seen[stem] then
+          seen[stem] = true
+          out[#out + 1] = stem
+        end
+      end
+    end
+  end
+
+  -- Third-party — keys in cfg.section_modules (v0.2.1 registry).
+  local cfg_modules = M.state and M.state.config
+    and M.state.config.section_modules
+  if type(cfg_modules) == "table" then
+    for k, _ in pairs(cfg_modules) do
+      if type(k) == "string" and not seen[k] then
+        seen[k] = true
+        out[#out + 1] = k
+      end
+    end
+  end
+
+  table.sort(out)
+  return out
+end
+
+---Rebuild the section registry from a new sections list. Disposes
+---the existing auto-core registry, re-runs the auto-finder
+---sections init, builds fresh section_defs, calls
+---`section.attach` again, and re-applies the auto-finder-specific
+---`focus` wrapper (mirror `state.section`, persist `last_section`,
+---redraw).
+---
+---Refreshes the panel winbar so the new tab strip is visible. If
+---the previously-active section was removed, focus falls back to
+---`cfg.default_section` (config slot if available).
+---@param new_sections string[]
+---@param opts { focus_after: integer|nil }?
+function M._rebuild_section_registry(new_sections, opts)
+  opts = opts or {}
+  local cfg = M.state and M.state.config
+  if not cfg then return end
+
+  -- Mutate the live config + the local sections registry.
+  cfg.sections = new_sections
+  require("auto-finder.sections").setup(new_sections, cfg.section_modules)
+
+  -- Dispose the old auto-core registry so its click router is
+  -- unhooked from the panel before we attach a fresh one.
+  if M._registry and type(M._registry.dispose) == "function" then
+    pcall(function() M._registry:dispose() end)
+  end
+
+  -- Build section_defs the same way setup() does.
+  local section_mod   = require("auto-core").ui.section
+  local sections_list = require("auto-finder.sections").enabled()
+  local section_defs  = {}
+  for _, s in ipairs(sections_list) do
+    section_defs[#section_defs + 1] = {
+      number     = s.number,
+      name       = s.name,
+      get_buffer = function(panel) return s.get_buffer(panel.winid) end,
+      on_focus   = s.on_focus and function(panel, bufnr)
+        return s.on_focus(panel.winid, bufnr)
+      end or nil,
+      on_close   = s.on_close and function(_bufnr)
+        return s.on_close()
+      end or nil,
+    }
+  end
+
+  -- Resolve the section to focus after rebuild:
+  --   1. opts.focus_after (caller-supplied),
+  --   2. the previously-active section if it's still in the list,
+  --   3. cfg.default_section,
+  --   4. 0.
+  local target = opts.focus_after
+  if not target then
+    local prev = M.state.section
+    if prev and require("auto-finder.sections").resolve(prev) then
+      target = prev
+    else
+      target = cfg.default_section or 0
+    end
+  end
+
+  M._registry = section_mod.attach(M._panel, section_defs, {
+    default = target,
+  })
+
+  -- Re-apply the auto-finder focus wrapper (originally installed
+  -- in setup()): mirror state.section, persist last_section,
+  -- pump the catch-up neo-tree redraw. Without this, slot DSL
+  -- would short-circuit the auto-finder-specific side-effects.
+  local _original_focus = M._registry.focus
+  local _post_focus = function(active)
+    M.state.section = active
+    pcall(require("auto-finder.state").set_last_section, active)
+    local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
+    if ok_mgr and type(manager.redraw) == "function" then
+      pcall(manager.redraw, "filesystem")
+    end
+  end
+  M._registry.focus = function(self, key)
+    local result = _original_focus(self, key)
+    if result then _post_focus(self.active) end
+    return result
+  end
+
+  -- Refresh the panel's winbar so the new tab strip renders.
+  if M.refresh_winbar then pcall(M.refresh_winbar) end
+
+  -- v0.2.5: persist the new section list under the current
+  -- workspace key. No-op when workspace_root isn't yet captured
+  -- (e.g. user is mid-startup before worktree.nvim's vim_did_enter
+  -- branch fires) — the next mutation when keys ARE available
+  -- writes through.
+  local wskey = M._workspace_key()
+  if wskey then
+    pcall(require("auto-finder.state").set_sections_for,
+      wskey, new_sections)
+  end
+end
+
+---Re-seed sections from the persisted record for the CURRENT
+---workspace key and rebuild the registry. Used by the
+---`worktree:switched` subscriber so different projects show
+---different slot compositions. No-op when no workspace key is
+---available OR when the persisted list matches the current one.
+function M._reseed_sections_for_workspace()
+  local cfg = M.state and M.state.config
+  if not cfg then return end
+  local wskey = M._workspace_key()
+  if not wskey then return end
+
+  local state_mod = require("auto-finder.state")
+  local persisted = state_mod.get_sections_for(wskey)
+  -- For unknown projects, fall back to the config-file baseline
+  -- (typically { "config", "files", "repos" }). We use the
+  -- original cfg.defaults rather than the live cfg.sections so
+  -- a project that's never been touched gets a clean slate, not
+  -- the inherited shape from whatever project the user was on
+  -- previously.
+  local target = persisted
+    or vim.deepcopy(require("auto-finder.config").defaults.sections)
+
+  -- No-op if the target already matches what's loaded.
+  local current = cfg.sections or {}
+  if #current == #target then
+    local same = true
+    for i, s in ipairs(target) do
+      if current[i] ~= s then same = false; break end
+    end
+    if same then return end
+  end
+
+  M._rebuild_section_registry(target)
+end
+
+---Add a section of `section_type` to the live registry. Appends
+---at the end (highest section number). No-op if a section with
+---that name is already enabled.
+---@param section_type string
+---@return string|nil err
+function M.slot_add(section_type)
+  if type(section_type) ~= "string" or section_type == "" then
+    return "slot add: section type required (e.g. 'files', 'repos', 'buffers')"
+  end
+  local cfg = M.state and M.state.config
+  if not cfg then return "config not initialized" end
+  for _, name in ipairs(cfg.sections) do
+    if name == section_type then
+      return "section '" .. section_type .. "' is already in the slot list"
+    end
+  end
+  local types = M._available_section_types()
+  local valid = false
+  for _, t in ipairs(types) do if t == section_type then valid = true; break end end
+  if not valid then
+    return "unknown section type '" .. section_type
+      .. "' (available: " .. table.concat(types, ", ") .. ")"
+  end
+  local new_sections = vim.list_extend({}, cfg.sections)
+  new_sections[#new_sections + 1] = section_type
+  M._rebuild_section_registry(new_sections)
+  return nil
+end
+
+---Remove section at index `n` (1-based, matching the winbar
+---labels). Index 0 (config slot) is protected.
+---@param n integer
+---@return string|nil err
+function M.slot_remove(n)
+  if type(n) ~= "number" or n < 1 then
+    return "slot remove: N must be >= 1 (slot 0 is the protected config slot)"
+  end
+  local cfg = M.state and M.state.config
+  if not cfg then return "config not initialized" end
+  -- cfg.sections is 1-indexed; section number = i - 1, so the
+  -- user's `slot remove 1` removes cfg.sections[2] (index 1 in
+  -- the registry, the "files" section).
+  local list_idx = n + 1
+  if list_idx > #cfg.sections then
+    return string.format("slot remove: N=%d out of range (max %d)",
+      n, #cfg.sections - 1)
+  end
+  local new_sections = vim.list_extend({}, cfg.sections)
+  table.remove(new_sections, list_idx)
+  M._rebuild_section_registry(new_sections)
+  return nil
+end
+
+---Modify section at index `n` to `new_type`. Index 0 (config)
+---is protected.
+---@param n integer
+---@param new_type string
+---@return string|nil err
+function M.slot_modify(n, new_type)
+  if type(n) ~= "number" or n < 1 then
+    return "slot modify: N must be >= 1 (slot 0 is the protected config slot)"
+  end
+  if type(new_type) ~= "string" or new_type == "" then
+    return "slot modify: new section type required"
+  end
+  local cfg = M.state and M.state.config
+  if not cfg then return "config not initialized" end
+  local list_idx = n + 1
+  if list_idx > #cfg.sections then
+    return string.format("slot modify: N=%d out of range (max %d)",
+      n, #cfg.sections - 1)
+  end
+  -- Reject if new_type already lives in another slot — sections
+  -- are unique by name in our registry.
+  for i, name in ipairs(cfg.sections) do
+    if i ~= list_idx and name == new_type then
+      return "section '" .. new_type .. "' already lives at slot " .. (i - 1)
+    end
+  end
+  local types = M._available_section_types()
+  local valid = false
+  for _, t in ipairs(types) do if t == new_type then valid = true; break end end
+  if not valid then
+    return "unknown section type '" .. new_type
+      .. "' (available: " .. table.concat(types, ", ") .. ")"
+  end
+  local new_sections = vim.list_extend({}, cfg.sections)
+  new_sections[list_idx] = new_type
+  M._rebuild_section_registry(new_sections, { focus_after = n })
+  return nil
 end
 
 ---Register the `auto-finder-repos` neo-tree source so

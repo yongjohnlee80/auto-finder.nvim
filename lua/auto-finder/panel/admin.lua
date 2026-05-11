@@ -39,6 +39,10 @@ local function help_lines()
     "  files hide dotfiles          hide files starting with `.`",
     "  files follow on|off|toggle   reveal the active buffer in the files tree on BufEnter",
     "  repos follow on|off|toggle   reveal the active buffer's repo in the repos panel",
+    "  slot add <type>              add a section of <type> at the end of the slot list",
+    "  slot remove <N>              remove section at slot N (N>=1; slot 0 is protected)",
+    "  slot modify <N> <type>       replace the section at slot N with <type>",
+    "  slot types                   list available section types",
     "  reload                       re-render the active section",
     "  status                       show current section, width, pin state",
     "  clear                        wipe history above the prompt",
@@ -325,6 +329,54 @@ local function dispatch(input)
       emit({ "repos: action must be 'follow' (got '" .. tostring(action) .. "')" })
     end
 
+  elseif verb == "slot" then
+    local sub = toks[2]
+    if sub == "add" then
+      local section_type = toks[3]
+      local err = af.slot_add(section_type)
+      if err then
+        emit({ "slot add: " .. err })
+      else
+        emit({ "slot added: " .. section_type
+          .. "   sections: " .. table.concat(af.state.config.sections, " ") })
+      end
+    elseif sub == "remove" then
+      local n = tonumber(toks[3])
+      if not n then
+        emit({ "slot remove: N required (e.g. 'slot remove 2')" })
+      else
+        local err = af.slot_remove(n)
+        if err then
+          emit({ "slot remove: " .. err })
+        else
+          emit({ "slot removed: N=" .. n
+            .. "   sections: " .. table.concat(af.state.config.sections, " ") })
+        end
+      end
+    elseif sub == "modify" then
+      local n = tonumber(toks[3])
+      local new_type = toks[4]
+      if not n then
+        emit({ "slot modify: N required (e.g. 'slot modify 2 buffers')" })
+      elseif not new_type or new_type == "" then
+        emit({ "slot modify: new section type required" })
+      else
+        local err = af.slot_modify(n, new_type)
+        if err then
+          emit({ "slot modify: " .. err })
+        else
+          emit({ "slot modified: N=" .. n .. " → " .. new_type
+            .. "   sections: " .. table.concat(af.state.config.sections, " ") })
+        end
+      end
+    elseif sub == "types" then
+      local types = af._available_section_types()
+      emit({ "available section types: " .. table.concat(types, ", ") })
+    else
+      emit({ "slot: subcommand must be 'add', 'remove', 'modify', or 'types' (got '"
+        .. tostring(sub) .. "')" })
+    end
+
   else
     -- Bare numeric input → focus N (e.g. user types "1" then <CR>).
     local n = tonumber(verb)
@@ -433,7 +485,7 @@ local function complete_at(prompt, cursor_col)
 
   local candidates
   if #prev_toks == 0 then
-    candidates = { "help", "?", ":h", "focus", "panel", "files", "repos",
+    candidates = { "help", "?", ":h", "focus", "panel", "files", "repos", "slot",
                    "reload", "status", "clear", "quit" }
   elseif #prev_toks == 1 and prev_toks[1] == "focus" then
     -- Numeric indices and section names from the live registry.
@@ -475,10 +527,50 @@ local function complete_at(prompt, cursor_col)
     candidates = { "follow" }
   elseif #prev_toks == 2 and prev_toks[1] == "repos" and prev_toks[2] == "follow" then
     candidates = { "on", "off", "toggle" }
+  elseif #prev_toks == 1 and prev_toks[1] == "slot" then
+    candidates = { "add", "remove", "modify", "types" }
+  elseif #prev_toks == 2 and prev_toks[1] == "slot"
+      and (prev_toks[2] == "add" or prev_toks[2] == "modify") then
+    -- For add: only types NOT already in cfg.sections (no dupes).
+    -- For modify: all available types (the caller may want to
+    -- swap N's type to one that's currently elsewhere — but our
+    -- own slot_modify will reject genuine collisions at runtime).
+    candidates = {}
+    local af = require("auto-finder")
+    local available = af._available_section_types()
+    if prev_toks[2] == "add" then
+      local in_use = {}
+      for _, n in ipairs(af.state.config.sections or {}) do
+        in_use[n] = true
+      end
+      for _, t in ipairs(available) do
+        if not in_use[t] then candidates[#candidates + 1] = t end
+      end
+    else
+      candidates = available
+    end
+  elseif #prev_toks == 2 and prev_toks[1] == "slot"
+      and prev_toks[2] == "remove" then
+    -- Numeric slot indices >= 1 (slot 0 is protected).
+    candidates = {}
+    local af = require("auto-finder")
+    for i = 1, math.max(0, #(af.state.config.sections or {}) - 1) do
+      candidates[#candidates + 1] = tostring(i)
+    end
+  elseif #prev_toks == 3 and prev_toks[1] == "slot" and prev_toks[2] == "modify" then
+    -- After "slot modify N", complete available types (exclude
+    -- the type currently at slot N to avoid suggesting a no-op).
+    candidates = {}
+    local af = require("auto-finder")
+    local n = tonumber(prev_toks[3])
+    local current = n and (af.state.config.sections or {})[n + 1]
+    for _, t in ipairs(af._available_section_types()) do
+      if t ~= current then candidates[#candidates + 1] = t end
+    end
   elseif #prev_toks == 1 and prev_toks[1] == "help" then
     -- `help <topic>` opens the topic's help directly. Topics map to
     -- the verb groups so users discover what's available.
-    candidates = { "focus", "panel", "files", "repos", "general" }
+    candidates = { "focus", "panel", "files", "repos", "slot", "general" }
   else
     candidates = {}
   end
@@ -593,6 +685,25 @@ local TOPIC_HELP = {
     "  buffer's path until it hits a direct child of workspace_root,",
     "  then calls neo-tree's `reveal_file` on the auto-finder-repos",
     "  source. No-op if the repos section's buffer isn't currently live.",
+    "",
+  },
+  slot = {
+    "",
+    "  slot add <type>              append a section of <type> at the end",
+    "  slot remove <N>              remove section at slot N (N >= 1)",
+    "  slot modify <N> <type>       replace the section at slot N",
+    "  slot types                   list all available section types",
+    "",
+    "  <type> must be one of `slot types`'s output. Bundled today:",
+    "    config, files, repos, buffers.",
+    "  Third-party sections registered via `cfg.section_modules` also",
+    "  show up; the list is recomputed on every `slot types` call.",
+    "",
+    "  Slot 0 (config) is protected — `remove` / `modify` reject it.",
+    "  Duplicates are rejected: a section type can only live in one slot",
+    "  at a time. Mutations are SESSION-ONLY in v0.2.5 (do not survive",
+    "  nvim restart); persisting via the auto-finder state namespace is",
+    "  a follow-up.",
     "",
   },
   general = {

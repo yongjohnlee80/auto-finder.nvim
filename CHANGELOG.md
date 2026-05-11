@@ -2,6 +2,85 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.5] — 2026-05-11 — `buffers` section + `slot add/remove/modify` DSL + per-project sections
+
+Three additive features. Extends ADR 0008 with the slot-DSL
+addendum.
+
+### Added
+
+- **`buffers` section** — new section module at
+  `lua/auto-finder/sections/buffers.lua` wrapping neo-tree's
+  bundled `buffers` source. Lists currently-open nvim buffers
+  in the panel; `<cr>` / `S` / `s` / `t` route through the v0.2.4
+  editor-window resolver so opens land in a real editor window,
+  not the panel column. Discoverable via `slot types`.
+
+- **Slot DSL** (admin REPL):
+
+  ```text
+  slot add <type>          append a section of <type> at the end
+  slot remove <N>          remove section at slot N (N >= 1)
+  slot modify <N> <type>   replace section at slot N with <type>
+  slot types               list all available section types
+  ```
+
+  Available `<type>` is the union of bundled section modules
+  under `lua/auto-finder/sections/*.lua` (excluding leading-
+  underscore helpers + `init.lua`) and keys in
+  `cfg.section_modules` (the v0.2.1 third-party registry). Tab
+  completion + topical help (`help slot`) updated.
+
+  Slot 0 (config) is protected; `remove`/`modify` reject it.
+  Duplicate types are rejected (a section can only live in one
+  slot at a time). `<type>` is required for `slot add` — there
+  is no default type.
+
+  Implementation: `M._rebuild_section_registry(new_sections)`
+  disposes the live auto-core section registry, re-runs
+  `auto-finder.sections.setup`, attaches a fresh registry, and
+  re-applies the auto-finder focus-wrapper that mirrors
+  `state.section` / persists `last_section` / pumps the catch-up
+  neo-tree redraw.
+
+- **Per-project section composition.** `cfg.sections` is now
+  loaded from `auto-finder.state.get_sections_for(workspace_key)`
+  at setup time and on every `worktree:switched` event. The
+  workspace key is `sha256(core.workspace_root):sub(1,16)` —
+  same shape md-harpoon uses for per-project pin scoping. Fresh
+  / unknown projects start with the new
+  `{ "config", "files", "repos" }` baseline (was
+  `{ "config", "files" }`). Slot mutations write through to the
+  per-project record automatically.
+
+  Motivation: different projects want different section mixes —
+  a Go service might prefer `config + files + buffers`, a
+  database-ops project will want a `dbase` section (planned), a
+  remote-VPS workflow will want a `remote` section (planned).
+  The v0.2.1 `cfg.section_modules` registry lets third parties
+  ship those types; v0.2.5 persists which projects use which.
+
+### Changed
+
+- **Default `cfg.sections`** is now `{ "config", "files", "repos" }`
+  (was `{ "config", "files" }`). Fresh / unknown projects pick
+  this up; projects with a persisted record keep theirs.
+
+- **Keymap audit** (ADR 0008) extended to `buffers` section
+  mappings — `<cr>` / `S` / `s` / `t` route through the editor-
+  window resolver; `e`/`<`/`>`/`.`/`<esc>` are unbound. `H`
+  (toggle_hidden) is filesystem-only and not injected on
+  buffers (the source doesn't display hidden gitignored files).
+
+### Migration
+
+Fully additive. Existing consumers who didn't override
+`cfg.sections` get the new `{ config, files, repos }` default
+(one extra section). Slot DSL is opt-in via the admin REPL.
+Persisted state lives in `auto-finder.state.namespace`'s new
+`sections` map — older state files just don't have it; the
+fallback to `cfg.sections` keeps everything working.
+
 ## [v0.2.4] — 2026-05-11 — files-panel keymap audit (ADR 0008)
 
 Inherited neo-tree keymaps were never audited against our

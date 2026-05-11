@@ -28,6 +28,8 @@
 ---  state.set_user_width(n?)          → ok, err?
 ---  state.get_last_section()          → integer?
 ---  state.set_last_section(n?)        → ok, err?
+---  state.get_sections_for(wskey)     → string[]?
+---  state.set_sections_for(wskey, …)  → ok, err?
 ---  state.watch_user_width(cb)        → handle
 ---  state.watch_last_section(cb)      → handle
 ---
@@ -55,6 +57,22 @@ local NS_NAME = "auto-finder"
 local DEFAULTS = {
   user_width   = nil,  -- nil = dynamic (resolved from cfg.width.default)
   last_section = nil,  -- nil = use cfg.default_section on next open
+  -- v0.2.5: per-project section configuration. Keyed by workspace
+  -- hash (sha256(workspace_root):sub(1,16) — the same shape
+  -- md-harpoon uses for its per-project pins). Each entry holds
+  -- the ordered slot list (e.g. { "config", "files", "buffers" }).
+  -- Empty default — `get_sections_for(wskey)` returns nil for an
+  -- unknown project, and `auto-finder.setup()` falls back to its
+  -- own `{ config, files, repos }` default in that case.
+  --
+  -- Why per-project: different projects want different section
+  -- mixes — e.g. a Go service uses `files + buffers`, a database
+  -- ops project will want a `dbase` section (planned), a remote
+  -- VPS workflow will want a `remote` section (planned). The
+  -- v0.2.1 `cfg.section_modules` registry lets third parties
+  -- register those types; this map persists the user's per-project
+  -- composition.
+  sections = {},
 }
 
 local _ns = nil
@@ -141,6 +159,53 @@ end
 ---@return any
 function M.watch_last_section(cb)
   return M.namespace():watch("last_section", cb)
+end
+
+-- ── per-project section composition (v0.2.5) ─────────────────
+
+---Fetch the persisted section list for `workspace_key`. Returns
+---nil if the project has no recorded composition (caller falls
+---back to its own default — `auto-finder.setup()` uses
+---`{ "config", "files", "repos" }`).
+---@param workspace_key string?  sha256(workspace_root):sub(1,16)
+---@return string[]?
+function M.get_sections_for(workspace_key)
+  if type(workspace_key) ~= "string" or workspace_key == "" then return nil end
+  local all = M.namespace():get("sections") or {}
+  local v = all[workspace_key]
+  if type(v) == "table" and #v > 0 then return v end
+  return nil
+end
+
+---Persist the section list for `workspace_key`. Validates only
+---that the list is a non-empty array of strings; uniqueness +
+---registry-resolvability are CALL-SITE concerns
+---(`auto-finder.slot_add` / `slot_modify` enforce them).
+---@param workspace_key string
+---@param sections string[]
+---@return boolean ok, string? err
+function M.set_sections_for(workspace_key, sections)
+  if type(workspace_key) ~= "string" or workspace_key == "" then
+    return false, "workspace_key must be a non-empty string"
+  end
+  if type(sections) ~= "table" or #sections == 0 then
+    return false, "sections must be a non-empty list of strings"
+  end
+  for _, s in ipairs(sections) do
+    if type(s) ~= "string" or s == "" then
+      return false, "sections list must contain non-empty strings"
+    end
+  end
+  -- Copy so we don't store a reference to a table the caller
+  -- might mutate; auto-core's state diff treats deep-eq, but a
+  -- defensive copy keeps the persisted shape decoupled.
+  local copy = {}
+  for i, s in ipairs(sections) do copy[i] = s end
+
+  local all = vim.deepcopy(M.namespace():get("sections") or {})
+  all[workspace_key] = copy
+  M.namespace():set("sections", all)
+  return true
 end
 
 -- ── test-only ────────────────────────────────────────────────

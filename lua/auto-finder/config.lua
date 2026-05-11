@@ -52,7 +52,16 @@ M.defaults = {
     max = 100,
   },
   default_section = 1,
-  sections = { "config", "files" },
+  -- v0.2.5 changed default from { "config", "files" } to
+  -- { "config", "files", "repos" }. The new default reflects how
+  -- most users want auto-finder out of the box. Slot 0 (config)
+  -- is the admin REPL and is always present; slots 1+ are
+  -- per-project mutable via `slot add/remove/modify` (see
+  -- ADR 0008 addendum). Live sections for a project are loaded
+  -- from `auto-finder.state.get_sections_for(workspace_key)` at
+  -- setup time AND on every `worktree:switched` topic; this
+  -- field is only the FALLBACK when no per-project record exists.
+  sections = { "config", "files", "repos" },
   -- Third-party section modules. When a name in `cfg.sections` is
   -- not found at `auto-finder.sections.<name>`, the registry checks
   -- this map for an explicit module path. Lets external plugins ship
