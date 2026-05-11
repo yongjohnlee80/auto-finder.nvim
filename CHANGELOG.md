@@ -2,6 +2,59 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.9] — 2026-05-11 — buffers-refresh against panel win-keyed state + winfixbuf-wrap
+
+Bug fix. With the `buffers` section mounted via the v0.2.5 slot DSL,
+opening a new file in an editor window (or deleting one with `:bd`)
+left the panel's tree stale until a manual remount or section
+switch. Two root causes chained:
+
+### Fixed
+
+- **Stub-state refresh on `BufAdd`/`BufDelete`.** The bundled fork's
+  `auto-finder/neotree/sources/buffers/init.lua` subscribes to
+  `VIM_BUFFER_ADDED` / `VIM_BUFFER_DELETED` and calls
+  `buffers_changed_internal`, which resolves state via
+  `manager.get_state(name, tabid)`. For our `position = "current"`
+  mounts the rendered state lives under `state_by_win[panel_winid]`,
+  not `state_by_tab[tabid]` — so the fork's call returns the tab-
+  keyed STUB (no path, no winid, no tree) and the refresh silently
+  no-ops. Same shape as the v0.2.1 → v0.2.3 files-follow mishap;
+  the fix follows the same pattern.
+
+  Installed a new `M._install_buffers_refresh_autocmd(group)` that
+  subscribes to `BufAdd` / `BufDelete` / `BufFilePost` / `TermOpen`
+  at the consumer layer in `auto-finder/init.lua`. Debounced 80ms,
+  fires `items.get_opened_buffers(state)` against the win-keyed
+  buffers state bound to `M.state.panel_winid` — same body the fork
+  intends to run, against the right state. Installed unconditionally
+  so `slot add buffers` after setup still gets covered.
+
+- **`renderer.show_nodes` raised `E1513` against the panel's
+  `winfixbuf`.** `lua/auto-finder/neotree/ui/renderer.lua:1230`'s
+  `position = "current"` branch swaps the freshly-built tree buffer
+  into `state.winid` via `nvim_win_set_buf` — which is exactly what
+  the auto-core panel singleton's `winfixbuf = true` exists to block.
+  The fork's own subscriber never reached this branch because it
+  bailed earlier on the stub-state path check; our direct-against-
+  the-real-state call did. Result: `state.loading` got stuck `true`
+  (set on entry, never reset because the error fired before the
+  reset), and every subsequent refresh early-returned.
+
+  Wrapped the call in `M._panel:with_unfixed_buf(...)` (same shape
+  auto-agents uses for slot terminal placement). Also force-clears
+  `state.loading` defensively before the call so any prior stuck-
+  loading state (from a previous unwrapped run, plugin reload,
+  etc.) doesn't permanently brick subsequent refreshes.
+
+### Added
+
+- `M._install_buffers_refresh_autocmd(group)` on the public API.
+- Smoke section [19] (5 assertions) exercises the new descriptor,
+  end-to-end tree growth on `:split <new_file>`, and the
+  state-keying invariants (panel-winid match, cwd match). All 151
+  assertions green.
+
 ## [v0.2.8] — 2026-05-11 — port `buffers` source + in-place slot mutation + retroactive smoke (rule #4 catch-up)
 
 Three bugs that escaped v0.2.5 because the iteration shipped

@@ -986,6 +986,98 @@ ok("config slot buffer survives slot_remove (in-place mutation)",
 ok("active section stays on config slot (0) after slot_remove",
   af._registry.active == 0)
 
+-- ───────────────────────── 19. v0.2.9 — buffers-refresh against panel win-keyed state ────────────────────────
+--
+-- Regression test for the v0.2.9 fix. The forked buffers source's
+-- internal BufAdd/BufDelete subscriber resolves state via
+-- `manager.get_state(name, tabid)` — which returns a `state_by_tab`
+-- stub (no path/winid/tree) for `position = "current"` mounts. The
+-- result was that opening a buffer AFTER the panel mounted left the
+-- tree empty until a manual remount. The fix installs our own
+-- BufAdd autocmd that walks `_get_all_states()` for the win-keyed
+-- buffers state bound to `M.state.panel_winid` and calls
+-- `items.get_opened_buffers(state)` directly — same body, right
+-- state. Assert the effect: opening a fresh file with the buffers
+-- panel active grows the tree's `state.tree.nodes.by_id` set.
+print("\n[19] v0.2.9 — buffers-refresh against panel win-keyed state")
+
+-- (a) The wiring function exists on the public API.
+ok("M._install_buffers_refresh_autocmd is a function",
+  type(af._install_buffers_refresh_autocmd) == "function")
+
+-- (b) Setup installed an autocmd in the AutoFinderPanel group with
+--   our descriptor — single-call assertion that the audit landed
+--   regardless of whether buffers is the live section. The desc is
+--   the contract-level identifier; matching on it is a stable check.
+local _refresh_autos = vim.api.nvim_get_autocmds({ event = "BufAdd" })
+local _refresh_found = false
+for _, a in ipairs(_refresh_autos) do
+  if (a.desc or ""):find(
+       "auto-finder: buffers-refresh against panel win-keyed state", 1, true) then
+    _refresh_found = true; break
+  end
+end
+ok("BufAdd autocmd installed with buffers-refresh descriptor",
+  _refresh_found)
+
+-- (c) Switch to the buffers section (via slot_add since the default
+--   config in this smoke driver doesn't have it). Open a probe file
+--   in an editor split outside the panel; assert the tree grew.
+af.slot_add("buffers")
+local _buffers_idx = require("auto-finder.sections")._by_name["buffers"]
+ok("buffers section was added by slot_add for this test",
+  _buffers_idx ~= nil)
+af.focus(_buffers_idx)
+vim.wait(120)  -- mount + first render
+
+-- Probe file: a real file under cwd (state.path resolves to cwd) so
+-- `is_subpath(state.path, file_path)` matches. tempname() lives under
+-- $TMPDIR — outside cwd — so we can't just create a temp file; use
+-- the repo's tests/ dir which definitely IS within cwd.
+local _probe_path = vim.fn.getcwd() .. "/tests/_buffers_refresh_probe.txt"
+do
+  local fh = io.open(_probe_path, "w")
+  fh:write("smoke probe"); fh:close()
+end
+local _prev_win = vim.api.nvim_get_current_win()
+
+local _mgr = require("auto-finder.neotree.sources.manager")
+local function _tree_info()
+  for _, s in ipairs(_mgr._get_all_states()) do
+    if s.name == "buffers" and s.tree then
+      local n = 0
+      for _ in pairs(s.tree.nodes.by_id or {}) do n = n + 1 end
+      return n, s.path or "<nil>", s.winid or -1
+    end
+  end
+  return -1, "<no state>", -1
+end
+local _tree_size = function() local n = _tree_info(); return n end
+local _size_before, _state_path, _state_winid = _tree_info()
+ok("buffers state visible to autocmd (path matches cwd, winid matches panel)",
+   _state_path == vim.fn.getcwd() and _state_winid == af.state.panel_winid)
+
+-- Open the file in a side split (so we don't replace the panel buffer).
+vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_path))
+-- Debounce is 80ms; wait long enough for fire() to land plus a poll cycle.
+vim.wait(400, function()
+  return _tree_size() > _size_before
+end, 20)
+local _size_after = _tree_size()
+ok("buffers tree grew after opening a new file (before=" ..
+   _size_before .. " after=" .. _size_after .. ")",
+   _size_after > _size_before)
+
+-- Cleanup: close the probe window, delete the buffer + the file on disk.
+pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+for _, b in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_get_name(b) == _probe_path then
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+end
+pcall(os.remove, _probe_path)
+pcall(vim.api.nvim_set_current_win, _prev_win)
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.2.0"
+M.version = "0.2.9"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -523,6 +523,25 @@ function M.setup(user_opts)
     M._install_files_follow_autocmd(group)
   end
 
+  -- Buffers-refresh: own BufAdd/BufDelete/BufFilePost/TermOpen
+  -- autocmd that re-renders the buffers source against the panel's
+  -- win-keyed state. The forked buffers source's internal subscriber
+  -- (`buffers/init.lua:setup` → `manager.subscribe(VIM_BUFFER_ADDED,
+  -- ...)`) calls `buffers_changed_internal`, which resolves state
+  -- via `manager.get_state(name, tabid)` — same stub-vs-real
+  -- mismatch as files-follow had: `position = "current"` mounts
+  -- key the rendered state under `state_by_win[panel_winid]`, not
+  -- `state_by_tab[tabid]`, so the stub is returned and the refresh
+  -- silently no-ops. Installing the autocmd here drives the same
+  -- `items.get_opened_buffers(state)` body against the right state.
+  --
+  -- Installed UNCONDITIONALLY — slot DSL `slot add buffers` can land
+  -- the section live after setup, and the fire body checks at fire
+  -- time whether a real buffers state exists. The fast path is cheap
+  -- (one `_get_all_states()` walk per debounce window) so the
+  -- unconditional install is acceptable even when buffers isn't on.
+  M._install_buffers_refresh_autocmd(group)
+
   -- v0.2.5: per-project section composition. Subscribe to
   -- `worktree:switched` so a worktree switch re-loads the
   -- persisted section list for that project (or falls back to
@@ -612,6 +631,105 @@ function M._install_files_follow_autocmd(group)
       vim.defer_fn(fire, DEBOUNCE_MS)
     end,
   })
+end
+
+---Install a debounced BufAdd/BufDelete/BufFilePost/TermOpen autocmd
+---that re-renders the buffers source against the panel's win-keyed
+---state. Works around the same forked-neo-tree state-keying mismatch
+---that broke files-follow in v0.2.1 — `buffers/init.lua`'s
+---`buffers_changed_internal` walks `manager.get_state(name, tabid)`
+---which returns a `state_by_tab` stub (no path, no winid, no tree)
+---for `position = "current"` mounts. The rendered state lives under
+---`state_by_win[panel_winid]` and the stub-returning refresh path
+---silently no-ops, leaving the panel empty until something else
+---triggers a full rebuild.
+---
+---This autocmd does the same job correctly: walk
+---`mgr._get_all_states()` for the win-keyed buffers state bound to
+---`M.state.panel_winid` and call `items.get_opened_buffers(state)`
+---directly. Idempotent w.r.t. the fork's internal subscriber — both
+---can fire on the same BufAdd; the fork's call hits the stub and
+---no-ops, ours hits the real state and updates the tree.
+---@param group integer  -- AutoFinderPanel augroup
+function M._install_buffers_refresh_autocmd(group)
+  local pending = false
+  local DEBOUNCE_MS = 80
+
+  local function fire()
+    pending = false
+    -- The buffers section's bufnr cache is the cheapest "is the panel
+    -- currently showing buffers?" check. If buffers isn't the active
+    -- section we still refresh the state in case the user toggles to
+    -- it — but skipping when no state exists keeps the loop cheap.
+    local panel_winid = M.state and M.state.panel_winid
+    if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
+      return
+    end
+    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+    if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
+    local ok_items, items = pcall(require,
+      "auto-finder.neotree.sources.buffers.lib.items")
+    if not ok_items then return end
+    for _, state in ipairs(mgr._get_all_states()) do
+      if state.name == "buffers"
+          and state.winid == panel_winid
+          and state.path
+          and state.tree then
+        -- The renderer's "current" branch
+        -- (lua/auto-finder/neotree/ui/renderer.lua:1230) swaps the
+        -- freshly-built tree buffer into `state.winid` via
+        -- `nvim_win_set_buf` — which raises E1513 against the
+        -- auto-core.ui.panel singleton's `winfixbuf = true`. The
+        -- forked source's own VIM_BUFFER_ADDED subscriber never hits
+        -- this because it bails on the stub-state path check, but our
+        -- direct-against-the-real-state call DOES reach the swap.
+        -- Wrap with `Panel:with_unfixed_buf` (same shape auto-agents
+        -- uses for slot terminal placement) so the swap goes through
+        -- and `winfixbuf` is restored before we return.
+        --
+        -- Also force-clear a stuck `state.loading` flag. The flag
+        -- gets stuck-true when a prior call errored before the
+        -- function reached its `state.loading = false` reset — e.g.
+        -- exactly the winfixbuf-raise this very fix addresses. Once
+        -- stuck, every future `get_opened_buffers` early-returns.
+        -- Clearing here is idempotent vs. concurrent runs (there's
+        -- no real concurrency — the debounce serializes us).
+        state.loading = false
+        local panel = M._panel
+        if panel and type(panel.with_unfixed_buf) == "function" then
+          panel:with_unfixed_buf(function()
+            pcall(items.get_opened_buffers, state)
+          end)
+        else
+          pcall(items.get_opened_buffers, state)
+        end
+      end
+    end
+  end
+
+  -- Three signals to react to:
+  --   BufAdd       — a buffer joined the buffer list (`:edit foo.md`,
+  --                  bufferline pin, etc.)
+  --   BufDelete    — a buffer left the list (`:bd`, `:bw`)
+  --   BufFilePost  — a buffer was renamed (`:saveas`, `:Rename`)
+  --   TermOpen     — a terminal buffer was created; show up under
+  --                  the "Terminals" sub-folder.
+  -- We deliberately do NOT react to BufEnter — get_opened_buffers
+  -- runs through every buffer + every nesting folder, and BufEnter
+  -- fires ~10×/s during navigation. Debouncing alone isn't enough;
+  -- the BufAdd/BufDelete pair captures all the mutations cheaply.
+  local events = { "BufAdd", "BufDelete", "BufFilePost", "TermOpen" }
+  for _, e in ipairs(events) do
+    vim.api.nvim_create_autocmd(e, {
+      group = group,
+      desc = "auto-finder: buffers-refresh against panel win-keyed state",
+      callback = function()
+        if pending then return end
+        pending = true
+        vim.defer_fn(fire, DEBOUNCE_MS)
+      end,
+    })
+  end
 end
 
 ---Resolve the workspace root via auto-core when present, falling
