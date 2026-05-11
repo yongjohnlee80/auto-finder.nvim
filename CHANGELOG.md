@@ -2,6 +2,70 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.8] — 2026-05-11 — port `buffers` source + in-place slot mutation + retroactive smoke (rule #4 catch-up)
+
+Three bugs that escaped v0.2.5 because the iteration shipped
+without smoke coverage for the new surface — exactly what
+[[lua-nvim-plugin-development]] rule #4 forbids. Retroactive
+test addition under section [18] of `tests/smoke.lua` now binds
+all three so they can't regress.
+
+### Fixed
+
+- **`buffers` source module is now in the fork.** Ported from
+  upstream `neo-tree.nvim/lua/neo-tree/sources/buffers/` to
+  `lua/auto-finder/neotree/sources/buffers/` (init.lua,
+  commands.lua, components.lua, lib/items.lua) with
+  `require("neo-tree.…")` → `require("auto-finder.neotree.…")`
+  rewrites and `vim.bo.filetype == "neo-tree"` →
+  `"auto-finder"` rewrites. v0.2.7 added `"buffers"` to
+  `cfg.neo_tree.sources` but the module didn't exist —
+  neo-tree's source-loader logged "Source module not found
+  buffers" and the mount asserted at `manager.lua:124`.
+
+- **Slot mutation no longer disposes the entire registry.**
+  v0.2.5's `_rebuild_section_registry` called
+  `Registry:dispose()` which walks every section and runs
+  `nvim_buf_delete(buf, { force = true })` on the cached bufnr
+  — INCLUDING the config slot's buffer (where the user was
+  typing). The panel window's bufnr then pointed at a deleted
+  buffer and went blank. v0.2.8 replaces dispose + re-attach
+  with surgical in-place mutation:
+
+  * compute `removed = old_names \ new_names`;
+  * close + delete buffers only for the removed sections;
+  * carry surviving sections' bufnrs forward into the new
+    `_bufs` table (keyed by section number);
+  * mutate `registry.sections` + `registry._bufs` in place
+    (the click router's closure captures the registry by
+    reference, so it stays valid).
+
+  No buffer destruction except for slots actually being removed.
+
+- **`slot add` / `slot remove` pin focus to the config slot (0).**
+  Both are invoked from the admin REPL — jumping the user away
+  from the prompt is jarring AND hides the next prompt. Per
+  user direction 2026-05-11. `slot modify N` still focuses N
+  (the slot whose type just changed).
+
+### Added
+
+- **Smoke section [18]** — retroactive coverage for the v0.2.5
+  surface. Asserts (a) the ported buffers source module loads,
+  (b) `_register_bundled_neotree_sources` populates `buffers`
+  + `filesystem` + is idempotent, (c) the config slot's buffer
+  survives `slot_add` / `slot_remove`, (d) active section stays
+  on 0 after mutations. Suite: 133 → 146 (+13 new).
+
+### Lesson codified
+
+Smoke gap was the root cause for all three bugs. Rule #4 of
+`lua-nvim-plugin-development` mandates a test per iteration;
+rule #11 mandates asserting observable effects. v0.2.5 honored
+neither for the buffers section and slot DSL paths. Memory
+entry `feedback_nvim_plugin_kb_first.md` saved so this isn't
+repeated.
+
 ## [v0.2.7] — 2026-05-11 — register `buffers` source so `slot add buffers` mounts
 
 Hotfix for v0.2.5's buffers section. The fork's

@@ -913,6 +913,79 @@ if repos_def then
       tostring(before_buf), tostring(after_buf)))
 end
 
+-- ───────────────────────── 18. v0.2.8 — buffers source + slot mutation ─────
+-- Retroactive coverage for three bugs that escaped v0.2.5 because the
+-- iteration shipped without smoke per `lua-nvim-plugin-development` rule
+-- #4 ("each iteration adds or extends a test for the change it makes"):
+--   (a) `buffers` source module was missing from the fork (port added v0.2.8).
+--   (b) cfg.neo_tree.sources didn't include "buffers" so default_configs
+--       wasn't populated (helper added v0.2.7 / fixed v0.2.8).
+--   (c) slot mutations dispose()'d the entire registry, deleting EVERY
+--       section's buffer (including the active config slot's buffer that
+--       the user was typing in) → panel went blank. Fixed by in-place
+--       mutation path in v0.2.8.
+-- Rule #11 (effect-was-observed not call-was-made) — each assertion
+-- targets an observable post-condition (require returns a table, buffer
+-- survives, active section stays as expected), not just "the function
+-- was called".
+print("\n[18] v0.2.8 — buffers source + slot mutation preserves panel")
+
+-- (a) Fork ships the buffers source module after the v0.2.8 port.
+local ok_buf_src = pcall(require, "auto-finder.neotree.sources.buffers")
+ok("auto-finder.neotree.sources.buffers loads (ported v0.2.8)",
+  ok_buf_src)
+
+-- (b) auto-finder's _register_bundled_neotree_sources adds "buffers"
+-- (alongside "filesystem") to cfg.neo_tree.sources so neo-tree's
+-- default_config build covers it.
+local cfg_probe = { neo_tree = {} }
+af._register_bundled_neotree_sources(cfg_probe)
+ok("_register_bundled_neotree_sources adds 'buffers'",
+  vim.tbl_contains(cfg_probe.neo_tree.sources, "buffers"))
+ok("_register_bundled_neotree_sources adds 'filesystem'",
+  vim.tbl_contains(cfg_probe.neo_tree.sources, "filesystem"))
+af._register_bundled_neotree_sources(cfg_probe)  -- idempotency check
+local count_buffers = 0
+for _, s in ipairs(cfg_probe.neo_tree.sources) do
+  if s == "buffers" then count_buffers = count_buffers + 1 end
+end
+ok("_register_bundled_neotree_sources is idempotent (no duplicate 'buffers')",
+  count_buffers == 1)
+
+-- (c) Slot mutation preserves the config slot's buffer. The previous
+-- dispose-and-reattach path deleted every section's bufnr — including
+-- the active config slot — which made the panel window's bufnr point at
+-- a dead buffer. The v0.2.8 in-place mutation keeps survivors intact.
+af.focus(0)
+vim.wait(50)
+local config_buf_before = af._registry._bufs[0]
+ok("config slot buffer exists pre-mutation",
+  config_buf_before ~= nil and vim.api.nvim_buf_is_valid(config_buf_before))
+
+local add_err = af.slot_add("buffers")
+ok("slot_add('buffers') succeeded",
+  add_err == nil, tostring(add_err))
+ok("buffers section registered after slot_add",
+  require("auto-finder.sections")._by_name["buffers"] ~= nil)
+local config_buf_after_add = af._registry._bufs[0]
+ok("config slot buffer survives slot_add (in-place mutation)",
+  config_buf_after_add == config_buf_before
+    and vim.api.nvim_buf_is_valid(config_buf_after_add))
+ok("active section stays on config slot (0) after slot_add",
+  af._registry.active == 0)
+
+local rm_err = af.slot_remove(#af.state.config.sections - 1)
+ok("slot_remove(<last>) succeeded",
+  rm_err == nil, tostring(rm_err))
+ok("buffers section deregistered after slot_remove",
+  require("auto-finder.sections")._by_name["buffers"] == nil)
+local config_buf_after_remove = af._registry._bufs[0]
+ok("config slot buffer survives slot_remove (in-place mutation)",
+  config_buf_after_remove == config_buf_before
+    and vim.api.nvim_buf_is_valid(config_buf_after_remove))
+ok("active section stays on config slot (0) after slot_remove",
+  af._registry.active == 0)
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

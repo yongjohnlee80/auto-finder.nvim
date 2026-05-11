@@ -993,20 +993,49 @@ end
 function M._rebuild_section_registry(new_sections, opts)
   opts = opts or {}
   local cfg = M.state and M.state.config
-  if not cfg then return end
+  if not cfg or not M._registry then return end
 
-  -- Mutate the live config + the local sections registry.
+  -- v0.2.8: in-place mutation. Disposing the entire auto-core
+  -- registry deletes every section's buffer (including the
+  -- config slot's buffer the user is typing in), which makes
+  -- the panel window's bufnr point to a deleted buffer — the
+  -- panel goes blank and the user has to recover manually.
+  -- Surgically update instead: figure out which sections are
+  -- being removed, only close THOSE, keep survivors' buffers
+  -- intact, mutate `registry.sections` in place, refresh the
+  -- winbar. Click router stays valid because it closes over the
+  -- (mutated) `r` instance, not the old sections array.
+
+  -- Compute the diff between old and new section names.
+  local old_set, new_set = {}, {}
+  for _, s in ipairs(cfg.sections) do old_set[s] = true end
+  for _, s in ipairs(new_sections) do new_set[s] = true end
+
+  local removed_numbers = {}
+  for _, s in ipairs(M._registry.sections or {}) do
+    if not new_set[s.name] then
+      removed_numbers[s.number] = s
+    end
+  end
+
+  -- Close + delete buffers ONLY for sections being removed.
+  for number, s in pairs(removed_numbers) do
+    local b = M._registry._bufs and M._registry._bufs[number]
+    if b and vim.api.nvim_buf_is_valid(b) then
+      if s.on_close then pcall(s.on_close, b) end
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+    if M._registry._bufs then M._registry._bufs[number] = nil end
+  end
+
+  -- Refresh the auto-finder.sections registry against the new
+  -- list, then build fresh section_defs. Survivors keep their
+  -- section number; new entries get fresh numbers; the
+  -- registry's `_bufs` keyed by number retains survivor buffers
+  -- because the section module's `_bufnr` was preserved.
   cfg.sections = new_sections
   require("auto-finder.sections").setup(new_sections, cfg.section_modules)
 
-  -- Dispose the old auto-core registry so its click router is
-  -- unhooked from the panel before we attach a fresh one.
-  if M._registry and type(M._registry.dispose) == "function" then
-    pcall(function() M._registry:dispose() end)
-  end
-
-  -- Build section_defs the same way setup() does.
-  local section_mod   = require("auto-core").ui.section
   local sections_list = require("auto-finder.sections").enabled()
   local section_defs  = {}
   for _, s in ipairs(sections_list) do
@@ -1023,52 +1052,57 @@ function M._rebuild_section_registry(new_sections, opts)
     }
   end
 
-  -- Resolve the section to focus after rebuild:
+  -- Carry survivor `_bufs` entries forward into a fresh table
+  -- keyed by their (potentially new) section number. Use the
+  -- name → bufnr map of the old registry as the bridge.
+  local old_bufs_by_name = {}
+  for _, s in ipairs(M._registry.sections or {}) do
+    if new_set[s.name] then
+      old_bufs_by_name[s.name] = M._registry._bufs
+        and M._registry._bufs[s.number]
+    end
+  end
+  local new_bufs = {}
+  for _, def in ipairs(section_defs) do
+    local b = old_bufs_by_name[def.name]
+    if b and vim.api.nvim_buf_is_valid(b) then
+      new_bufs[def.number] = b
+    end
+  end
+
+  -- Mutate the existing registry in place. Click router
+  -- continues to work — its closure captures the registry
+  -- table by reference, and we never re-create that table.
+  M._registry.sections = section_defs
+  M._registry._bufs    = new_bufs
+
+  -- Resolve the section to focus after the mutation:
   --   1. opts.focus_after (caller-supplied),
-  --   2. the previously-active section if it's still in the list,
+  --   2. previously-active section if still present,
   --   3. cfg.default_section,
   --   4. 0.
   local target = opts.focus_after
   if not target then
     local prev = M.state.section
-    if prev and require("auto-finder.sections").resolve(prev) then
+    if prev ~= nil and require("auto-finder.sections").resolve(prev) then
       target = prev
     else
       target = cfg.default_section or 0
     end
   end
 
-  M._registry = section_mod.attach(M._panel, section_defs, {
-    default = target,
-  })
-
-  -- Re-apply the auto-finder focus wrapper (originally installed
-  -- in setup()): mirror state.section, persist last_section,
-  -- pump the catch-up neo-tree redraw. Without this, slot DSL
-  -- would short-circuit the auto-finder-specific side-effects.
-  local _original_focus = M._registry.focus
-  local _post_focus = function(active)
-    M.state.section = active
-    pcall(require("auto-finder.state").set_last_section, active)
-    local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
-    if ok_mgr and type(manager.redraw) == "function" then
-      pcall(manager.redraw, "filesystem")
-    end
-  end
-  M._registry.focus = function(self, key)
-    local result = _original_focus(self, key)
-    if result then _post_focus(self.active) end
-    return result
+  -- Focus drives the panel's winbar refresh too. Idempotent
+  -- when target == registry.active.
+  if M._registry.focus then
+    pcall(function() M._registry:focus(target) end)
   end
 
-  -- Refresh the panel's winbar so the new tab strip renders.
+  -- Defensive winbar refresh in case `focus` short-circuited
+  -- (target == active) but the section list changed underneath.
   if M.refresh_winbar then pcall(M.refresh_winbar) end
 
   -- v0.2.5: persist the new section list under the current
-  -- workspace key. No-op when workspace_root isn't yet captured
-  -- (e.g. user is mid-startup before worktree.nvim's vim_did_enter
-  -- branch fires) — the next mutation when keys ARE available
-  -- writes through.
+  -- workspace key. No-op when workspace_root isn't yet captured.
   local wskey = M._workspace_key()
   if wskey then
     pcall(require("auto-finder.state").set_sections_for,
@@ -1136,7 +1170,12 @@ function M.slot_add(section_type)
   end
   local new_sections = vim.list_extend({}, cfg.sections)
   new_sections[#new_sections + 1] = section_type
-  M._rebuild_section_registry(new_sections)
+  -- v0.2.8: pin focus to the config slot during slot mutations.
+  -- Both `slot add` and `slot remove` are invoked from the admin
+  -- REPL — the user is typing in slot 0; jumping them to a
+  -- newly-mounted (and possibly empty) section is jarring AND
+  -- hides the next prompt. Per user direction 2026-05-11.
+  M._rebuild_section_registry(new_sections, { focus_after = 0 })
   return nil
 end
 
@@ -1160,7 +1199,11 @@ function M.slot_remove(n)
   end
   local new_sections = vim.list_extend({}, cfg.sections)
   table.remove(new_sections, list_idx)
-  M._rebuild_section_registry(new_sections)
+  -- Pin focus to slot 0 (config). The previously-active section
+  -- may have been the one just removed (or its index shifted),
+  -- and we want the user to stay in the admin REPL where they
+  -- typed the command. Per user direction 2026-05-11.
+  M._rebuild_section_registry(new_sections, { focus_after = 0 })
   return nil
 end
 
