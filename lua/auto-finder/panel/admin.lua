@@ -333,12 +333,38 @@ local function dispatch(input)
     local sub = toks[2]
     if sub == "add" then
       local section_type = toks[3]
-      local err = af.slot_add(section_type)
-      if err then
-        emit({ "slot add: " .. err })
+      if not section_type or section_type == "" then
+        -- v0.2.6: a bare `slot add` is more useful as discovery
+        -- than as an error. Print the still-available types
+        -- (excluding ones already in use) so the user can pick.
+        local in_use = af.state.config.sections or {}
+        local in_use_set = {}
+        for _, n in ipairs(in_use) do in_use_set[n] = true end
+        local available, not_in_use = af._available_section_types(), {}
+        for _, t in ipairs(available) do
+          if not in_use_set[t] then not_in_use[#not_in_use + 1] = t end
+        end
+        if #not_in_use == 0 then
+          emit({
+            "slot add: every available type is already in use",
+            "  in use:    " .. table.concat(in_use, " "),
+            "  available: " .. table.concat(available, ", "),
+          })
+        else
+          emit({
+            "slot add <type> — pick one:",
+            "  available: " .. table.concat(not_in_use, ", "),
+            "  in use:    " .. table.concat(in_use, " "),
+          })
+        end
       else
-        emit({ "slot added: " .. section_type
-          .. "   sections: " .. table.concat(af.state.config.sections, " ") })
+        local err = af.slot_add(section_type)
+        if err then
+          emit({ "slot add: " .. err })
+        else
+          emit({ "slot added: " .. section_type
+            .. "   sections: " .. table.concat(af.state.config.sections, " ") })
+        end
       end
     elseif sub == "remove" then
       local n = tonumber(toks[3])

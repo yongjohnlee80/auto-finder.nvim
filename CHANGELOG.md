@@ -2,6 +2,24 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.6] — 2026-05-11 — `slot add` (no args) lists available types
+
+Tiny UX follow-up. v0.2.5 made `slot add <type>` reject a bare
+invocation with "section type required". Bare `slot add` is now
+more useful as discovery: it prints the available types
+(excluding any already in use) AND the currently-in-use list, so
+the user can pick without consulting `slot types` separately.
+
+```
+auto-finder> slot add
+slot add <type> — pick one:
+  available: buffers
+  in use:    config files repos
+```
+
+When every available type is already in use, prints a different
+message ("every available type is already in use" + both lists).
+
 ## [v0.2.5] — 2026-05-11 — `buffers` section + `slot add/remove/modify` DSL + per-project sections
 
 Three additive features. Extends ADR 0008 with the slot-DSL
