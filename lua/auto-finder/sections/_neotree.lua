@@ -71,26 +71,37 @@ local function setup_live_refresh(section, source)
     end, LIVE_REFRESH_DEBOUNCE_MS)
   end
 
-  -- Re-mount the section's neo-tree source at the current cwd so the
-  -- visible tree reflects the new working directory. After a `:cd`
-  -- (or `<leader>gw` worktree switch), neo-tree's internal state is
-  -- still rooted at the OLD cwd — a plain `manager.refresh` would
-  -- re-render the old tree. cmd.execute with action=show +
-  -- position=current re-anchors at the active cwd; for files-follow,
-  -- we then nudge follow_current_file to fire once on the next
-  -- BufEnter.
+  -- Re-anchor the section's neo-tree state to the current cwd
+  -- WITHOUT re-mounting. v0.2.2 used `cmd.execute({ position =
+  -- "current" })` which mounts neo-tree in the currently-focused
+  -- window — if the user was in an editor when `worktree:switched`
+  -- fired, that surfaced as a duplicate "neo-tree" panel inside the
+  -- editor. v0.2.3 mutates `state.path` on every registered state
+  -- for our source and calls `manager.refresh`, keeping the existing
+  -- panel window as the sole render target.
   local function reanchor_to_cwd()
     if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
       return
     end
-    pcall(function()
-      require("auto-finder.neotree.command").execute({
-        source = source,
-        action = "show",
-        position = "current",
-        reveal = false,
-      })
-    end)
+    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+    if not ok_mgr then return end
+    local cwd = vim.fn.getcwd()
+    -- _get_all_states is forked-specific (manager.lua:138 in the
+    -- bundled fork). Iterate every state belonging to our source —
+    -- `manager.get_state(name)` alone may return a stub state that
+    -- was never navigate()'d.
+    if type(mgr._get_all_states) == "function" then
+      for _, state in ipairs(mgr._get_all_states()) do
+        -- Scope to states bound to a window — `state_by_tab` stubs
+        -- carry name+source but were never navigate()'d (path=nil)
+        -- and shouldn't be retargeted: the manager.refresh below
+        -- would otherwise turn the stub into a duplicate render.
+        if state.name == source and state.winid then
+          state.path = cwd
+        end
+      end
+    end
+    pcall(mgr.refresh, source)
   end
 
   local function ensure_subscribed()

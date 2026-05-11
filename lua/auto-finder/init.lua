@@ -466,6 +466,99 @@ function M.setup(user_opts)
   if require("auto-finder.sections")._by_name["repos"] then
     M._install_repos_follow_autocmd(group)
   end
+
+  -- Files-follow: install our OWN BufEnter autocmd that calls
+  -- `filesystem.follow()` directly. v0.2.1 / v0.2.2 relied on the
+  -- forked neo-tree's internal event-bus subscription
+  -- (`manager.subscribe(events.VIM_BUFFER_ENTER, ...)`), which is
+  -- installed inside `M.navigate()` and gated on
+  -- `config.follow_current_file.enabled` AT MOUNT TIME. Two
+  -- failure modes followed: (1) runtime toggles never wired the
+  -- subscription, and (2) the neotree event chain was silently
+  -- no-op'ing for `position = "current"` mounts in some sessions.
+  -- Subscribing here gives a single hot path that respects the
+  -- live `cfg.files.follow` flag and works regardless of when the
+  -- section was mounted.
+  if require("auto-finder.sections")._by_name["files"] then
+    M._install_files_follow_autocmd(group)
+  end
+end
+
+---Install a debounced BufEnter autocmd that calls the filesystem
+---source's `follow()` whenever a real file is entered. Gated on
+---the live `M.state.config.files.follow` flag so admin-DSL toggles
+---take effect instantly. No-op when the buffer isn't a real file
+---or focus is inside one of our own panel buffers.
+---@param group integer  -- AutoFinderPanel augroup
+function M._install_files_follow_autocmd(group)
+  local pending = false
+  local DEBOUNCE_MS = 60
+
+  local function fire()
+    pending = false
+    local live_cfg = M.state and M.state.config
+    if not (live_cfg and live_cfg.files and live_cfg.files.follow) then
+      return
+    end
+    local buf = vim.api.nvim_get_current_buf()
+    if vim.bo[buf].buftype ~= "" then return end  -- skip terminal/qf/help
+    local ft = vim.bo[buf].filetype
+    if ft == "auto-finder" or ft == "auto-finder-popup"
+        or ft == "auto-finder-config" or ft == "auto-finder-help" then
+      return
+    end
+    local path = vim.api.nvim_buf_get_name(buf)
+    if path == nil or path == "" then return end
+
+    -- Drive reveal directly against the panel's win-keyed state.
+    -- Why not just call `filesystem.follow()`? Its `follow_internal`
+    -- pulls state via `manager.get_state(name, tabid)` with no
+    -- winid, which returns the TAB-keyed stub state (path=nil)
+    -- when the panel was mounted with `position = "current"` —
+    -- that path keeps the rendered state under `state_by_win[winid]`,
+    -- not `state_by_tab[tabid]`. Direct-reveal walks
+    -- `_get_all_states()` for the auto-finder panel's win-keyed
+    -- filesystem state and drives the same reveal body (fs_scan
+    -- get_items → renderer.focus_node).
+    local panel_winid = M.state and M.state.panel_winid
+    if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
+      return
+    end
+    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+    if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
+    local state
+    for _, s in ipairs(mgr._get_all_states()) do
+      if s.name == "filesystem" and s.winid == panel_winid and s.path then
+        state = s
+        break
+      end
+    end
+    if not state then return end
+
+    local path_norm = vim.fs.normalize(path)
+    local root_norm = state.path:gsub("/+$", "")
+    if path_norm:sub(1, #root_norm + 1) ~= root_norm .. "/" then return end
+
+    local ok_scan, fs_scan = pcall(require,
+      "auto-finder.neotree.sources.filesystem.lib.fs_scan")
+    local ok_ren, renderer = pcall(require, "auto-finder.neotree.ui.renderer")
+    if not (ok_scan and ok_ren) then return end
+    pcall(function()
+      fs_scan.get_items(state, nil, path_norm, function()
+        pcall(renderer.focus_node, state, path_norm, true)
+      end)
+    end)
+  end
+
+  vim.api.nvim_create_autocmd("BufEnter", {
+    group = group,
+    desc = "auto-finder: files-follow direct reveal (cfg.files.follow)",
+    callback = function()
+      if pending then return end
+      pending = true
+      vim.defer_fn(fire, DEBOUNCE_MS)
+    end,
+  })
 end
 
 ---Resolve the workspace root via auto-core when present, falling

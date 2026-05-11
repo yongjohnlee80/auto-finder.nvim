@@ -2,6 +2,52 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.3] — 2026-05-11 — direct files-follow + worktree:switched re-anchor without duplicate mount
+
+Hotfix for two issues against v0.2.2:
+
+### Fixed
+
+- **`<leader>gw` was opening a duplicate panel inside the editor.**
+  v0.2.2's `worktree:switched` re-anchor called
+  `cmd.execute({ position = "current" })`, which mounts neo-tree
+  in the CURRENTLY-FOCUSED window. If the user was in an editor
+  when the topic fired, the auto-finder fork mounted into the
+  editor (surfacing as a duplicate "neo-tree" panel). v0.2.3
+  mutates `state.path` on every win-keyed filesystem state for
+  our source and calls `manager.refresh` — no re-mount, no focus
+  change.
+
+- **Files-follow was not visibly revealing the active buffer in
+  the tree.** v0.2.1 / v0.2.2 relied on the forked neo-tree's
+  internal subscription
+  (`manager.subscribe(events.VIM_BUFFER_ENTER, …)`) installed
+  inside `M.navigate()`. Even when the subscription wired up, the
+  reveal path silently no-op'd because
+  `filesystem.follow_internal` resolves state via
+  `manager.get_state(name, tabid)` (no winid), which returns the
+  TAB-keyed stub with `path = nil` — failing the early-return
+  guard `if not state.path then return false end`. The actual
+  rendered state lives under `state_by_win[panel_winid]` for
+  `position = "current"` mounts.
+
+  v0.2.3 installs an explicit BufEnter autocmd
+  (`M._install_files_follow_autocmd` in `auto-finder/init.lua`)
+  that drives the reveal directly against the panel's WIN-keyed
+  state: walks `manager._get_all_states()` for the filesystem
+  state bound to `M.state.panel_winid`, verifies the buffer's
+  path is under `state.path`, then calls `fs_scan.get_items` +
+  `renderer.focus_node` (the same body `follow_internal` runs,
+  but with the right state). Respects the live `cfg.files.follow`
+  flag at fire time, so admin-DSL toggles take effect instantly.
+
+### Notes
+
+The forked neo-tree's `follow_current_file` plumbing is untouched —
+we just stopped depending on it. Consumers passing
+`cfg.neo_tree.filesystem.follow_current_file` get the same
+upstream-flavored behavior; the new autocmd is additive.
+
 ## [v0.2.2] — 2026-05-11 — admin-DSL toggles for follow mode + worktree:switched re-anchor
 
 Follow-up to v0.2.1. The follow flags were consumable as setup()
