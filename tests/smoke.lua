@@ -3,16 +3,26 @@
 --
 -- Exits 0 on PASS, 1 on FAIL. Each test prints its own line.
 
+-- Derive plugin_root from the smoke script's own path so the driver
+-- runs unmodified on any machine (Mac, Linux, bare-repo worktree,
+-- plain clone). `tests/smoke.lua` is two levels below the plugin root.
+local plugin_root = vim.fn.fnamemodify(
+  vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
+
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 for _, p in ipairs({
-  "/home/johno/Source/Projects/nvim-plugins/auto-finder.nvim",
+  plugin_root,
   -- auto-core soft-dep: when present, enables Phase 4b live-refresh
-  -- in the files section. Tests below verify the wiring.
-  "/home/johno/Source/Projects/nvim-plugins/auto-core.nvim",
+  -- in the files section AND the help-overlay path. Prefer a sibling
+  -- bare-repo worktree if present; fall back to the lazy install.
+  vim.fn.fnamemodify(plugin_root, ":h") .. "/auto-core.nvim/main",
+  LAZY .. "/auto-core.nvim",
   LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
 }) do
-  vim.opt.runtimepath:prepend(p)
+  if vim.fn.isdirectory(p) == 1 then
+    vim.opt.runtimepath:prepend(p)
+  end
 end
 -- Auto-finder ships its own forked neo-tree at lua/auto-finder/neotree.
 -- Upstream `neo-tree.nvim` is intentionally NOT on the runtimepath
@@ -268,8 +278,7 @@ af.focus(1)  -- back to files for the rest of the suite
 -- reliable and unambiguous about the bug it's guarding.
 print("\n[7e] regression: position=current no longer clamps to longest+4")
 
-local renderer_path = vim.fn.expand(
-  "/home/johno/Source/Projects/nvim-plugins/auto-finder.nvim/lua/auto-finder/neotree/ui/renderer.lua")
+local renderer_path = plugin_root .. "/lua/auto-finder/neotree/ui/renderer.lua"
 local renderer_src = vim.fn.readfile(renderer_path)
 local clamp_line, clamp_lineno
 for i, line in ipairs(renderer_src) do

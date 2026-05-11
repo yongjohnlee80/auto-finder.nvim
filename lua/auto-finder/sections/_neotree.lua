@@ -120,6 +120,120 @@ local function setup_live_refresh(section, source)
   end
 end
 
+-- ── `?` help overlay ──────────────────────────────────────────
+--
+-- v0.2.1: replace neo-tree's default `show_help` popup with our
+-- own auto-core.ui.float.help_overlay invocation. The overlay
+-- renders a centered float listing the section's effective
+-- keymaps; closes on q / <esc> / <cr>.
+--
+-- Implementation strategy:
+--   1. On every section focus, install a buffer-local `?` nmap
+--      that calls show_help. Buffer-local so the override is
+--      scoped to the section's buffer.
+--   2. The overlay reads the section's effective mappings from
+--      the buffer's actual nmap set (via nvim_buf_get_keymap), so
+--      it reflects whatever neo-tree wired + any consumer overrides.
+--   3. If auto-core isn't installed, fall back to a plain float we
+--      manage ourselves — no hard dep on auto-core for `?`.
+
+---Collect a `{ key, desc }` list of effective keymaps for `bufnr`.
+---Reads vim's buffer-local nmaps so the overlay reflects whatever
+---neo-tree (and any consumer override) actually wired.
+---@param bufnr integer
+---@return { key: string, desc: string }[]
+local function collect_keymaps(bufnr)
+  local out = {}
+  local maps = vim.api.nvim_buf_get_keymap(bufnr, "n")
+  for _, m in ipairs(maps) do
+    if type(m.lhs) == "string" and m.lhs ~= "" then
+      local desc = m.desc
+      if (desc == nil or desc == "") and type(m.rhs) == "string" then
+        desc = m.rhs
+      end
+      out[#out + 1] = { key = m.lhs, desc = desc or "" }
+    end
+  end
+  table.sort(out, function(a, b) return a.key < b.key end)
+  return out
+end
+
+---Render the help float for the section's bufnr.
+---@param section_name string
+---@param bufnr integer
+local function show_help(section_name, bufnr)
+  local entries = collect_keymaps(bufnr)
+  if #entries == 0 then
+    vim.notify("auto-finder: no keymaps found for '" .. section_name .. "'",
+      vim.log.levels.INFO)
+    return
+  end
+
+  -- Format two columns: lhs (left-aligned, padded) | desc.
+  local widest_lhs = 0
+  for _, e in ipairs(entries) do
+    if #e.key > widest_lhs then widest_lhs = #e.key end
+  end
+  local lines = { ("auto-finder · %s · keymaps"):format(section_name), "" }
+  for _, e in ipairs(entries) do
+    lines[#lines + 1] = string.format(" %-" .. widest_lhs .. "s   %s",
+      e.key, e.desc)
+  end
+
+  -- Prefer auto-core.ui.float.help_overlay when present (it ships
+  -- close-on-q/<esc> + a dimmed backdrop); otherwise roll our own.
+  local ok, core = pcall(require, "auto-core")
+  if ok and type(core) == "table" and type(core.ui) == "table"
+      and type(core.ui.float) == "table"
+      and type(core.ui.float.help_overlay) == "function" then
+    pcall(core.ui.float.help_overlay, lines, {
+      title = (" %s "):format(section_name),
+    })
+    return
+  end
+
+  -- Fallback float — q / <esc> / <cr> close.
+  local hbuf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(hbuf, 0, -1, false, lines)
+  vim.bo[hbuf].modifiable = false
+  vim.bo[hbuf].filetype = "auto-finder-help"
+  local width = math.min(vim.o.columns - 4, 80)
+  local height = math.min(vim.o.lines - 4, #lines + 2)
+  local hwin = vim.api.nvim_open_win(hbuf, true, {
+    relative = "editor",
+    width    = width,
+    height   = height,
+    row      = math.floor((vim.o.lines - height) / 2),
+    col      = math.floor((vim.o.columns - width) / 2),
+    style    = "minimal",
+    border   = "rounded",
+    title    = (" %s "):format(section_name),
+  })
+  for _, lhs in ipairs({ "q", "<esc>", "<cr>" }) do
+    vim.keymap.set("n", lhs, function()
+      if vim.api.nvim_win_is_valid(hwin) then
+        vim.api.nvim_win_close(hwin, true)
+      end
+    end, { buffer = hbuf, nowait = true, silent = true })
+  end
+end
+
+---Install the buffer-local `?` keymap that opens the help overlay.
+---Idempotent (re-installation replaces the prior mapping).
+---@param section_name string
+---@param bufnr integer
+local function install_help_keymap(section_name, bufnr)
+  if not bufnr or not vim.api.nvim_buf_is_valid(bufnr) then return end
+  vim.keymap.set("n", "?", function()
+    show_help(section_name, bufnr)
+  end, {
+    buffer = bufnr,
+    nowait = true,
+    silent = true,
+    desc = "auto-finder: show section keymaps",
+  })
+end
+
 ---Defensive monkey-patch: neo-tree's `renderer.get_expanded_nodes`
 ---indexes `tree:get_nodes(...)` without nil-checking, but the
 ---win_enter redirect can call it with `old_state.tree = nil` when a
@@ -233,7 +347,10 @@ function M.build_section(opts)
   function section.get_buffer(panel_winid)
     if buf_valid() then return section._bufnr end
     local b = mount(panel_winid, source, label)
-    if b then section._bufnr = b end
+    if b then
+      section._bufnr = b
+      install_help_keymap(label, b)
+    end
     return b
   end
 
@@ -247,7 +364,12 @@ function M.build_section(opts)
       if b then
         section._bufnr = b
         vim.api.nvim_win_set_buf(panel_winid, b)
+        install_help_keymap(label, b)
       end
+    else
+      -- Buffer survived; re-assert the `?` keymap defensively in
+      -- case neo-tree's setup wiped buffer-local maps on re-render.
+      install_help_keymap(label, bufnr)
     end
   end
 

@@ -53,7 +53,29 @@ M.defaults = {
   },
   default_section = 1,
   sections = { "config", "files" },
-  files = {},
+  -- Third-party section modules. When a name in `cfg.sections` is
+  -- not found at `auto-finder.sections.<name>`, the registry checks
+  -- this map for an explicit module path. Lets external plugins ship
+  -- a section without writing into our `lua/auto-finder/sections/`
+  -- namespace.
+  --
+  -- Example:
+  --   cfg.section_modules = {
+  --     ["tasks"] = "myplugin.afsection.tasks",
+  --   }
+  --   cfg.sections = { "config", "files", "repos", "tasks" }
+  --
+  -- The module must return a section table with the
+  -- AutoFinderSection contract (see `sections/init.lua`).
+  section_modules = {},
+  files = {
+    -- Reveal the file backing the currently focused window in the
+    -- files tree on every BufEnter. Maps to neo-tree's native
+    -- `filesystem.follow_current_file = { enabled = true }` when
+    -- true. Default ON because users commonly expect the tree to
+    -- track the active buffer (matches LazyVim defaults).
+    follow = true,
+  },
   -- Per-section opts for the `repos` section. Forwarded to the
   -- `auto-finder-repos` neo-tree source on setup so consumers can
   -- inject window mappings without forking the plugin.
@@ -64,7 +86,16 @@ M.defaults = {
   -- Configure those via `require("worktree").setup({ root = …,
   -- bare_dir = … })` and the repos section picks them up at render
   -- time.
-  repos = {},
+  repos = {
+    -- Reveal the repo containing the currently focused buffer in
+    -- the repos panel on every BufEnter. Implemented as a BufEnter
+    -- autocmd that walks up from the buffer's path until it hits a
+    -- direct child of `core.workspace_root`, then reveals it.
+    -- Default OFF — the active-repo signal is noisier than the
+    -- active-file signal, and many users don't switch repos
+    -- mid-session.
+    follow = false,
+  },
   hijack_directories = true,
   -- Forwarded as-is to `require("auto-finder.neotree").setup()`
   -- before any section mounts. The forked neo-tree no longer needs

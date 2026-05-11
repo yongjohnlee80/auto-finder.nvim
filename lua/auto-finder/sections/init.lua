@@ -22,15 +22,27 @@ M._by_name = {}
 ---@type table<integer, AutoFinderSection>
 M._by_number = {}
 
----Load a section module by name and assign it an index.
+---Load a section module by name and assign it an index. Consults
+---the optional `section_modules` registry first so third-party
+---plugins can ship a section without writing into our
+---`lua/auto-finder/sections/` namespace; falls back to the bundled
+---`auto-finder.sections.<name>` path.
 ---@param name string
 ---@param number integer
+---@param section_modules table<string, string>?  -- name → require path
 ---@return AutoFinderSection|nil
-local function load_section(name, number)
-  local ok, mod = pcall(require, "auto-finder.sections." .. name)
+local function load_section(name, number, section_modules)
+  local module_path
+  if section_modules and type(section_modules[name]) == "string" then
+    module_path = section_modules[name]
+  else
+    module_path = "auto-finder.sections." .. name
+  end
+  local ok, mod = pcall(require, module_path)
   if not ok then
     require("auto-finder.logger").error("sections",
-      "failed to load section '" .. name .. "': " .. tostring(mod))
+      "failed to load section '" .. name .. "' from '" .. module_path
+        .. "': " .. tostring(mod))
     return nil
   end
   if type(mod) ~= "table" or type(mod.get_buffer) ~= "function" then
@@ -49,7 +61,8 @@ end
 ---Initialize the registry from a config-style list of section names.
 ---Resets any previously-loaded registry. Idempotent.
 ---@param section_names string[]
-function M.setup(section_names)
+---@param section_modules table<string, string>?  -- name → require path overrides
+function M.setup(section_names, section_modules)
   M._enabled = {}
   M._by_name = {}
   M._by_number = {}
@@ -58,7 +71,7 @@ function M.setup(section_names)
     -- We follow auto-agents' "0 = control surface" convention: the first
     -- entry in cfg.sections gets index 0, the second gets 1, and so on.
     local number = i - 1
-    local section = load_section(name, number)
+    local section = load_section(name, number, section_modules)
     if section then
       table.insert(M._enabled, section)
       M._by_name[section.name] = number

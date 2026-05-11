@@ -2,6 +2,63 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.1] — 2026-05-11 — follow mode + section_modules + custom `?` help
+
+### Added
+
+- **Follow mode (per-section).**
+  - `cfg.files.follow = true` (default **on**) — maps to neo-tree's
+    native `filesystem.follow_current_file = { enabled = true }`. The
+    files tree reveals the active buffer on every BufEnter.
+  - `cfg.repos.follow = true` (default **off**) — installs a
+    debounced BufEnter autocmd that walks up from the active buffer's
+    path to find a direct child of `core.workspace_root` (resolved
+    via auto-core), then reveals it in the repos section's neo-tree
+    via `cmd.execute({ source = "auto-finder-repos", reveal = true,
+    reveal_file = … })`. No-op when auto-core isn't installed or
+    workspace_root hasn't been captured yet.
+
+- **`cfg.section_modules`** — name → require-path registry that lets
+  third-party plugins ship sections without writing into
+  `lua/auto-finder/sections/`. When a name in `cfg.sections` is not
+  resolvable against the bundled namespace, the registry is consulted
+  for an explicit module path.
+
+  ```lua
+  require("auto-finder").setup({
+    sections = { "config", "files", "repos", "tasks" },
+    section_modules = { tasks = "myplugin.afsection.tasks" },
+  })
+  ```
+
+  Bundled section names (`config`, `files`, `repos`) keep working
+  unchanged — the registry is consulted first; missing entries fall
+  back to `auto-finder.sections.<name>`.
+
+- **`?` keymap → custom help overlay.** Replaces neo-tree's default
+  `show_help` popup with a centered float listing the section's
+  effective keymaps (read live from `vim.api.nvim_buf_get_keymap`,
+  so consumer overrides surface). Uses
+  `auto-core.ui.float.help_overlay` when available; falls back to a
+  plain managed float otherwise. Installed as a buffer-local nmap in
+  `build_section`'s `get_buffer` / `on_focus` paths so it survives
+  neo-tree's re-renders.
+
+### Fixed
+
+- Smoke harness no longer hard-codes Linux paths
+  (`/home/johno/Source/Projects/...`). `plugin_root` is now derived
+  from `debug.getinfo(1, "S").source`, and the per-host `rtp` prepends
+  are guarded with `vim.fn.isdirectory(p) == 1`. Suite runs unchanged
+  on Mac and Linux.
+
+### Migration
+
+Fully additive. Consumers who don't touch `cfg.files.follow`,
+`cfg.repos.follow`, or `cfg.section_modules` see one behavior change
+only: files-follow becomes on by default. Override with
+`cfg.files = { follow = false }` to restore prior behavior.
+
 ## [v0.2.0] — 2026-05-10 — auto-core consumer
 
 First release on top of [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)

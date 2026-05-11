@@ -38,8 +38,31 @@ function M.setup(user_opts)
   local cfg = require("auto-finder.config").apply(user_opts)
   M.state.config = cfg
 
-  -- Build / rebuild the section registry.
-  require("auto-finder.sections").setup(cfg.sections)
+  -- Build / rebuild the section registry. `cfg.section_modules`
+  -- (added in v0.2.1) lets third-party plugins ship sections from
+  -- arbitrary require paths; see `config.lua` for the shape.
+  require("auto-finder.sections").setup(cfg.sections, cfg.section_modules)
+
+  -- Translate `cfg.files.follow` (per-section convenience flag) into
+  -- neo-tree's native `filesystem.follow_current_file = { enabled }`
+  -- so the filesystem source reveals the active buffer on BufEnter.
+  -- Must happen BEFORE the neotree setup call below so the merged
+  -- config carries the value into the source's defaults.
+  if cfg.files and cfg.files.follow ~= nil then
+    cfg.neo_tree = cfg.neo_tree or {}
+    cfg.neo_tree.filesystem = cfg.neo_tree.filesystem or {}
+    local existing = cfg.neo_tree.filesystem.follow_current_file
+    if existing == nil then
+      cfg.neo_tree.filesystem.follow_current_file = {
+        enabled = cfg.files.follow == true,
+        leave_dirs_open = false,
+      }
+    elseif type(existing) == "table" and existing.enabled == nil then
+      -- Don't clobber a consumer's explicit shape; only seed the
+      -- enabled flag they didn't set.
+      existing.enabled = cfg.files.follow == true
+    end
+  end
 
   -- Forward the consumer's `cfg.neo_tree` table to our forked
   -- neo-tree's setup. Phase 5: this is what gets consumer-side
@@ -433,6 +456,99 @@ function M.setup(user_opts)
       vim.schedule(function() M._maybe_hijack_startup_directory() end)
     end
   end
+
+  -- Repos-follow: when enabled, reveal the repo containing the
+  -- currently focused buffer in the repos panel on every BufEnter.
+  -- Walks up from the buffer's path to find a direct child of
+  -- `core.workspace_root` (the canonical sticky workspace value from
+  -- auto-core), then calls neo-tree's reveal on the auto-finder-repos
+  -- source. Disabled by default (cfg.repos.follow = false); see
+  -- config.lua for the rationale.
+  if cfg.repos and cfg.repos.follow
+      and require("auto-finder.sections")._by_name["repos"] then
+    M._install_repos_follow_autocmd(group)
+  end
+end
+
+---Resolve the workspace root via auto-core when present, falling
+---back to nil. Used by the repos-follow autocmd to anchor the
+---walk-up-to-child computation. Returns nil if auto-core isn't
+---installed OR the workspace root hasn't been captured yet (e.g.
+---worktree.nvim hadn't run its launch-cwd capture for some reason).
+---@return string?
+function M._workspace_root()
+  local ok, core = pcall(require, "auto-core")
+  if not ok or type(core) ~= "table" or type(core.git) ~= "table"
+      or type(core.git.worktree) ~= "table"
+      or type(core.git.worktree.get_workspace_root) ~= "function" then
+    return nil
+  end
+  local v = core.git.worktree.get_workspace_root()
+  if type(v) == "string" and v ~= "" then return v end
+  return nil
+end
+
+---Install a debounced BufEnter autocmd that reveals the repo
+---containing the active buffer's path inside the repos section.
+---Skipped silently if auto-core's workspace_root isn't available
+---(repo discovery needs the workspace anchor).
+---@param group integer  -- the augroup id to attach to
+function M._install_repos_follow_autocmd(group)
+  local last_revealed = nil
+  local pending = false
+  local DEBOUNCE_MS = 80
+
+  local function reveal()
+    pending = false
+    local buf = vim.api.nvim_get_current_buf()
+    if vim.bo[buf].buftype ~= "" then return end  -- skip terminals / quickfix / help
+    local path = vim.api.nvim_buf_get_name(buf)
+    if path == nil or path == "" then return end
+
+    local root = M._workspace_root()
+    if not root then return end
+    local root_norm = vim.fs.normalize(root):gsub("/+$", "")
+    local path_norm = vim.fs.normalize(path)
+    if path_norm:sub(1, #root_norm + 1) ~= root_norm .. "/" then return end
+
+    -- Compute the direct child of root that contains `path`. That's
+    -- the repo the user is editing inside.
+    local rel = path_norm:sub(#root_norm + 2)
+    local first = rel:match("^([^/]+)")
+    if not first then return end
+    local repo_path = root_norm .. "/" .. first
+    if repo_path == last_revealed then return end
+
+    -- Only act if the repos section's buffer is currently live; we
+    -- don't want to force a remount on every BufEnter.
+    local repos = require("auto-finder.sections")._by_name["repos"]
+    local section = repos and require("auto-finder.sections")._by_number[repos]
+    if not section or not section._bufnr
+        or not vim.api.nvim_buf_is_valid(section._bufnr) then
+      return
+    end
+
+    pcall(function()
+      require("auto-finder.neotree.command").execute({
+        source = "auto-finder-repos",
+        action = "show",
+        position = "current",
+        reveal = true,
+        reveal_file = repo_path,
+      })
+    end)
+    last_revealed = repo_path
+  end
+
+  vim.api.nvim_create_autocmd("BufEnter", {
+    group = group,
+    desc = "auto-finder: repos-follow reveal on BufEnter (cfg.repos.follow)",
+    callback = function()
+      if pending then return end
+      pending = true
+      vim.defer_fn(reveal, DEBOUNCE_MS)
+    end,
+  })
 end
 
 ---Register the `auto-finder-repos` neo-tree source so
