@@ -71,6 +71,28 @@ local function setup_live_refresh(section, source)
     end, LIVE_REFRESH_DEBOUNCE_MS)
   end
 
+  -- Re-mount the section's neo-tree source at the current cwd so the
+  -- visible tree reflects the new working directory. After a `:cd`
+  -- (or `<leader>gw` worktree switch), neo-tree's internal state is
+  -- still rooted at the OLD cwd — a plain `manager.refresh` would
+  -- re-render the old tree. cmd.execute with action=show +
+  -- position=current re-anchors at the active cwd; for files-follow,
+  -- we then nudge follow_current_file to fire once on the next
+  -- BufEnter.
+  local function reanchor_to_cwd()
+    if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
+      return
+    end
+    pcall(function()
+      require("auto-finder.neotree.command").execute({
+        source = source,
+        action = "show",
+        position = "current",
+        reveal = false,
+      })
+    end)
+  end
+
   local function ensure_subscribed()
     if section._fs_subscribed then return end
     section._fs_subscribed = true
@@ -86,6 +108,22 @@ local function setup_live_refresh(section, source)
         return
       end
       schedule_refresh()
+    end)
+
+    -- Worktree switch → the panel is now showing the wrong tree.
+    -- Re-anchor to the new cwd AND re-establish the fs.watch at the
+    -- new root so subsequent live-refresh events fire correctly.
+    -- Scoped to `worktree:switched` only (deliberately NOT
+    -- `core.cwd:changed`): a plain `:cd` is too aggressive a trigger
+    -- — the user may be inspecting a side directory and doesn't
+    -- want the panel to re-anchor every time. The semantic
+    -- worktree-switch is the right boundary.
+    core.events.subscribe("worktree:switched", function()
+      vim.schedule(function()
+        if section._stop_fs_watch then section._stop_fs_watch() end
+        if section._ensure_fs_watch then section._ensure_fs_watch() end
+        reanchor_to_cwd()
+      end)
     end)
   end
 

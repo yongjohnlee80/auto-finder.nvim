@@ -2,6 +2,51 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.2] — 2026-05-11 — admin-DSL toggles for follow mode + worktree:switched re-anchor
+
+Follow-up to v0.2.1. The follow flags were consumable as setup()
+opts but the in-panel admin REPL didn't expose them. Three changes:
+
+### Added
+
+- **Admin DSL commands** for runtime toggle:
+
+  ```text
+  files follow on|off|toggle    reveal the active buffer in the files tree on BufEnter
+  repos follow on|off|toggle    reveal the active buffer's repo in the repos panel
+  ```
+
+  `status` output now includes a `follow  files: <state>  repos: <state>`
+  line. Tab completion + topical help (`help files`, `help repos`)
+  updated to surface the new verbs.
+
+- **Files-follow runtime mutability.** `files follow on|off|toggle`
+  mutates `neo.config.filesystem.follow_current_file.enabled` live
+  AND `af.state.config.files.follow`, then reloads the section.
+  No setup() re-run needed.
+
+- **Repos-follow runtime mutability.** The BufEnter autocmd is now
+  installed unconditionally (whenever the repos section exists)
+  and reads `af.state.config.repos.follow` at fire time, so
+  `repos follow on|off|toggle` takes effect instantly.
+
+- **`worktree:switched` re-anchor.** Sections with `live_refresh =
+  true` (today: the files section) now subscribe to the
+  `worktree:switched` topic and, on fire, stop+restart the fs.watch
+  at the new cwd AND re-mount the neo-tree source via
+  `cmd.execute({ action = "show", position = "current" })`. Combined
+  with files-follow, `<leader>gw` into a new worktree now refreshes
+  the files panel to the new tree AND reveals the active buffer.
+
+  Subscribed to `worktree:switched` only — NOT `core.cwd:changed`.
+  A plain `:cd` is too aggressive a trigger to justify re-anchoring
+  the panel; the semantic worktree-switch is the right boundary.
+
+### Migration
+
+Fully additive. No config-shape changes; v0.2.1's
+`cfg.files.follow = true` / `cfg.repos.follow = false` defaults stay.
+
 ## [v0.2.1] — 2026-05-11 — follow mode + section_modules + custom `?` help
 
 ### Added

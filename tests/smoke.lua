@@ -492,13 +492,22 @@ ok("repos.load() returns empty when worktree.nvim absent",
 ok("repos.worktree_paths() returns empty when worktree.nvim absent",
   type(repos_mod.worktree_paths()) == "table" and #repos_mod.worktree_paths() == 0)
 
--- Admin REPL: the verb / completion surface for `repos` is
--- intentionally absent — discovery is fully automatic via
--- worktree.nvim, no admin commands operate on the registry (there
--- is no registry).
+-- Admin REPL: as of v0.2.2, `repos` IS a top-level verb (carries the
+-- new `repos follow on|off|toggle` toggle). Discovery is still
+-- automatic via worktree.nvim — repos has no registry to manage —
+-- but the follow-mode toggle is a legitimate per-section setting,
+-- so the verb belongs in the completion surface.
 local _, top = admin._complete_at("", 0)
-ok("complete_at empty does NOT offer 'repos'",
-  not vim.tbl_contains(top, "repos"))
+ok("complete_at empty offers 'repos' (for `repos follow`)",
+  vim.tbl_contains(top, "repos"))
+local _, repos_subs = admin._complete_at("repos ", 6)
+ok("complete_at 'repos ' offers 'follow'",
+  vim.tbl_contains(repos_subs, "follow"))
+local _, follow_args = admin._complete_at("repos follow ", 13)
+ok("complete_at 'repos follow ' offers 'on'/'off'/'toggle'",
+  vim.tbl_contains(follow_args, "on")
+    and vim.tbl_contains(follow_args, "off")
+    and vim.tbl_contains(follow_args, "toggle"))
 
 -- Focusing the repos section must succeed end-to-end even with an
 -- empty discovery — the empty-state placeholder is rendered as a

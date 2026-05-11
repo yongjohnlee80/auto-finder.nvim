@@ -457,15 +457,13 @@ function M.setup(user_opts)
     end
   end
 
-  -- Repos-follow: when enabled, reveal the repo containing the
-  -- currently focused buffer in the repos panel on every BufEnter.
-  -- Walks up from the buffer's path to find a direct child of
-  -- `core.workspace_root` (the canonical sticky workspace value from
-  -- auto-core), then calls neo-tree's reveal on the auto-finder-repos
-  -- source. Disabled by default (cfg.repos.follow = false); see
-  -- config.lua for the rationale.
-  if cfg.repos and cfg.repos.follow
-      and require("auto-finder.sections")._by_name["repos"] then
+  -- Repos-follow: BufEnter autocmd that reveals the repo containing
+  -- the currently focused buffer in the repos panel. Installed
+  -- unconditionally (whenever the repos section exists) so the
+  -- admin-DSL toggle `repos follow on|off` can flip behavior live —
+  -- the autocmd body reads `M.state.config.repos.follow` at fire
+  -- time, so a false flag short-circuits cheaply.
+  if require("auto-finder.sections")._by_name["repos"] then
     M._install_repos_follow_autocmd(group)
   end
 end
@@ -500,6 +498,13 @@ function M._install_repos_follow_autocmd(group)
 
   local function reveal()
     pending = false
+    -- Re-read the live flag each fire so the admin-DSL toggle
+    -- (`repos follow on|off`) takes effect without re-installing
+    -- the autocmd.
+    local live_cfg = M.state and M.state.config
+    if not (live_cfg and live_cfg.repos and live_cfg.repos.follow) then
+      return
+    end
     local buf = vim.api.nvim_get_current_buf()
     if vim.bo[buf].buftype ~= "" then return end  -- skip terminals / quickfix / help
     local path = vim.api.nvim_buf_get_name(buf)

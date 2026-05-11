@@ -37,12 +37,14 @@ local function help_lines()
     "  files show dotfiles          show files starting with `.` in the tree",
     "  files hide hidden            hide .gitignored files",
     "  files hide dotfiles          hide files starting with `.`",
+    "  files follow on|off|toggle   reveal the active buffer in the files tree on BufEnter",
+    "  repos follow on|off|toggle   reveal the active buffer's repo in the repos panel",
     "  reload                       re-render the active section",
     "  status                       show current section, width, pin state",
     "  clear                        wipe history above the prompt",
     "  quit                         close the panel",
     "",
-    "  defaults: hidden + dotfiles are SHOWN. Use `files hide …` to filter.",
+    "  defaults: hidden + dotfiles are SHOWN; files-follow ON, repos-follow OFF.",
     "",
   }
 end
@@ -91,6 +93,62 @@ local function set_files_filter(what, show)
   return nil
 end
 
+---Resolve the new state for a follow-mode toggle command.
+---@param action string|nil  -- "on" | "off" | "toggle"
+---@param current boolean
+---@return boolean|nil new_state, string|nil err
+local function resolve_follow_action(action, current)
+  if action == "on" or action == "true" or action == "1" then
+    return true, nil
+  elseif action == "off" or action == "false" or action == "0" then
+    return false, nil
+  elseif action == "toggle" or action == nil or action == "" then
+    return not current, nil
+  end
+  return nil, "argument must be 'on', 'off', or 'toggle' (got '"
+    .. tostring(action) .. "')"
+end
+
+---Update neo-tree's runtime filesystem.follow_current_file.enabled
+---so toggling at runtime takes effect on the next BufEnter without
+---needing setup() to re-run.
+---@param enabled boolean
+local function set_neotree_follow(enabled)
+  local ok, neo = pcall(require, "auto-finder.neotree")
+  if not ok or type(neo.config) ~= "table" then return end
+  neo.config.filesystem = neo.config.filesystem or {}
+  local fcf = neo.config.filesystem.follow_current_file
+  if type(fcf) ~= "table" then
+    fcf = { leave_dirs_open = false }
+    neo.config.filesystem.follow_current_file = fcf
+  end
+  fcf.enabled = enabled == true
+end
+
+---Toggle a section's `cfg.<section>.follow` flag in-place on the
+---live config, mirroring the change into neo-tree's runtime config
+---for the files case so the BufEnter reveal turns on/off immediately.
+---For repos, the autocmd installed by init.lua reads the flag at
+---fire time, so the in-memory mutation is enough.
+---@param section "files"|"repos"
+---@param action string|nil  -- "on" | "off" | "toggle"
+---@return string|nil err
+local function set_follow(section, action)
+  local af = require("auto-finder")
+  if not (af.state and af.state.config) then
+    return "config not initialized (call require('auto-finder').setup() first)"
+  end
+  af.state.config[section] = af.state.config[section] or {}
+  local current = af.state.config[section].follow == true
+  local new_state, err = resolve_follow_action(action, current)
+  if err then return err end
+  af.state.config[section].follow = new_state
+  if section == "files" then
+    set_neotree_follow(new_state)
+  end
+  return nil
+end
+
 local function status_lines()
   local af = require("auto-finder")
   local sections = require("auto-finder.sections").enabled()
@@ -112,6 +170,8 @@ local function status_lines()
   if af.state.panel_winid and vim.api.nvim_win_is_valid(af.state.panel_winid) then
     live = tostring(vim.api.nvim_win_get_width(af.state.panel_winid))
   end
+  local files_follow = cfg.files and cfg.files.follow == true
+  local repos_follow = cfg.repos and cfg.repos.follow == true
   return {
     "",
     "  section: " .. tostring(af.state.section),
@@ -122,6 +182,8 @@ local function status_lines()
       "   min: " .. tostring(w.min) ..
       "   max: " .. tostring(w.max) ..
       "   cols: " .. tostring(cols),
+    "  follow  files: " .. (files_follow and "on" or "off") ..
+      "   repos: " .. (repos_follow and "on" or "off"),
     "  enabled: " .. table.concat(labels, " "),
     "",
   }
@@ -218,23 +280,49 @@ local function dispatch(input)
     end
 
   elseif verb == "files" then
-    local action = toks[2]   -- show | hide
-    local what = toks[3]     -- hidden | dotfiles
-    if action ~= "show" and action ~= "hide" then
-      emit({ "files: action must be 'show' or 'hide' (e.g. 'files show hidden')" })
-    elseif what ~= "hidden" and what ~= "dotfiles" then
-      emit({ "files " .. action .. ": target must be 'hidden' or 'dotfiles'" })
-    else
-      local err = set_files_filter(what, action == "show")
+    local action = toks[2]
+    if action == "follow" then
+      local err = set_follow("files", toks[3])
       if err then
-        emit({ "files: " .. err })
+        emit({ "files follow: " .. err })
       else
-        emit({ "files: " .. action .. " " .. what })
-        -- Re-render the files section so the change is visible
-        -- immediately. If the user is currently on a different
-        -- section, the change still takes effect on next focus.
+        local state = af.state.config.files.follow and "on" or "off"
+        emit({ "files follow: " .. state })
         vim.schedule(function() af.reload() end)
       end
+    elseif action == "show" or action == "hide" then
+      local what = toks[3]   -- hidden | dotfiles
+      if what ~= "hidden" and what ~= "dotfiles" then
+        emit({ "files " .. action .. ": target must be 'hidden' or 'dotfiles'" })
+      else
+        local err = set_files_filter(what, action == "show")
+        if err then
+          emit({ "files: " .. err })
+        else
+          emit({ "files: " .. action .. " " .. what })
+          -- Re-render the files section so the change is visible
+          -- immediately. If the user is currently on a different
+          -- section, the change still takes effect on next focus.
+          vim.schedule(function() af.reload() end)
+        end
+      end
+    else
+      emit({ "files: action must be 'show', 'hide', or 'follow' (got '"
+        .. tostring(action) .. "')" })
+    end
+
+  elseif verb == "repos" then
+    local action = toks[2]
+    if action == "follow" then
+      local err = set_follow("repos", toks[3])
+      if err then
+        emit({ "repos follow: " .. err })
+      else
+        local state = af.state.config.repos.follow and "on" or "off"
+        emit({ "repos follow: " .. state })
+      end
+    else
+      emit({ "repos: action must be 'follow' (got '" .. tostring(action) .. "')" })
     end
 
   else
@@ -345,7 +433,7 @@ local function complete_at(prompt, cursor_col)
 
   local candidates
   if #prev_toks == 0 then
-    candidates = { "help", "?", ":h", "focus", "panel", "files",
+    candidates = { "help", "?", ":h", "focus", "panel", "files", "repos",
                    "reload", "status", "clear", "quit" }
   elseif #prev_toks == 1 and prev_toks[1] == "focus" then
     -- Numeric indices and section names from the live registry.
@@ -377,14 +465,20 @@ local function complete_at(prompt, cursor_col)
     push(default_w)
     for _, v in ipairs({ 25, 30, 38, 50, 60, 80, 100 }) do push(v) end
   elseif #prev_toks == 1 and prev_toks[1] == "files" then
-    candidates = { "show", "hide" }
+    candidates = { "show", "hide", "follow" }
   elseif #prev_toks == 2 and prev_toks[1] == "files"
       and (prev_toks[2] == "show" or prev_toks[2] == "hide") then
     candidates = { "hidden", "dotfiles" }
+  elseif #prev_toks == 2 and prev_toks[1] == "files" and prev_toks[2] == "follow" then
+    candidates = { "on", "off", "toggle" }
+  elseif #prev_toks == 1 and prev_toks[1] == "repos" then
+    candidates = { "follow" }
+  elseif #prev_toks == 2 and prev_toks[1] == "repos" and prev_toks[2] == "follow" then
+    candidates = { "on", "off", "toggle" }
   elseif #prev_toks == 1 and prev_toks[1] == "help" then
     -- `help <topic>` opens the topic's help directly. Topics map to
     -- the verb groups so users discover what's available.
-    candidates = { "focus", "panel", "files", "general" }
+    candidates = { "focus", "panel", "files", "repos", "general" }
   else
     candidates = {}
   end
@@ -476,13 +570,29 @@ local TOPIC_HELP = {
   },
   files = {
     "",
-    "  files show hidden          show .gitignored files in the tree",
-    "  files show dotfiles        show files starting with `.`",
-    "  files hide hidden          hide .gitignored files",
-    "  files hide dotfiles        hide files starting with `.`",
+    "  files show hidden            show .gitignored files in the tree",
+    "  files show dotfiles          show files starting with `.`",
+    "  files hide hidden            hide .gitignored files",
+    "  files hide dotfiles          hide files starting with `.`",
+    "  files follow on|off|toggle   reveal the active buffer in the files tree",
     "",
-    "  defaults: hidden + dotfiles are SHOWN. Use `files hide ...` to filter.",
-    "  the change is applied immediately and persists for the session.",
+    "  defaults: hidden + dotfiles are SHOWN; files-follow is ON.",
+    "  follow maps to neo-tree's `filesystem.follow_current_file` and",
+    "  fires on every BufEnter. Toggling here updates the live runtime",
+    "  config (no setup() re-run needed) and persists for the session.",
+    "",
+  },
+  repos = {
+    "",
+    "  repos follow on|off|toggle   reveal the active buffer's repo",
+    "                                 in the repos panel on every BufEnter",
+    "",
+    "  default: OFF — the active-repo signal is noisier than the active-",
+    "  file signal. Requires auto-core (workspace_root is resolved via",
+    "  `auto-core.git.worktree.get_workspace_root()`). Walks up from the",
+    "  buffer's path until it hits a direct child of workspace_root,",
+    "  then calls neo-tree's `reveal_file` on the auto-finder-repos",
+    "  source. No-op if the repos section's buffer isn't currently live.",
     "",
   },
   general = {
@@ -503,7 +613,7 @@ local TOPIC_HELP = {
 help_topic_lines = function(topic)
   local body = TOPIC_HELP[topic]
   if not body then
-    return { "", "  no help for '" .. tostring(topic) .. "' (try focus|panel|files|general)", "" }
+    return { "", "  no help for '" .. tostring(topic) .. "' (try focus|panel|files|repos|general)", "" }
   end
   local out = { "", "  help: " .. topic }
   for _, l in ipairs(body) do table.insert(out, l) end
