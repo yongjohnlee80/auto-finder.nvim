@@ -2,6 +2,61 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.4] — 2026-05-11 — files-panel keymap audit (ADR 0008)
+
+Inherited neo-tree keymaps were never audited against our
+`position = "current"` mount mode. Several were silently broken
+(splits landing inside the panel column, opens racing
+`winfixbuf`), several conflicted with auto-core's models (width
+pin, workspace_root, sections), and `H` (toggle_hidden) bypassed
+the canonical `auto-core.files` preference. Full rationale in
+ADR 0008 (auto-agents KB `shared/adrs/0008-auto-finder-keymap-audit.md`).
+
+### Changed — routed to a real editor window
+
+`<cr>` · `<2-LeftMouse>` · `S` (split) · `s` (vsplit) · `t` (tabnew)
+now resolve a usable editor window via
+`M._editor_target_winid()` (walks `nvim_list_wins()` skipping
+panels / floats / winfixbuf / non-editor buftypes), set it as
+current, then run the open command there. Falls back to a fresh
+`rightbelow vsplit` when no editor window exists. Directories
+still toggle inline (no editor routing) — same as upstream's
+open-on-directory.
+
+### Changed — `H` rewired to the canonical preference
+
+`H` (toggle_hidden) now calls
+`auto-core.files.set_show_hidden(not get_show_hidden())` and
+refreshes the filesystem source. Replaces the upstream-native
+toggle that mutated only neo-tree's local state and could drift
+from `auto-core.files` (which the admin DSL's `files show/hide
+hidden` writes to). Single source of truth.
+
+### Removed — keys irrelevant to our model
+
+Bound to neo-tree's `"none"` (unbind sentinel) via the consumer-
+side override layer; the forked `defaults.lua` is unchanged so a
+future upstream rebase doesn't conflict on the audit.
+
+| Key | What it was | Why removed |
+|---|---|---|
+| `e` | `toggle_auto_expand_width` | Fights `auto-core.ui.panel`'s pin/dynamic model — `panel resize` / `panel reset` own this. |
+| `<` | `prev_source` | We use auto-core sections (winbar 0/1/2 + buffer-local 0..9). Neo-tree's source-switching is unused. |
+| `>` | `next_source` | same |
+| `.` | `set_root` | Conflicts with `core.workspace_root` (auto-core canonical). |
+| `<esc>` | `cancel` | Redundant against `q` (panel close) and the help-overlay's own close. |
+
+### Notes for consumers
+
+- Override-friendly: the v0.2.4 injection in
+  `auto-finder/init.lua:M._inject_keymap_overrides` only sets a
+  key when it isn't already set in
+  `cfg.neo_tree.filesystem.window.mappings`. Your custom
+  bindings for `<cr>` / `S` / `H` / etc. still win.
+- `?` help-overlay (v0.2.1) reads live nmaps, so the help list
+  reflects whatever's actually bound on the buffer — including
+  your overrides and after this audit.
+
 ## [v0.2.3] — 2026-05-11 — direct files-follow + worktree:switched re-anchor without duplicate mount
 
 Hotfix for two issues against v0.2.2:

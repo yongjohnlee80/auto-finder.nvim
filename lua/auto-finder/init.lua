@@ -64,6 +64,16 @@ function M.setup(user_opts)
     end
   end
 
+  -- v0.2.4: keymap audit (ADR 0008). Inject our overrides into
+  -- cfg.neo_tree.filesystem.window.mappings BEFORE the neo-tree
+  -- setup call so consumer customizations merge on top of OURS,
+  -- not the bare upstream defaults. Adds:
+  --   * editor-routed open/split/vsplit/tabnew/<cr>/<2-LeftMouse>
+  --   * H rewired through auto-core.files.set_show_hidden
+  --   * removes e / < / > / . / <esc> (replaced with "none")
+  -- See `M._inject_keymap_overrides` for the full table.
+  M._inject_keymap_overrides(cfg)
+
   -- Forward the consumer's `cfg.neo_tree` table to our forked
   -- neo-tree's setup. Phase 5: this is what gets consumer-side
   -- `filtered_items`, `components`, `window.auto_expand_width`, etc.
@@ -647,6 +657,158 @@ function M._install_repos_follow_autocmd(group)
       vim.defer_fn(reveal, DEBOUNCE_MS)
     end,
   })
+end
+
+-- ── v0.2.4 keymap audit (ADR 0008) ─────────────────────────────
+
+---Filetypes that mark a panel-class window (the panel buffer or a
+---panel popup we'd never want to route an open-file command into).
+---Single source of truth — appended here as the auto-* family
+---grows; future addition: pull from `auto-core.ui.panel`'s
+---registry once it exposes a filetype list.
+local _PANEL_FILETYPES = {
+  ["auto-finder"]        = true,
+  ["auto-finder-popup"]  = true,
+  ["auto-finder-config"] = true,
+  ["auto-finder-help"]   = true,
+  ["auto-agents"]        = true,
+  ["auto-core-channel"]  = true,
+}
+
+---Buftypes that flag a window as "not an editor". Excludes
+---terminal, quickfix, help, prompt, etc. Empty buftype is the
+---usual file-buffer marker; `nofile`/`acwrite` cover scratch +
+---write-on-cmd buffers that are still usable editor targets.
+local _EDITOR_BUFTYPES = {
+  [""]        = true,
+  ["nofile"]  = true,
+  ["acwrite"] = true,
+}
+
+---Find a window suitable for opening a file in. Walks
+---`nvim_list_wins()` (in vim's natural order) and returns the
+---first match that:
+---  * isn't floating,
+---  * isn't winfixbuf,
+---  * has a buftype in `_EDITOR_BUFTYPES`,
+---  * has a filetype NOT in `_PANEL_FILETYPES`.
+---
+---Returns nil if no such window exists in the current tab.
+---@return integer?
+function M._editor_target_winid()
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.wo[w].winfixbuf then goto continue end
+    local cfg = vim.api.nvim_win_get_config(w)
+    if cfg.relative ~= nil and cfg.relative ~= "" then goto continue end
+    local b = vim.api.nvim_win_get_buf(w)
+    if not _EDITOR_BUFTYPES[vim.bo[b].buftype] then goto continue end
+    if _PANEL_FILETYPES[vim.bo[b].filetype] then goto continue end
+    do return w end
+    ::continue::
+  end
+  return nil
+end
+
+---Build a neo-tree command callback that opens the selected node
+---in a real editor window (NOT inside the panel column).
+---  * file node → focus an editor window, then run
+---    `:<open_cmd> <path>` there. Falls back to a fresh
+---    `rightbelow vsplit <path>` when no editor window exists.
+---  * directory node → defer to neo-tree's native toggle_node
+---    (no editor routing — same as upstream's open-on-directory).
+---
+---Why this exists: `position = "current"` makes the panel the
+---"current" window, so neo-tree's native open_split / open_vsplit
+---commands run `:split` / `:vsplit` from INSIDE the panel column.
+---See ADR 0008 for the full rationale.
+---@param open_cmd "edit"|"split"|"vsplit"|"tabnew"
+---@return fun(state: table)
+function M._route_open_to_editor(open_cmd)
+  return function(state)
+    local tree = state and state.tree
+    if not tree then return end
+    local ok_node, node = pcall(tree.get_node, tree)
+    if not ok_node or not node then return end
+
+    -- Directory → delegate to native toggle_node (handles
+    -- expand/collapse + lazy-load semantics).
+    if node.type == "directory" or require("auto-finder.neotree.utils").is_expandable(node) then
+      local cc = require("auto-finder.neotree.sources.common.commands")
+      local fs = require("auto-finder.neotree.sources.filesystem")
+      cc.toggle_node(state, require("auto-finder.neotree.utils").wrap(
+        fs.toggle_directory, state))
+      return
+    end
+
+    local path = node.path or node:get_id()
+    if not path or path == "" then return end
+    local target = M._editor_target_winid()
+    if target then
+      pcall(vim.api.nvim_set_current_win, target)
+      pcall(vim.cmd,
+        (open_cmd or "edit") .. " " .. vim.fn.fnameescape(path))
+    else
+      -- No editor window — create one alongside the panel.
+      pcall(vim.cmd, "rightbelow vsplit " .. vim.fn.fnameescape(path))
+    end
+  end
+end
+
+---Toggle hidden-file visibility via auto-core.files (the canonical
+---preference key the admin DSL writes to), then refresh the
+---filesystem source. Single source of truth between the H keymap
+---and the `files show/hide hidden` DSL command.
+---@param state table  -- neo-tree state (unused — kept for the command signature)
+function M._toggle_hidden_via_core(state)
+  local _ = state  -- explicit unused
+  local ok, core = pcall(require, "auto-core")
+  if ok and type(core) == "table" and type(core.files) == "table" then
+    local cur = core.files.get_show_hidden() == true
+    core.files.set_show_hidden(not cur)
+  end
+  pcall(function()
+    require("auto-finder.neotree.sources.manager").refresh("filesystem")
+  end)
+end
+
+---Inject the v0.2.4 keymap overrides into the consumer's
+---`cfg.neo_tree.filesystem.window.mappings` BEFORE the neo-tree
+---setup call. Keeps the override at the consumer-side wiring
+---layer (not inside the fork's vendored `defaults.lua`) so a
+---future upstream rebase doesn't conflict on the audit. ADR 0008.
+---@param cfg AutoFinderConfig
+function M._inject_keymap_overrides(cfg)
+  cfg.neo_tree = cfg.neo_tree or {}
+  cfg.neo_tree.filesystem = cfg.neo_tree.filesystem or {}
+  cfg.neo_tree.filesystem.window =
+    cfg.neo_tree.filesystem.window or {}
+  cfg.neo_tree.filesystem.window.mappings =
+    cfg.neo_tree.filesystem.window.mappings or {}
+
+  local m = cfg.neo_tree.filesystem.window.mappings
+
+  -- ── B: open/split family routed through editor window ────────
+  -- Skip if the consumer already bound the key to something
+  -- (they may have a custom intent). We only fill defaults.
+  local function default(key, value)
+    if m[key] == nil then m[key] = value end
+  end
+  default("<cr>",          M._route_open_to_editor("edit"))
+  default("<2-LeftMouse>", M._route_open_to_editor("edit"))
+  default("S",             M._route_open_to_editor("split"))
+  default("s",             M._route_open_to_editor("vsplit"))
+  default("t",             M._route_open_to_editor("tabnew"))
+
+  -- ── H: rewire toggle_hidden through auto-core.files ──────────
+  default("H", M._toggle_hidden_via_core)
+
+  -- ── C: remove keys irrelevant to our model ───────────────────
+  -- neo-tree's documented unbind sentinel is the string "none".
+  default("e",     "none")
+  default("<",     "none")
+  default(">",     "none")
+  default(".",     "none")
+  default("<esc>", "none")
 end
 
 ---Register the `auto-finder-repos` neo-tree source so
