@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.2.9"
+M.version = "0.2.10"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -547,12 +547,50 @@ function M.setup(user_opts)
   -- persisted section list for that project (or falls back to
   -- the cfg defaults for a fresh / unknown project). Soft-dep on
   -- auto-core's event bus.
+  --
+  -- v0.2.10: also subscribe to `core.workspace_root:changed` and
+  -- run an immediate-retry reseed when `vim.v.vim_did_enter == 1`
+  -- so the initial-startup load order doesn't drop persisted slot
+  -- additions. The original v0.2.5 seed-from-persisted block in
+  -- `M.setup` reads `M._workspace_key()` synchronously, but
+  -- worktree.nvim's `_ensure_root_now()` (the function that calls
+  -- `auto-core.git.worktree.set_workspace_root` and unblocks the
+  -- key) may run AFTER auto-finder.setup in a default lazy load
+  -- order. When that happens, the seed returns nil and
+  -- `cfg.sections` stays at the default — exactly the user-
+  -- reported "I added `buffers`, it's gone after restart" bug
+  -- where the persisted record in
+  -- `<state>/auto-core/auto-finder.json:sections[<wskey>]` was
+  -- correct but the live config didn't reflect it.
+  --
+  -- The triple-trigger keeps reseed coverage tight:
+  --   * `worktree:switched` — explicit user switch via worktree.nvim
+  --   * `core.workspace_root:changed` — first-time capture at session
+  --     start (worktree.nvim publishes this exactly once before the
+  --     first switch)
+  --   * `vim_did_enter == 1` immediate-retry — covers the case where
+  --     workspace_root was ALREADY captured before auto-finder
+  --     subscribed (lazy-loaded plugins registering handlers for an
+  --     already-fired event — see [[lua-nvim-plugin-development]]
+  --     rule and the auto-core-maintenance §"lazy-load VimEnter
+  --     fallback" convention).
   local ok_core, core = pcall(require, "auto-core")
   if ok_core and type(core.events) == "table"
       and type(core.events.subscribe) == "function" then
     core.events.subscribe("worktree:switched", function()
       vim.schedule(function() M._reseed_sections_for_workspace() end)
     end)
+    core.events.subscribe("core.workspace_root:changed", function()
+      vim.schedule(function() M._reseed_sections_for_workspace() end)
+    end)
+  end
+  -- Already-fired path: if vim has finished startup AND the
+  -- workspace_root happens to be set by now (lazy-load order put
+  -- worktree.nvim's capture before us), the reseed below covers
+  -- the case the subscriptions above would otherwise miss because
+  -- the event already fired.
+  if vim.v.vim_did_enter == 1 then
+    vim.schedule(function() M._reseed_sections_for_workspace() end)
   end
 end
 

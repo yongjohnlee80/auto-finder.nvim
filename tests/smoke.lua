@@ -1078,6 +1078,82 @@ end
 pcall(os.remove, _probe_path)
 pcall(vim.api.nvim_set_current_win, _prev_win)
 
+-- ───────────────────────── 20. v0.2.10 — sections load-timing fix ────────────────────────
+--
+-- Regression test for the v0.2.10 fix. Slot additions persist to
+-- the namespace JSON, but when auto-finder.setup() runs BEFORE
+-- worktree.nvim captures workspace_root the seed read returns nil
+-- and `cfg.sections` keeps its default. The pre-fix subscription
+-- only listened to `worktree:switched` — which doesn't fire on
+-- initial capture — so the reseed never ran. v0.2.10 adds a
+-- `core.workspace_root:changed` subscription + a vim_did_enter
+-- immediate-retry inside setup.
+--
+-- Test strategy: pre-populate the namespace with a non-default
+-- sections list for the current workspace key, force cfg.sections
+-- back to the default to simulate "setup missed it", then publish
+-- `core.workspace_root:changed` and assert the reseed fires.
+print("\n[20] v0.2.10 — sections load-timing fix (core.workspace_root:changed reseed)")
+;(function()
+local _af = require("auto-finder")
+local _state_mod = require("auto-finder.state")
+local _core = require("auto-core")
+
+-- Smoke runs without worktree.nvim, so workspace_root isn't captured
+-- by default — exactly the race the v0.2.10 fix exists to handle.
+-- Set it explicitly so M._workspace_key() returns a stable value for
+-- our assertions; the publish call below replays the same signal
+-- worktree.nvim emits on real session-start capture.
+_core.git.worktree.set_workspace_root(vim.fn.getcwd())
+local _wskey = _af._workspace_key()
+ok("workspace key resolves after set_workspace_root",
+   type(_wskey) == "string" and #_wskey > 0)
+if not _wskey then return end
+
+-- Snapshot original state so we can restore at the end.
+local _orig_persisted = _state_mod.get_sections_for(_wskey)
+local _orig_live = vim.list_extend({}, _af.state.config.sections)
+
+-- Persist a NON-default sections list under our key. Use the
+-- baseline + an extra "buffers" slot so the comparison is
+-- unambiguous against the default `{ "config", "files", "repos" }`.
+local _target = { "config", "files", "repos", "buffers" }
+_state_mod.set_sections_for(_wskey, _target)
+ok("set_sections_for round-trips into the namespace",
+   vim.deep_equal(_state_mod.get_sections_for(_wskey), _target))
+
+-- Force cfg.sections back to the default — simulate the post-
+-- setup state where the seed-from-persisted branch missed.
+_af.state.config.sections = vim.deepcopy(
+  require("auto-finder.config").defaults.sections)
+ok("cfg.sections forced back to default for the race simulation",
+   #_af.state.config.sections == 3
+     and _af.state.config.sections[#_af.state.config.sections] ~= "buffers")
+
+-- Publish the topic worktree.nvim emits on first capture. The
+-- v0.2.10 subscriber should pick this up and call
+-- M._reseed_sections_for_workspace via vim.schedule.
+_core.events.publish("core.workspace_root:changed", {
+  from = nil, to = vim.fn.getcwd(),
+})
+-- Reseed schedules itself; wait until cfg.sections grows to target.
+vim.wait(400, function()
+  return #_af.state.config.sections == #_target
+end, 20)
+ok("cfg.sections reseeded to the persisted list after core.workspace_root:changed",
+   vim.deep_equal(_af.state.config.sections, _target))
+
+-- Restore: drop the persisted record (or replace with the prior
+-- snapshot) and rebuild the registry back to the live default so
+-- later sections don't see the leftover 'buffers' slot.
+if _orig_persisted then
+  _state_mod.set_sections_for(_wskey, _orig_persisted)
+else
+  _state_mod.set_sections_for(_wskey, nil)
+end
+_af._rebuild_section_registry(_orig_live)
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

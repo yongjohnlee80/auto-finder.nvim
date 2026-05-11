@@ -2,6 +2,46 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.10] — 2026-05-11 — sections load-timing fix (persisted slot additions survive restart)
+
+Bug fix. User-reported regression: `slot add buffers` correctly wrote
+the new section list to
+`<state>/auto-core/auto-finder.json:sections[<wskey>]`, but after an
+nvim restart the panel came back with the default sections — the
+addition appeared lost.
+
+### Fixed
+
+- **Initial-startup load race**. `M.setup` reads `M._workspace_key()`
+  synchronously, which depends on
+  `auto-core.git.worktree.get_workspace_root()` being populated. With
+  worktree.nvim lazy-loaded AFTER auto-finder, the workspace root
+  isn't captured yet when setup runs — `wskey = nil`, the seed-from-
+  persisted branch is skipped, and `cfg.sections` keeps its default
+  baseline. The v0.2.5-era `worktree:switched` subscription only
+  fires on real worktree switches, so the reseed never happens on a
+  normal session start.
+
+  Now subscribes to **`core.workspace_root:changed`** too (the topic
+  worktree.nvim publishes exactly once on first capture). Both
+  `worktree:switched` and `core.workspace_root:changed` route to
+  `M._reseed_sections_for_workspace` — different triggers, same
+  reseed body.
+
+  Adds a `vim.v.vim_did_enter == 1` immediate-retry inside setup
+  for the case where workspace_root was captured BEFORE auto-finder
+  subscribed (lazy-load order flip — the subscriber misses the
+  already-fired event). Matches the auto-core-maintenance
+  §"lazy-load VimEnter fallback" convention.
+
+### Added
+
+- Smoke section [20] (4 assertions) — sets a persisted sections
+  record for a fake workspace key, simulates the load race
+  (setup runs with workspace_root unset), then publishes
+  `core.workspace_root:changed` and asserts `cfg.sections` reseeds
+  to the persisted list within the debounce window.
+
 ## [v0.2.9] — 2026-05-11 — buffers-refresh against panel win-keyed state + winfixbuf-wrap
 
 Bug fix. With the `buffers` section mounted via the v0.2.5 slot DSL,
