@@ -92,6 +92,18 @@ function M.setup(user_opts)
   -- See `M._inject_keymap_overrides` for the full table.
   M._inject_keymap_overrides(cfg)
 
+  -- v0.2.7: register every bundled neo-tree source we ship a
+  -- section module for. Our fork's `defaults.lua` declares
+  -- `sources = { "filesystem" }`, so neotree's setup pipeline
+  -- only builds `default_configs["filesystem"]`. A `buffers`
+  -- section then trips `assert(default_configs[sd.name])` at
+  -- `manager.lua:124` because the buffers default_config was
+  -- never built. Append every bundled source to `cfg.neo_tree.sources`
+  -- so each one's default_config exists at section-mount time —
+  -- even if the corresponding section isn't currently enabled
+  -- (slot DSL may add it at runtime via `slot add <type>`).
+  M._register_bundled_neotree_sources(cfg)
+
   -- Forward the consumer's `cfg.neo_tree` table to our forked
   -- neo-tree's setup. Phase 5: this is what gets consumer-side
   -- `filtered_items`, `components`, `window.auto_expand_width`, etc.
@@ -853,6 +865,39 @@ function M._inject_keymap_overrides(cfg)
 
   apply_overrides("filesystem", { toggle_hidden = true })
   apply_overrides("buffers",    { toggle_hidden = false })
+end
+
+---Bundled neo-tree sources that auto-finder ships a section
+---module for. Each entry maps to `lua/auto-finder/neotree/sources/<name>/`
+---in the fork. Sections that mount a CUSTOM neo-tree source
+---(today: `repos` → `auto-finder-repos`) go through their own
+---explicit registration helper (`_register_neotree_workspace_source`)
+---and aren't listed here.
+local _BUNDLED_NEOTREE_SOURCES = { "filesystem", "buffers" }
+
+---Ensure `cfg.neo_tree.sources` contains every bundled source we
+---ship a section module for. Without this, neotree's setup
+---pipeline only builds `default_configs` for sources listed in
+---`cfg.neo_tree.sources` (or the fork's `defaults.sources` =
+---`{ "filesystem" }`). A subsequent `slot add buffers` then
+---asserts at `manager.lua:124` because `default_configs["buffers"]`
+---was never built.
+---
+---Idempotent: skips entries already present. Respects the
+---consumer's `cfg.neo_tree.sources` ordering — we only APPEND
+---missing bundled names.
+---@param cfg AutoFinderConfig
+function M._register_bundled_neotree_sources(cfg)
+  cfg.neo_tree = cfg.neo_tree or {}
+  cfg.neo_tree.sources = cfg.neo_tree.sources or { "filesystem" }
+  local present = {}
+  for _, s in ipairs(cfg.neo_tree.sources) do present[s] = true end
+  for _, name in ipairs(_BUNDLED_NEOTREE_SOURCES) do
+    if not present[name] then
+      cfg.neo_tree.sources[#cfg.neo_tree.sources + 1] = name
+      present[name] = true
+    end
+  end
 end
 
 -- ── v0.2.5 slot DSL (ADR 0008 addendum) ───────────────────────

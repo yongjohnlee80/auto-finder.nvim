@@ -2,6 +2,34 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.7] — 2026-05-11 — register `buffers` source so `slot add buffers` mounts
+
+Hotfix for v0.2.5's buffers section. The fork's
+`lua/auto-finder/neotree/defaults.lua` declares
+`sources = { "filesystem" }`, so neotree's setup pipeline only
+builds `default_configs["filesystem"]`. Adding the buffers
+section (at startup via `cfg.sections` or at runtime via
+`slot add buffers`) trips the assertion at `manager.lua:124`
+(`assert(default_configs[sd.name])`) — the panel goes blank
+with three "neo-tree.execute failed for source 'buffers'"
+errors per mount attempt.
+
+### Fixed
+
+- `M._register_bundled_neotree_sources(cfg)` appends every
+  bundled neo-tree source we ship a section module for
+  (`filesystem` + `buffers`) to `cfg.neo_tree.sources` before
+  the neo-tree setup call. `default_configs` is now populated
+  for each at section-mount time.
+- Idempotent: skips names already present in
+  `cfg.neo_tree.sources` (respects consumer ordering); only
+  APPENDS missing bundled names.
+- Custom sources (today: `auto-finder-repos` for the `repos`
+  section) keep going through their own explicit registration
+  helper (`M._register_neotree_workspace_source`); they don't
+  need to be in `cfg.neo_tree.sources` because the helper
+  registers their default_config directly.
+
 ## [v0.2.6] — 2026-05-11 — `slot add` (no args) lists available types
 
 Tiny UX follow-up. v0.2.5 made `slot add <type>` reject a bare
