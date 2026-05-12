@@ -2,6 +2,23 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — prevent follow-mode hijacking
+
+### Fixed
+
+- **Gated follow-mode reveals to active panel.** Both files-follow
+  and repos-follow now verify that their respective section is the
+  one currently active in the panel before triggering a reveal. This
+  prevents the explorer from switching sections automatically when
+  navigating files. (ADR 0011)
+
+- **Repos-follow is now panel-bound.** When the repos section is
+  active, the reveal command is driven directly against the panel's
+  state, preventing it from hijacking the editor window where the
+  BufEnter event originated. The reveal target is the repos source's
+  synthetic `auto-finder-repos://<repo-path>` node id, so the
+  containing repo is focused after the panel redraw.
+
 ## [v0.2.11] — 2026-05-11 — buffers refresh stops clobbering active section + renderer winfixbuf-safe
 
 Two bug fixes triggered by the same v0.2.9 work. User reported: "I'm
@@ -148,7 +165,6 @@ switch. Two root causes chained:
   end-to-end tree growth on `:split <new_file>`, and the
   state-keying invariants (panel-winid match, cwd match). All 151
   assertions green.
-
 ## [v0.2.8] — 2026-05-11 — port `buffers` source + in-place slot mutation + retroactive smoke (rule #4 catch-up)
 
 Three bugs that escaped v0.2.5 because the iteration shipped
