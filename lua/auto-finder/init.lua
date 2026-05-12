@@ -860,6 +860,10 @@ function M._install_repos_follow_autocmd(group)
     -- Only act if the repos section's buffer is currently live; we
     -- don't want to force a remount on every BufEnter.
     local repos = require("auto-finder.sections")._by_name["repos"]
+    
+    -- And only if it is the currently active panel
+    if M.state and M.state.section ~= repos then return end
+
     local section = repos and require("auto-finder.sections")._by_number[repos]
     if not section or not section._bufnr
         or not vim.api.nvim_buf_is_valid(section._bufnr) then
