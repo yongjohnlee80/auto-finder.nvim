@@ -2,7 +2,7 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — prevent follow-mode hijacking
+## [v0.2.12] — 2026-05-12 — prevent follow-mode hijacking
 
 ### Fixed
 
