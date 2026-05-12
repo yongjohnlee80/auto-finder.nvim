@@ -1294,6 +1294,104 @@ if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
 end
 end)()
 
+-- ───────────────────── 22. follow-mode hijacking protection ──────────────
+-- Regression coverage for files-follow and repos-follow:
+-- reveals must be gated to their active section, and repos-follow
+-- must reveal the containing repo without replacing the editor window.
+print("\n[22] follow-mode hijacking protection")
+
+-- Setup: fixture inside project root so follow-logic root checks pass.
+local tmp_hijack = vim.fn.getcwd() .. "/tests/hijack-test.txt"
+vim.fn.writefile({ "hijack test" }, tmp_hijack)
+
+local function assert_no_hijack(section_name, section_idx)
+  local section = require("auto-finder.sections")._by_number[section_idx]
+  ok(string.format("panel window still displays %s buffer (not hijacked)", section_name),
+    vim.api.nvim_win_get_buf(af.state.panel_winid) == section._bufnr)
+end
+
+-- Case A: files-follow hijacking protection.
+af.state.config.files.follow = true
+if not require("auto-finder.sections")._by_name["buffers"] then
+  af.slot_add("buffers")
+end
+local buffers_idx = require("auto-finder.sections")._by_name["buffers"]
+af.focus(buffers_idx)
+ok("focused buffers section for files-follow gate", af.state.section == buffers_idx)
+
+local editor_win = nil
+for _, w in ipairs(vim.api.nvim_list_wins()) do
+  if w ~= af.state.panel_winid then
+    editor_win = w
+    break
+  end
+end
+if not editor_win then
+  vim.cmd("vsplit")
+  editor_win = vim.api.nvim_get_current_win()
+end
+vim.api.nvim_set_current_win(editor_win)
+vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
+vim.wait(200)
+assert_no_hijack("buffers", buffers_idx)
+af.state.config.files.follow = false
+
+-- Case B: repos-follow hijacking protection while inactive.
+af.state.config.repos.follow = true
+af.focus(buffers_idx)
+vim.api.nvim_set_current_win(editor_win)
+vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
+vim.wait(200)
+assert_no_hijack("buffers", buffers_idx)
+
+-- Case C: repos-follow editor preservation while active.
+local core = require("auto-core")
+local workspace_root = vim.fn.fnamemodify(vim.fn.getcwd(), ":h")
+core.git.worktree.set_workspace_root(workspace_root)
+local repos_mod = require("auto-finder.repos")
+local orig_repos_load = repos_mod.load
+repos_mod.load = function() return { vim.fn.getcwd() } end
+
+local repos_idx = require("auto-finder.sections")._by_name["repos"]
+local repos_section = require("auto-finder.sections")._by_number[repos_idx]
+repos_section._bufnr = nil
+af.state.section_buffers[repos_idx] = nil
+af.focus(repos_idx)
+ok("focused repos section for repos-follow reveal", af.state.section == repos_idx)
+
+vim.api.nvim_set_current_win(editor_win)
+ok("current window is an editor for repos-follow reveal",
+  vim.api.nvim_get_current_win() ~= af.state.panel_winid)
+vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
+vim.wait(200)
+
+ok("editor window still displays the test file (not hijacked by repos tree)",
+  vim.api.nvim_win_get_buf(editor_win) == vim.fn.bufnr(tmp_hijack))
+ok("panel window still displays repos buffer",
+  vim.api.nvim_win_get_buf(af.state.panel_winid) == repos_section._bufnr)
+
+local expected_repo_node = "auto-finder-repos://" .. vim.fn.getcwd()
+local focused_repo_node = nil
+do
+  local mgr = require("auto-finder.neotree.sources.manager")
+  for _, s in ipairs(mgr._get_all_states()) do
+    if s.name == "auto-finder-repos" and s.winid == af.state.panel_winid then
+      local node = s.tree and s.tree:get_node()
+      focused_repo_node = node and node:get_id() or nil
+      break
+    end
+  end
+end
+ok("repos-follow focused containing repo node",
+  focused_repo_node == expected_repo_node,
+  "expected " .. expected_repo_node .. ", got " .. tostring(focused_repo_node))
+
+-- Clean up.
+af.state.config.repos.follow = false
+repos_mod.load = orig_repos_load
+pcall(vim.cmd, "bwipeout " .. vim.fn.bufnr(tmp_hijack))
+vim.fn.delete(tmp_hijack)
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
