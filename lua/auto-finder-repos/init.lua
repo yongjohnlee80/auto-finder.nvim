@@ -329,7 +329,7 @@ local function start_watchers()
 end
 
 ---Called by neo-tree to populate the tree.
-M.navigate = function(state, _, _, callback, _)
+M.navigate = function(state, _, path_to_reveal, callback, _)
   state.path = "auto-finder-repos://"
   git_status_cache = {}
   local items = build_workspace_nodes()
@@ -338,6 +338,9 @@ M.navigate = function(state, _, _, callback, _)
     table.insert(state.default_expanded_nodes, n.id)
   end
   renderer.show_nodes(items, state)
+  if type(path_to_reveal) == "string" and path_to_reveal ~= "" then
+    pcall(renderer.focus_node, state, path_to_reveal, true)
+  end
   start_watchers()
   if type(callback) == "function" then
     vim.schedule(callback)

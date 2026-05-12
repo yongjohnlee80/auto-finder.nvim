@@ -1300,7 +1300,6 @@ end)()
 -- must reveal the containing repo without replacing the editor window.
 print("\n[22] follow-mode hijacking protection")
 
--- Setup: fixture inside project root so follow-logic root checks pass.
 local tmp_hijack = vim.fn.getcwd() .. "/tests/hijack-test.txt"
 vim.fn.writefile({ "hijack test" }, tmp_hijack)
 
@@ -1310,7 +1309,6 @@ local function assert_no_hijack(section_name, section_idx)
     vim.api.nvim_win_get_buf(af.state.panel_winid) == section._bufnr)
 end
 
--- Case A: files-follow hijacking protection.
 af.state.config.files.follow = true
 if not require("auto-finder.sections")._by_name["buffers"] then
   af.slot_add("buffers")
@@ -1336,7 +1334,6 @@ vim.wait(200)
 assert_no_hijack("buffers", buffers_idx)
 af.state.config.files.follow = false
 
--- Case B: repos-follow hijacking protection while inactive.
 af.state.config.repos.follow = true
 af.focus(buffers_idx)
 vim.api.nvim_set_current_win(editor_win)
@@ -1344,7 +1341,6 @@ vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
 vim.wait(200)
 assert_no_hijack("buffers", buffers_idx)
 
--- Case C: repos-follow editor preservation while active.
 local core = require("auto-core")
 local workspace_root = vim.fn.fnamemodify(vim.fn.getcwd(), ":h")
 core.git.worktree.set_workspace_root(workspace_root)
@@ -1386,7 +1382,6 @@ ok("repos-follow focused containing repo node",
   focused_repo_node == expected_repo_node,
   "expected " .. expected_repo_node .. ", got " .. tostring(focused_repo_node))
 
--- Clean up.
 af.state.config.repos.follow = false
 repos_mod.load = orig_repos_load
 pcall(vim.cmd, "bwipeout " .. vim.fn.bufnr(tmp_hijack))

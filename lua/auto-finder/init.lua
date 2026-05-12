@@ -610,6 +610,11 @@ function M._install_files_follow_autocmd(group)
     if not (live_cfg and live_cfg.files and live_cfg.files.follow) then
       return
     end
+
+    -- Bail unless the files section is the active panel slot.
+    local files_idx = require("auto-finder.sections")._by_name["files"]
+    if M.state and M.state.section ~= files_idx then return end
+
     local buf = vim.api.nvim_get_current_buf()
     if vim.bo[buf].buftype ~= "" then return end  -- skip terminal/qf/help
     local ft = vim.bo[buf].filetype
@@ -838,6 +843,11 @@ function M._install_repos_follow_autocmd(group)
     if not (live_cfg and live_cfg.repos and live_cfg.repos.follow) then
       return
     end
+
+    -- Bail unless the repos section is the active panel slot.
+    local repos_idx = require("auto-finder.sections")._by_name["repos"]
+    if M.state and M.state.section ~= repos_idx then return end
+
     local buf = vim.api.nvim_get_current_buf()
     if vim.bo[buf].buftype ~= "" then return end  -- skip terminals / quickfix / help
     local path = vim.api.nvim_buf_get_name(buf)
@@ -857,29 +867,38 @@ function M._install_repos_follow_autocmd(group)
     local repo_path = root_norm .. "/" .. first
     if repo_path == last_revealed then return end
 
-    -- Only act if the repos section's buffer is currently live; we
-    -- don't want to force a remount on every BufEnter.
-    local repos = require("auto-finder.sections")._by_name["repos"]
-    
-    -- And only if it is the currently active panel
-    if M.state and M.state.section ~= repos then return end
-
-    local section = repos and require("auto-finder.sections")._by_number[repos]
-    if not section or not section._bufnr
-        or not vim.api.nvim_buf_is_valid(section._bufnr) then
+    -- Ensure the reveal is driven against the panel's win-keyed state.
+    local panel_winid = M.state and M.state.panel_winid
+    if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
       return
     end
 
-    pcall(function()
-      require("auto-finder.neotree.command").execute({
-        source = "auto-finder-repos",
-        action = "show",
-        position = "current",
-        reveal = true,
-        reveal_file = repo_path,
-      })
-    end)
-    last_revealed = repo_path
+    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+    if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
+    local state
+    for _, s in ipairs(mgr._get_all_states()) do
+      if s.name == "auto-finder-repos" and s.winid == panel_winid then
+        state = s; break
+      end
+    end
+    if not state then return end
+
+    -- Drive reveal directly against the state. This avoids jumping
+    -- the current window to the panel and back. The repos source uses
+    -- synthetic ids for workspace nodes, so convert the filesystem
+    -- repo path before asking it to reveal.
+    local repo_node_id = "auto-finder-repos://" .. repo_path
+    local nav_ok = pcall(mgr.navigate, state, nil, repo_node_id)
+    if nav_ok then
+      local section = require("auto-finder.sections")._by_number[repos_idx]
+      if section and state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
+        section._bufnr = state.bufnr
+        if M.state and M.state.section_buffers then
+          M.state.section_buffers[repos_idx] = state.bufnr
+        end
+      end
+      last_revealed = repo_path
+    end
   end
 
   vim.api.nvim_create_autocmd("BufEnter", {

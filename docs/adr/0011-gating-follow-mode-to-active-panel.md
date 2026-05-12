@@ -34,3 +34,21 @@ if M.state and M.state.section ~= repos_idx then return end
 ## Consequences
 - **Pros:** Panel view stability is preserved during file navigation; no unexpected section switching.
 - **Cons:** User must manually switch back to the "files" section to see the revealed node if they were previously viewing a different panel.
+
+## Verification Plan
+Smoke test under section [19] of `tests/smoke.lua` must assert that the panel window's displayed buffer remains unchanged when a new file is opened while a different section (e.g., "buffers") is active.
+```lua
+local buffers_section = require("auto-finder.sections")._by_number[buffers_idx]
+ok("panel window still displays buffers-section buffer",
+  vim.api.nvim_win_get_buf(af.state.panel_winid) == buffers_section._bufnr)
+```
+
+For repos-follow, the same smoke section must also assert that an active repos section preserves the editor window and focuses the repos source's synthetic workspace node id:
+```lua
+local expected_repo_node = "auto-finder-repos://" .. vim.fn.getcwd()
+ok("repos-follow focused containing repo node",
+  focused_repo_node == expected_repo_node)
+```
+
+## Status
+Implemented and verified. Smoke test [19] confirms that opening a file while the "buffers" section is active no longer swaps the panel buffer, and that repos-follow focuses the containing repo node without replacing the editor window.
