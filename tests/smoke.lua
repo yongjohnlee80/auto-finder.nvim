@@ -1294,6 +1294,117 @@ if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
 end
 end)()
 
+-- ───────────────────── 21c. v0.2.13 — gate-skip dirty-bit round-trip ──────
+-- v0.2.11's gate (covered in [21] above) correctly stops a BufAdd-
+-- triggered refresh from clobbering an inactive panel section. But
+-- its assumption that "next focus to buffers re-mounts fresh" was
+-- wrong: section.get_buffer caches the section's bufnr across
+-- focuses, so the buffers tree silently stays stale after a skipped
+-- refresh.
+--
+-- v0.2.13 fix: gate-skip path sets `_af._buffers_dirty = true`; the
+-- buffers section's `on_focus` hook (in `sections/buffers.lua`)
+-- consumes the flag and runs `_refresh_buffers_now(panel_winid)`
+-- inline so the just-refocused tree reflects every BufAdd that
+-- happened while buffers was inactive.
+--
+-- Contract this section asserts:
+--   (1) BufAdd-while-inactive sets the dirty bit.
+--   (2) focus(buffers) clears the dirty bit AND the new buf appears
+--       in the rendered tree.
+--   (3) BufAdd-while-buffers-active clears (doesn't accumulate) the
+--       dirty bit.
+print("\n[21c] v0.2.13 — buffers-dirty-bit round-trip after gate-skip")
+;(function()
+local _af = require("auto-finder")
+
+-- Need a buffers slot for this section.
+local _sb_name = require("auto-finder.sections")._by_name
+if _sb_name["buffers"] == nil then
+  _af.slot_add("buffers")
+end
+local _buf_idx = require("auto-finder.sections")._by_name["buffers"]
+ok("buffers slot registered for [21c]", _buf_idx ~= nil)
+
+_af.open(true)
+vim.wait(80)
+
+-- Clean baseline: focus config (buffers NOT active).
+_af.focus(0)
+vim.wait(100)
+ok("baseline: registry.active == 0 (config), buffers NOT active",
+   _af._registry.active == 0)
+-- Clean any prior dirty marker from earlier sections.
+_af._buffers_dirty = false
+
+-- (1) Open a probe file while buffers is INACTIVE. The autocmd-fire
+-- gate must skip → `_buffers_dirty` should flip to true.
+local _probe_dirty = vim.fn.getcwd() .. "/tests/_v2_13_dirty_probe.txt"
+local _fh2 = io.open(_probe_dirty, "w"); _fh2:write("dirty-bit probe"); _fh2:close()
+vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_dirty))
+vim.wait(300)  -- > 80ms debounce + scheduler
+ok("BufAdd while buffers inactive flipped _buffers_dirty=true",
+   _af._buffers_dirty == true,
+   "got " .. tostring(_af._buffers_dirty))
+
+-- Close the split so focus returns somewhere sensible; the probe
+-- buffer remains in the buffer list with `buflisted=true`.
+pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+
+-- (2) Switch to buffers. The on_focus consumer must clear the flag
+-- AND repopulate the tree with the probe buffer.
+_af.focus(_buf_idx)
+vim.wait(250)  -- focus + on_focus + refresh
+ok("after focus(buffers): _buffers_dirty cleared",
+   _af._buffers_dirty == false,
+   "got " .. tostring(_af._buffers_dirty))
+
+-- Verify the probe buffer is rendered in the buffers tree. The
+-- rendered buffer is the section's cached bufnr; read its lines
+-- and grep for the basename.
+local _panel = _af.state.panel_winid
+local _panel_buf_v213 =
+   _panel and vim.api.nvim_win_is_valid(_panel)
+     and vim.api.nvim_win_get_buf(_panel) or -1
+local _lines = (_panel_buf_v213 > 0)
+   and vim.api.nvim_buf_get_lines(_panel_buf_v213, 0, -1, false) or {}
+local _saw_probe = false
+for _, ln in ipairs(_lines) do
+  if ln:find("_v2_13_dirty_probe", 1, true) then _saw_probe = true; break end
+end
+ok("buffers tree now contains the probe buf (regression: stale tree after gate-skip)",
+   _saw_probe,
+   "panel_buf=" .. tostring(_panel_buf_v213) .. " lines=" .. #_lines)
+
+-- (3) Trigger another BufAdd while buffers IS active. The fire path
+-- should refresh inline AND ensure the dirty bit stays cleared.
+local _probe_active = vim.fn.getcwd() .. "/tests/_v2_13_active_probe.txt"
+local _fh3 = io.open(_probe_active, "w"); _fh3:write("active probe"); _fh3:close()
+vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_active))
+vim.wait(300)
+ok("BufAdd while buffers active keeps _buffers_dirty=false (handled inline)",
+   _af._buffers_dirty == false,
+   "got " .. tostring(_af._buffers_dirty))
+-- Close the split.
+pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+
+-- Cleanup probes.
+for _, p in ipairs({ _probe_dirty, _probe_active }) do
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(b) == p then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
+  pcall(os.remove, p)
+end
+
+-- Cleanup: remove the buffers section if we added it.
+local _last_idx_v213 = #_af.state.config.sections - 1
+if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
+  _af.slot_remove(_last_idx_v213)
+end
+end)()
+
 -- ───────────────────── 22. follow-mode hijacking protection ──────────────
 -- Regression coverage for files-follow and repos-follow:
 -- reveals must be gated to their active section, and repos-follow

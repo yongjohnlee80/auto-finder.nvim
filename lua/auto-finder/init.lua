@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.2.12"
+M.version = "0.2.13"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -694,6 +694,53 @@ end
 ---can fire on the same BufAdd; the fork's call hits the stub and
 ---no-ops, ours hits the real state and updates the tree.
 ---@param group integer  -- AutoFinderPanel augroup
+---Internal helper: actually run the buffers-state refresh against
+---the live neo-tree state for the panel window. Extracted from the
+---autocmd-fire body so the on_focus dirty-bit consumer (see
+---`auto-finder/sections/buffers.lua`) can re-use the exact same
+---logic without duplicating the winfixbuf wrap + stuck-loading
+---reset.
+---@param panel_winid integer
+function M._refresh_buffers_now(panel_winid)
+  if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
+    return
+  end
+  local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+  if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
+  local ok_items, items = pcall(require,
+    "auto-finder.neotree.sources.buffers.lib.items")
+  if not ok_items then return end
+  for _, state in ipairs(mgr._get_all_states()) do
+    if state.name == "buffers"
+        and state.winid == panel_winid
+        and state.path
+        and state.tree
+    then
+      -- The renderer's "current" branch swaps the freshly-built tree
+      -- buffer into `state.winid` via `nvim_win_set_buf` — which
+      -- raises E1513 against the auto-core.ui.panel singleton's
+      -- `winfixbuf = true`. Wrap with `Panel:with_unfixed_buf` so the
+      -- swap goes through and `winfixbuf` is restored on return.
+      --
+      -- Also force-clear a stuck `state.loading` flag. The flag gets
+      -- stuck-true when a prior call errored before reaching its
+      -- `state.loading = false` reset. Once stuck, every future
+      -- `get_opened_buffers` early-returns. Clearing here is
+      -- idempotent vs concurrent runs (the autocmd debounce
+      -- serializes us; on_focus is a single call).
+      state.loading = false
+      local panel = M._panel
+      if panel and type(panel.with_unfixed_buf) == "function" then
+        panel:with_unfixed_buf(function()
+          pcall(items.get_opened_buffers, state)
+        end)
+      else
+        pcall(items.get_opened_buffers, state)
+      end
+    end
+  end
+end
+
 function M._install_buffers_refresh_autocmd(group)
   local pending = false
   local DEBOUNCE_MS = 80
@@ -708,77 +755,48 @@ function M._install_buffers_refresh_autocmd(group)
     if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
       return
     end
-    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
-    if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
-    local ok_items, items = pcall(require,
-      "auto-finder.neotree.sources.buffers.lib.items")
-    if not ok_items then return end
     -- v0.2.11 gate: only refresh when the buffers source is the
     -- currently-DISPLAYED section in the panel. Otherwise
     -- `get_opened_buffers` ends in `renderer.show_nodes` →
     -- `nvim_win_set_buf(panel, state.bufnr)`, which clobbers
     -- whichever section the user actually has up (regression
-    -- introduced in v0.2.9 — user reported: "I'm on files panel
-    -- but the content is buffers"). When buffers ISN'T active, we
-    -- skip; the next time the user focuses buffers, the section
-    -- re-mounts fresh via `section.get_buffer` and a complete
-    -- navigate() runs from scratch — no stale tree.
+    -- introduced in v0.2.9).
+    --
+    -- v0.2.13: when the gate skips, set `M._buffers_dirty = true` so
+    -- the buffers section's `on_focus` hook can run the refresh on
+    -- behalf of the skipped autocmd next time the user focuses
+    -- buffers. Previously the comment claimed "re-mount on focus
+    -- handles it" — but the section's bufnr is CACHED across
+    -- focuses, so the cached state.tree survives and shows the
+    -- stale snapshot. The dirty bit is the breadcrumb.
     --
     -- Active-section probe via the auto-finder registry rather than
     -- `state.bufnr == nvim_win_get_buf(panel)`: the latter races with
-    -- the renderer's buffer reassignment during show_nodes (the
-    -- `position = "current"` branch reassigns state.bufnr via
-    -- get_buffer(bufname, state) and then swaps the window), so a
-    -- gate keyed on equality can read state.bufnr while it's
-    -- transiently mid-swap. The registry's `active` slot + the
-    -- section.name lookup is the contract — what the user clicked
-    -- through the winbar / DSL — not a derived value.
+    -- the renderer's buffer reassignment during show_nodes.
     local registry = M._registry
-    if not registry then return end
+    if not registry then
+      M._buffers_dirty = true
+      return
+    end
     local active_number = registry.active
-    if active_number == nil then return end
+    if active_number == nil then
+      M._buffers_dirty = true
+      return
+    end
     local buffers_active = false
     for _, sect in ipairs(registry.sections or {}) do
       if sect.name == "buffers" and sect.number == active_number then
         buffers_active = true; break
       end
     end
-    if not buffers_active then return end
-    for _, state in ipairs(mgr._get_all_states()) do
-      if state.name == "buffers"
-          and state.winid == panel_winid
-          and state.path
-          and state.tree then
-        -- The renderer's "current" branch
-        -- (lua/auto-finder/neotree/ui/renderer.lua:1230) swaps the
-        -- freshly-built tree buffer into `state.winid` via
-        -- `nvim_win_set_buf` — which raises E1513 against the
-        -- auto-core.ui.panel singleton's `winfixbuf = true`. The
-        -- forked source's own VIM_BUFFER_ADDED subscriber never hits
-        -- this because it bails on the stub-state path check, but our
-        -- direct-against-the-real-state call DOES reach the swap.
-        -- Wrap with `Panel:with_unfixed_buf` (same shape auto-agents
-        -- uses for slot terminal placement) so the swap goes through
-        -- and `winfixbuf` is restored before we return.
-        --
-        -- Also force-clear a stuck `state.loading` flag. The flag
-        -- gets stuck-true when a prior call errored before the
-        -- function reached its `state.loading = false` reset — e.g.
-        -- exactly the winfixbuf-raise this very fix addresses. Once
-        -- stuck, every future `get_opened_buffers` early-returns.
-        -- Clearing here is idempotent vs. concurrent runs (there's
-        -- no real concurrency — the debounce serializes us).
-        state.loading = false
-        local panel = M._panel
-        if panel and type(panel.with_unfixed_buf) == "function" then
-          panel:with_unfixed_buf(function()
-            pcall(items.get_opened_buffers, state)
-          end)
-        else
-          pcall(items.get_opened_buffers, state)
-        end
-      end
+    if not buffers_active then
+      M._buffers_dirty = true
+      return
     end
+    -- Buffers IS active — run the refresh against the live state.
+    -- Clear the dirty flag since we're handling it inline.
+    M._buffers_dirty = false
+    M._refresh_buffers_now(panel_winid)
   end
 
   -- Three signals to react to:

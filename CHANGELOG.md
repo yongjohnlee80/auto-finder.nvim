@@ -2,6 +2,75 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.13] — 2026-05-14 — buffers panel: dirty-bit consumer for the v0.2.11 gate-skip
+
+### Fixed
+
+- **Buffers panel showed a stale tree after gate-skipped refreshes.**
+  v0.2.11 added a gate in `M._install_buffers_refresh_autocmd` that
+  skips the buffers refresh when the buffers source isn't the active
+  section in the panel — to prevent the refresh from clobbering
+  whichever section the user actually has up. The gate was correct,
+  but the commit's assumption ("the next time the user focuses
+  buffers, the section re-mounts fresh via `section.get_buffer` and
+  a complete `navigate()` runs from scratch") was wrong:
+  `section.get_buffer` caches the section's bufnr across focuses,
+  so refocusing buffers reuses the existing buffer + tree state and
+  shows the stale snapshot from before the skipped refresh.
+
+  Concrete failure mode: user has files / repos / config section
+  active. A `:badd` (or `:edit`, or any BufAdd-triggering command)
+  adds a buffer to the buffer list. The autocmd-fire gate skips the
+  refresh (correct — no panel clobber). User then switches to the
+  buffers section. The tree shows the buffers from BEFORE the
+  `:badd`, not the new buffer.
+
+  **Fix:** when the gate skips, the autocmd-fire path now sets
+  `M._buffers_dirty = true`. The buffers section's `on_focus` hook
+  (in `sections/buffers.lua`) checks the flag and, if dirty, runs
+  `M._refresh_buffers_now(panel_winid)` inline before clearing the
+  flag. The refresh body itself was extracted from the autocmd-fire
+  function so both the inline (active-section, autocmd-fire) and the
+  deferred (gate-skipped, on_focus) paths share the same winfixbuf-
+  wrap + stuck-loading-reset logic.
+
+  The flag is cleared on every successful refresh (both inline and
+  deferred), so it can't accumulate or get stuck.
+
+### Smoke
+
+New section [21c] in `tests/smoke.lua` (6 assertions) — the
+contract this regression should have been caught by. Drives the
+round-trip explicitly:
+
+1. Open panel on config section (buffers inactive).
+2. `:badd` a probe file → assert `_buffers_dirty == true` (gate
+   set the flag).
+3. Focus buffers → assert `_buffers_dirty == false` (consumer
+   cleared it).
+4. Read the rendered tree → assert the probe file's basename
+   appears in the buffer lines (the regression: stale tree would
+   not contain it).
+5. `:badd` another probe while buffers IS active → assert the flag
+   stays cleared (the inline refresh path handles it; the flag
+   doesn't accumulate).
+
+Section [21] (the original v0.2.11 gate test) covered the gate's
+NEGATIVE contract — that the panel doesn't get clobbered while
+inactive. It did NOT cover the POSITIVE contract — that the
+buffers source eventually does become current on next focus. The
+new [21c] closes the loop.
+
+### Lesson
+
+**Any gate on a pub/sub-triggered refresh must be paired with a
+dirty-bit or invalidation so the next user-initiated read sees the
+correct state; the smoke test for that gate must assert both halves
+(the over-eager case doesn't fire AND the gated state still becomes
+correct on next read).** See the [[auto-core-events-subscription-lifecycle]]
+convention in the auto-agents kb for the broader rule against
+silently-fragile pub/sub patterns.
+
 ## [v0.2.12] — 2026-05-12 — prevent follow-mode hijacking
 
 ### Fixed
