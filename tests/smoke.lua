@@ -1405,6 +1405,122 @@ if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
 end
 end)()
 
+-- ───────────────────── 21d. v0.2.14 — out-of-cwd buffers grouped as sibling roots ───
+-- Out-of-cwd buffers used to be silently dropped by the buffers
+-- source's `is_subpath(state.path, path)` check. v0.2.14 buckets
+-- them by their natural external root (first segment after $HOME,
+-- or first absolute segment) and renders each bucket as a sibling
+-- top-level group (analogous to how TERMINALS already worked).
+--
+-- Contract:
+--   (1) Open the buffers panel at cwd = ~/Source/Projects/...
+--   (2) Load a buffer OUTSIDE cwd (e.g. /tmp/external-probe.md).
+--   (3) Rendered panel contains a SECOND root header for the
+--       external bucket (e.g. "/tmp") AND lists the probe file
+--       under it.
+--   (4) In-cwd behavior is unchanged: a cwd-relative buffer still
+--       appears under the cwd root.
+print("\n[21d] v0.2.14 — out-of-cwd buffers grouped as sibling roots")
+;(function()
+local _af = require("auto-finder")
+
+-- Ensure a buffers section exists for this test.
+local _sb_name = require("auto-finder.sections")._by_name
+if _sb_name["buffers"] == nil then
+  _af.slot_add("buffers")
+end
+local _buf_idx = require("auto-finder.sections")._by_name["buffers"]
+ok("buffers slot registered for [21d]", _buf_idx ~= nil)
+
+_af.open(true)
+vim.wait(80)
+_af.focus(_buf_idx)
+vim.wait(200)
+
+-- Load an EXTERNAL probe under /tmp (definitely outside cwd).
+local _external_probe = "/tmp/_v2_14_external_probe.md"
+local _fh4 = io.open(_external_probe, "w")
+_fh4:write("# external probe\n"); _fh4:close()
+vim.cmd("badd " .. vim.fn.fnameescape(_external_probe))
+-- :badd doesn't load by default — force load so the
+-- `is_loaded or show_unloaded` filter passes.
+local _ext_bufnr = vim.fn.bufnr(_external_probe)
+vim.fn.bufload(_ext_bufnr)
+vim.wait(300)  -- BufAdd debounce + dirty-bit consumer
+
+-- Force a refresh to make sure the latest state is rendered (the
+-- panel may still be showing the pre-:badd snapshot if the autocmd
+-- debounce hadn't elapsed yet under the test harness).
+if type(_af._refresh_buffers_now) == "function" then
+  _af._refresh_buffers_now(_af.state.panel_winid)
+  vim.wait(100)
+end
+
+-- Inspect the rendered tree: must contain a SECOND root header
+-- corresponding to the external bucket, AND the probe filename
+-- under it.
+local _panel = _af.state.panel_winid
+local _panel_buf = (_panel and vim.api.nvim_win_is_valid(_panel))
+  and vim.api.nvim_win_get_buf(_panel) or -1
+local _lines = (_panel_buf > 0)
+  and vim.api.nvim_buf_get_lines(_panel_buf, 0, -1, false) or {}
+
+local _saw_external_header = false
+local _saw_external_probe = false
+for _, ln in ipairs(_lines) do
+  -- Bucket header for /tmp would render as "/tmp" via
+  -- fnamemodify(..., ":~"). The base render adds icons/decorations
+  -- around it; the literal "/tmp" substring is the stable marker.
+  if ln:find("/tmp", 1, true) then _saw_external_header = true end
+  if ln:find("_v2_14_external_probe", 1, true) then
+    _saw_external_probe = true
+  end
+end
+ok("rendered tree includes the external bucket root (/tmp)",
+   _saw_external_header,
+   "panel_lines=" .. #_lines .. " sample=" .. vim.inspect(_lines))
+ok("rendered tree includes the external probe file under its bucket",
+   _saw_external_probe,
+   "panel_lines=" .. #_lines)
+
+-- The in-cwd path is also still working: drop a cwd-relative
+-- probe and assert it appears too (regression guard for the
+-- existing behavior).
+local _cwd_probe = vim.fn.getcwd() .. "/tests/_v2_14_cwd_probe.txt"
+local _fh5 = io.open(_cwd_probe, "w"); _fh5:write("cwd probe"); _fh5:close()
+vim.cmd("badd " .. vim.fn.fnameescape(_cwd_probe))
+vim.fn.bufload(vim.fn.bufnr(_cwd_probe))
+vim.wait(300)
+if type(_af._refresh_buffers_now) == "function" then
+  _af._refresh_buffers_now(_af.state.panel_winid)
+  vim.wait(100)
+end
+_panel_buf = (_panel and vim.api.nvim_win_is_valid(_panel))
+  and vim.api.nvim_win_get_buf(_panel) or -1
+_lines = (_panel_buf > 0)
+  and vim.api.nvim_buf_get_lines(_panel_buf, 0, -1, false) or {}
+local _saw_cwd_probe = false
+for _, ln in ipairs(_lines) do
+  if ln:find("_v2_14_cwd_probe", 1, true) then _saw_cwd_probe = true; break end
+end
+ok("regression: in-cwd buffer still appears under the cwd root",
+   _saw_cwd_probe)
+
+-- Cleanup.
+for _, p in ipairs({ _external_probe, _cwd_probe }) do
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(b) == p then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
+  pcall(os.remove, p)
+end
+local _last_idx_v214 = #_af.state.config.sections - 1
+if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
+  _af.slot_remove(_last_idx_v214)
+end
+end)()
+
 -- ───────────────────── 22. follow-mode hijacking protection ──────────────
 -- Regression coverage for files-follow and repos-follow:
 -- reveals must be gated to their active section, and repos-follow

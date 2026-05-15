@@ -22,6 +22,39 @@ M.get_opened_buffers = function(state)
   context.folders[root.path] = root
   local terminals = {}
 
+  -- AUTO-FINDER EXTENSION (v0.2.14):
+  -- Out-of-root buffers are bucketed by their "natural external root"
+  -- and rendered as ADDITIONAL top-level groups (like Terminals).
+  -- Without this, anything opened from $HOME but outside cwd — KB
+  -- pages under ~/.config, scratch files under ~/Documents, etc. —
+  -- silently disappeared from the buffers panel because the upstream
+  -- `is_subpath(state.path, path)` check dropped them on the floor.
+  --
+  -- Bucketing strategy: first path segment after $HOME (e.g.
+  -- ~/.config, ~/Documents); if outside $HOME, first absolute
+  -- segment (e.g. /tmp, /etc, /opt). Inside each bucket, full
+  -- subdir nesting is preserved — file_items.create_item walks
+  -- parents up to the bucket root we pre-register in context.folders.
+  --
+  -- The cwd root keeps its existing behavior (everything under cwd
+  -- nests there); externals become sibling groups.
+  local externals = {}  -- bucket_path -> { { bufnr, path } }
+
+  local home_dir = vim.fn.expand("~")
+  local home_prefix = home_dir .. "/"
+
+  local function bucket_for_external(path)
+    if vim.startswith(path, home_prefix) then
+      local rest = path:sub(#home_prefix + 1)
+      local first = rest:match("^([^/]+)")
+      if first then return home_dir .. "/" .. first end
+    end
+    -- Outside $HOME — use the first absolute path component.
+    local first = path:match("^/([^/]+)")
+    if first then return "/" .. first end
+    return nil
+  end
+
   local function add_buffer(bufnr, path)
     local is_loaded = vim.api.nvim_buf_is_loaded(bufnr)
     if is_loaded or state.show_unloaded then
@@ -69,9 +102,16 @@ M.get_opened_buffers = function(state)
       add_buffer(b, path)
     else
       if #state.path > 1 then
-        -- make sure this is within the root path
         if utils.is_subpath(state.path, path) then
+          -- In-cwd: existing behavior, nests under the cwd root.
           add_buffer(b, path)
+        else
+          -- AUTO-FINDER EXTENSION: out-of-cwd → bucket for grouping.
+          local bucket = bucket_for_external(path)
+          if bucket then
+            externals[bucket] = externals[bucket] or {}
+            table.insert(externals[bucket], { bufnr = b, path = path })
+          end
         end
       else
         add_buffer(b, path)
@@ -97,6 +137,43 @@ M.get_opened_buffers = function(state)
     else
       table.insert(root_folders, terminal_root)
     end
+  end
+
+  -- AUTO-FINDER EXTENSION (v0.2.14): emit external buckets as
+  -- sibling root folders. Each bucket gets its own header
+  -- (`OPEN BUFFERS in <bucket>`) and proper subdir nesting beneath.
+  local external_keys = {}
+  for k in pairs(externals) do external_keys[#external_keys + 1] = k end
+  table.sort(external_keys)
+  for _, bucket_path in ipairs(external_keys) do
+    local bucket_root = file_items.create_item(
+      context, bucket_path, "directory")
+      --[[@as neotree.FileItem.Directory]]
+    bucket_root.name = vim.fn.fnamemodify(bucket_path, ":~")
+    bucket_root.loaded = true
+    bucket_root.search_pattern = state.search_pattern
+    context.folders[bucket_path] = bucket_root
+    for _, e in ipairs(externals[bucket_path]) do
+      local is_loaded = vim.api.nvim_buf_is_loaded(e.bufnr)
+      if is_loaded or state.show_unloaded then
+        local is_listed = vim.fn.buflisted(e.bufnr)
+        if is_listed == 1 then
+          local ok, item = pcall(file_items.create_item,
+            context, e.path, "file", e.bufnr)
+          if ok then
+            item.extra = { bufnr = e.bufnr, is_listed = is_listed }
+          else
+            log.error("Error creating item for " .. e.path .. ": " .. item)
+          end
+        end
+      end
+    end
+    -- Same sort cadence the cwd root uses below — keeps each
+    -- bucket's children dirs-first / name-sorted.
+    if bucket_root.children then
+      file_items.advanced_sort(bucket_root.children, state)
+    end
+    table.insert(root_folders, bucket_root)
   end
   state.default_expanded_nodes = {}
   for id, _ in pairs(context.folders) do
