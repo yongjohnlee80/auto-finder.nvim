@@ -2,6 +2,44 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.14] — 2026-05-14 — buffers panel: group out-of-cwd buffers as sibling root folders
+
+### Added
+
+- **Out-of-cwd buffers are no longer dropped from the buffers panel.**
+  Before v0.2.14 the bundled buffers source filtered listed buffers
+  through `is_subpath(state.path, path)` and silently discarded
+  anything that didn't live under the panel's cwd — so opening a
+  KB page from `~/.config/...`, a scratch file under
+  `~/Documents/...`, or `/tmp/foo.md` would not appear in the
+  panel even though the buffer was loaded and listed.
+- v0.2.14 buckets out-of-cwd buffers by their "natural external
+  root" and emits each bucket as an additional top-level group —
+  same shape as the existing `Terminals` group. The cwd root keeps
+  its original behavior; in-cwd buffers still nest there.
+- **Bucketing strategy:** paths under `$HOME` group by the first
+  segment after home (e.g. `~/.config`, `~/Documents`); paths
+  outside `$HOME` group by the first absolute segment (e.g. `/tmp`,
+  `/etc`, `/opt`). Inside each bucket, full subdirectory nesting is
+  preserved via `file_items.create_item`, and children are sorted
+  with `advanced_sort` to match the cwd root's ordering.
+
+### Changed
+
+- `lua/auto-finder/neotree/sources/buffers/lib/items.lua` — buffer
+  loop now diverts out-of-cwd file buffers into a per-bucket
+  `externals` table; after `Terminals`, sorted bucket roots are
+  appended to `root_folders` in lexicographic order so the panel
+  layout is stable across redraws.
+
+### Tests
+
+- `tests/smoke.lua` `[21d]` — new section exercising the round
+  trip: load `/tmp/_v2_14_external_probe.md`, assert the rendered
+  tree contains both the `/tmp` bucket header and the probe file,
+  then load an in-cwd probe under `tests/` and assert the cwd root
+  still receives in-cwd buffers (regression guard).
+
 ## [v0.2.13] — 2026-05-14 — buffers panel: dirty-bit consumer for the v0.2.11 gate-skip
 
 ### Fixed
