@@ -1,65 +1,29 @@
 ---Section — dbase (nvim-dbee drawer).
 ---
----**Phase 0a SPIKE — throwaway.** Sole question this answers:
----*"Does `dbee.api.ui.drawer_show(panel_winid)` survive auto-finder's
----`winfixwidth` + `winfixbuf` panel contract?"*
+---Phase 0a proved that `dbee.api.ui.drawer_show(panel_winid)` survives
+---auto-finder's `winfixwidth` + `winfixbuf` panel contract when the
+---mount is wrapped in `host.with_unfixed_buf(...)`. This module is the
+---surviving section; ownership of one-shot `dbee.setup` lives in
+---[[auto-finder.sections._dbase_setup]].
 ---
----Approach (per the synthesized preferred method, see
----`kb/agents/white-vision/tasks/2026-05-16-dbase-section-feasibility-analysis.md`
----§8):
+---Boundary (from the synthesized preferred method, §8 of
+---`kb/agents/white-vision/tasks/2026-05-16-dbase-section-feasibility-analysis.md`):
 ---  - dbee owns DB core + tile internals
 ---  - auto-core owns the window, lifecycle, `winfixbuf`/`winfixwidth`
----  - the section wraps every tile-render into the panel in
----    `host.with_unfixed_buf(...)` (same dance the neo-tree fork
----    embedded into its renderer at v0.2.11)
----
----If Phase 0a goes green, this becomes the seed for the real section.
----If red, this file is deleted and we drop to Path C (sidecar).
+---  - the section wraps every tile-render in
+---    `host.with_unfixed_buf(...)` — the same dance the neo-tree fork
+---    embedded into its renderer at v0.2.11.
 ---@module 'auto-finder.sections.dbase'
 
 local host = require("auto-finder.panel.host")
 local logger = require("auto-finder.logger")
+local setup_mod = require("auto-finder.sections._dbase_setup")
 
 local M = {
   name = "dbase",
-  description = "nvim-dbee drawer (spike)",
+  description = "nvim-dbee drawer",
   _bufnr = nil,
-  _setup_done = false,
 }
-
----One-shot dbee.setup with a minimal in-memory source. Returns true
----if dbee is loadable and setup succeeded (or had already run).
----Returns false (with a logged reason) otherwise so the section can
----degrade to a scratch placeholder rather than crashing `M.setup`.
----@return boolean ok
-local function ensure_dbee_setup()
-  if M._setup_done then return true end
-
-  local ok_dbee, dbee = pcall(require, "dbee")
-  if not ok_dbee then
-    logger.error("dbase", "nvim-dbee is not on the runtimepath")
-    return false
-  end
-  local ok_src, dbee_sources = pcall(require, "dbee.sources")
-  if not ok_src then
-    logger.error("dbase", "dbee.sources require failed: " .. tostring(dbee_sources))
-    return false
-  end
-
-  -- Minimal memory source with zero connections. Sufficient to bring
-  -- the drawer up; we are testing window contract, not query exec.
-  local empty_source = dbee_sources.MemorySource:new({}, "dbase-spike")
-
-  local ok_setup, err = pcall(dbee.setup, {
-    sources = { empty_source },
-  })
-  if not ok_setup then
-    logger.error("dbase", "dbee.setup failed: " .. tostring(err))
-    return false
-  end
-  M._setup_done = true
-  return true
-end
 
 ---Render a small placeholder buffer in the panel when dbee is not
 ---available. Keeps the section selectable so the user can see *why*
@@ -129,8 +93,9 @@ function M.get_buffer(panel_winid)
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     return M._bufnr
   end
-  if not ensure_dbee_setup() then
-    M._bufnr = placeholder_buffer(panel_winid, "dbee.setup failed or unavailable")
+  local ok, err = setup_mod.ensure_setup(M._setup_opts)
+  if not ok then
+    M._bufnr = placeholder_buffer(panel_winid, err or "dbee.setup failed")
     return M._bufnr
   end
   local b = mount_drawer(panel_winid)
@@ -140,6 +105,16 @@ function M.get_buffer(panel_winid)
     M._bufnr = placeholder_buffer(panel_winid, "drawer_show returned nil")
   end
   return M._bufnr
+end
+
+---Allow auto-finder.setup() to pass section-scoped opts through to
+---the underlying `dbee.setup` (sources, etc.) without forcing the
+---section to live-import config. Called from the section registry's
+---per-section config-forwarding path; safe to call before the panel
+---has opened. No-op if `opts` is nil/empty.
+---@param opts AutoFinderDbaseSetupOpts?
+function M.configure(opts)
+  M._setup_opts = opts
 end
 
 ---Drop the cached bufnr so the next focus remounts cleanly. Matches
