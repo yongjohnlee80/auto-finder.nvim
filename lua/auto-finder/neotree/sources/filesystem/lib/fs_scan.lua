@@ -691,12 +691,23 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
   if not parent_id then
     -- Root-level scan: the user-visible "mapping" event. Large
     -- project trees can block for several seconds while the scan
-    -- walks directories + builds items; this toast tells the user
-    -- the freeze is auto-finder, not a hung editor. Sub-folder
-    -- expansions (parent_id ~= nil) skip the toast — they're
-    -- normally cheap and would spam during deep navigation.
+    -- walks directories + builds items; the toast tells the user
+    -- the freeze is auto-finder, not a hung editor. The start/end
+    -- pair is also recorded into auto-core's log ring (namespace
+    -- `auto-finder.scan`) so it's available in `log.recent()` /
+    -- `:checkhealth auto-core` for after-the-fact triage. The
+    -- "completed" toast only fires when the scan was slow enough
+    -- that the user has been wondering whether the editor is dead.
     local root_path = state.path or "(unknown)"
     local short = vim.fn.fnamemodify(root_path, ":~")
+    local start_ms = vim.uv.now()
+    local SLOW_MS = 1000
+
+    local ok_core, core = pcall(require, "auto-core")
+    local log_ac = ok_core and core.log and core.log.namespace("auto-finder.scan") or nil
+
+    if log_ac then log_ac.info("mapping started", { path = short }) end
+
     vim.schedule(function()
       vim.notify(
         ("auto-finder: mapping %s…"):format(short),
@@ -704,6 +715,32 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
         { title = "auto-finder" }
       )
     end)
+
+    -- Wrap the caller's callback so we can time the scan + emit
+    -- the completion event from the same place. `callback` is what
+    -- gets stored in `context.callback` below and fired from
+    -- `job_complete` once the async/sync scan finishes.
+    local original_cb = callback
+    callback = function(...)
+      local elapsed_ms = vim.uv.now() - start_ms
+      if log_ac then
+        log_ac.info("mapping completed", {
+          path       = short,
+          elapsed_ms = elapsed_ms,
+        })
+      end
+      if elapsed_ms >= SLOW_MS then
+        vim.schedule(function()
+          vim.notify(
+            ("auto-finder: mapped %s (%.1fs)"):format(short, elapsed_ms / 1000),
+            vim.log.levels.INFO,
+            { title = "auto-finder" }
+          )
+        end)
+      end
+      if original_cb then original_cb(...) end
+    end
+
     M.stop_watchers(state)
   end
   ---@type neotree.sources.filesystem.Context
