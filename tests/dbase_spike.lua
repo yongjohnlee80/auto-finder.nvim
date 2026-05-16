@@ -439,6 +439,176 @@ else
   core.events.unsubscribe(h_call)
 end
 
+-- ───────────────────── 5d. state-keying probe (slice 6) ───────────────
+-- White-vision refinement: mirrors the buffers-panel v0.2.13 regression
+-- pattern. With dbase NOT the active section, fire events that would
+-- mutate its state, then re-focus dbase. Assert no stale state, no
+-- placeholder, invariants intact.
+print("\n[5d] state-keying probe — events while dbase inactive, then refocus")
+do
+  local section = require("auto-finder.sections.dbase")
+  -- Ensure dbase IS the active section first, capture its bufnr.
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+  local panel_now = af.state.panel_winid
+  local dbase_bufnr_before = panel_now and vim.api.nvim_win_get_buf(panel_now)
+  ok("dbase buffer captured before switch",
+    dbase_bufnr_before and vim.api.nvim_buf_is_valid(dbase_bufnr_before))
+
+  -- Switch AWAY from dbase. files is section 1 in our test config.
+  af.focus(1)
+  vim.wait(150, function() return af.state.section == 1 end, 5)
+  ok("focus moved away from dbase (state.section == 1)",
+    af.state.section == 1)
+
+  -- Now fire a dbee event that would, in production, trigger drawer
+  -- state changes. Our bridge should still publish the auto-core
+  -- event regardless of section focus — gates on the receiving side
+  -- (like the buffers-panel v0.2.11 fix) don't apply to producer-side
+  -- bridges, but verifying the pattern explicitly is the whole point.
+  if ok_dbee_bus and ok_core then
+    local hits = {}
+    local h = core.events.subscribe("dbase.connection:changed",
+      function(p) table.insert(hits, p) end)
+    dbee_event_bus.trigger("current_connection_changed",
+      { conn_id = "while-inactive-conn" })
+    vim.wait(150, function() return #hits >= 1 end, 5)
+    ok("[5d.1] connection event fired with dbase inactive",
+      #hits == 1 and hits[1].id == "while-inactive-conn",
+      hits[1] and ("got id=" .. tostring(hits[1].id)) or "no hit")
+    core.events.unsubscribe(h)
+  else
+    skip("[5d.1] connection event fired with dbase inactive",
+      "dbee_bus or core unavailable")
+  end
+
+  -- Re-focus dbase. The cached bufnr should still be valid; the
+  -- section should NOT degrade to placeholder; winfixbuf/winfixwidth
+  -- should still hold.
+  af.focus("dbase")
+  vim.wait(250, function() return af.state.section == 2 end, 5)
+  local dbase_bufnr_after = panel_now and vim.api.nvim_win_get_buf(panel_now)
+  ok("[5d.2] refocus(dbase) returns the same drawer bufnr",
+    dbase_bufnr_before and dbase_bufnr_after
+      and dbase_bufnr_before == dbase_bufnr_after,
+    string.format("before=%s after=%s",
+      tostring(dbase_bufnr_before), tostring(dbase_bufnr_after)))
+  local bufname = dbase_bufnr_after
+    and vim.api.nvim_buf_get_name(dbase_bufnr_after) or ""
+  ok("[5d.3] refocus did NOT fall back to placeholder",
+    not bufname:find("auto%-finder%-dbase://placeholder"),
+    "name=" .. bufname)
+  ok("[5d.4] winfixbuf still true after refocus",
+    panel_now and vim.wo[panel_now].winfixbuf == true)
+  ok("[5d.5] winfixwidth still true after refocus",
+    panel_now and vim.wo[panel_now].winfixwidth == true)
+end
+
+-- ───────────────────── 5e. multi-cycle stress (slice 6) ────────────────
+-- Beyond section [5]'s single close-reopen, exercise three full cycles
+-- with section switches in between, and assert all invariants survive.
+print("\n[5e] multi-cycle stress — 3× close/reopen with section switches")
+do
+  for i = 1, 3 do
+    af.close()
+    if af.state.panel_winid ~= nil then
+      ok("[5e.c" .. i .. "] panel_winid nil after close", false,
+        "still " .. tostring(af.state.panel_winid))
+    end
+
+    af.open(true)
+    local p = af.state.panel_winid
+    if not (p and vim.api.nvim_win_is_valid(p)) then
+      ok("[5e.o" .. i .. "] reopen produced valid panel", false,
+        "p=" .. tostring(p))
+      break
+    end
+
+    -- Cycle through all sections to stress the registry.
+    af.focus(0)  -- config
+    vim.wait(100, function() return af.state.section == 0 end, 5)
+    af.focus(1)  -- files
+    vim.wait(100, function() return af.state.section == 1 end, 5)
+    af.focus(2)  -- dbase
+    vim.wait(150, function() return af.state.section == 2 end, 5)
+
+    local invariants_ok = vim.api.nvim_win_is_valid(p)
+      and vim.wo[p].winfixbuf == true
+      and vim.wo[p].winfixwidth == true
+    ok("[5e.c" .. i .. "] all panel invariants hold after full cycle",
+      invariants_ok,
+      string.format("valid=%s wfb=%s wfw=%s",
+        tostring(vim.api.nvim_win_is_valid(p)),
+        tostring(p and vim.wo[p].winfixbuf),
+        tostring(p and vim.wo[p].winfixwidth)))
+  end
+
+  -- Final orphan-windows check after the stress run.
+  local orphans = 0
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(w) then
+      local b = vim.api.nvim_win_get_buf(w)
+      local n = vim.api.nvim_buf_get_name(b)
+      if (n:find("^dbee://") or vim.bo[b].filetype:find("^dbee"))
+          and w ~= af.state.panel_winid then
+        orphans = orphans + 1
+      end
+    end
+  end
+  ok("[5e] no orphan dbee windows after 3-cycle stress",
+    orphans == 0,
+    "found " .. orphans)
+end
+
+-- ───────────────────── 5f. keymap audit (slice 7) ──────────────────────
+-- dbee's drawer ships its own `q` mapping (action = "menu_close"). The
+-- auto-core section registry applies `q → panel:close` AFTER get_buffer
+-- mounts dbee, so last-write-wins should leave us with the right
+-- semantics. Verify empirically.
+print("\n[5f] keymap audit — q + 0..9 on the dbase buffer")
+do
+  af.focus("dbase")
+  vim.wait(250, function() return af.state.section == 2 end, 5)
+  local panel_now = af.state.panel_winid
+  local bufnr = panel_now and vim.api.nvim_win_get_buf(panel_now)
+
+  -- 0..9 section-switching keymaps installed by auto-core.ui.section.
+  -- Probe one numeric (1 = files) and assert the buffer-local mapping
+  -- exists. vim.fn.maparg with buffer scope returns "" / {} when not
+  -- bound on the buffer.
+  local map_1 = vim.fn.maparg("1", "n", false, true)
+  ok("[5f.1] '1' is bound on dbase buffer (section-switch keymap)",
+    type(map_1) == "table" and map_1.lhs == "1",
+    "got " .. vim.inspect(map_1))
+
+  -- 'q' should be bound and resolve to auto-core's panel close, not
+  -- dbee's menu_close. We can't inspect the closure body directly,
+  -- but we can check the `desc` field auto-core sets.
+  local map_q = vim.fn.maparg("q", "n", false, true)
+  ok("[5f.2] 'q' is bound on dbase buffer",
+    type(map_q) == "table" and map_q.lhs == "q",
+    "got " .. vim.inspect(map_q))
+  ok("[5f.3] 'q' desc points at auto-core (panel close), not dbee",
+    type(map_q) == "table" and type(map_q.desc) == "string"
+      and map_q.desc:find("auto%-core"),
+    type(map_q) == "table" and ("desc=" .. tostring(map_q.desc)) or "no map")
+
+  -- End-to-end: fire `q` and assert the panel actually closes. This
+  -- catches the case where some intermediate handler hijacks the key
+  -- between resolution and execution.
+  vim.api.nvim_set_current_win(panel_now)
+  -- Use feedkeys with 'x' (execute immediately) so the press lands
+  -- synchronously within our test tick.
+  vim.api.nvim_feedkeys("q", "x", false)
+  vim.wait(150, function() return af.state.panel_winid == nil end, 5)
+  ok("[5f.4] pressing 'q' on dbase buffer closes the panel",
+    af.state.panel_winid == nil,
+    "panel_winid=" .. tostring(af.state.panel_winid))
+
+  -- Reopen for any subsequent sections.
+  af.open(true)
+end
+
 -- ───────────────────── 7. report ───────────────────────────────────────
 print("\n──────────────────────────────────────────────")
 print(string.format("Phase 0a spike: %d passed, %d failed, %d skipped",
