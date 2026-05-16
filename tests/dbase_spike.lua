@@ -280,6 +280,70 @@ do
   end
 end
 
+-- ───────────────────── 5c. dbee log bridge (slice 4) ──────────────────
+-- Verify dbee's `utils.log` is wrapped so messages enter auto-core's
+-- ring under `auto-finder.dbase.upstream.<subtitle>`. Skips when
+-- auto-core or dbee is unavailable.
+print("\n[5c] log bridge — dbee.utils.log → auto-core.log")
+do
+  local setup_mod = require("auto-finder.sections._dbase_setup")
+  local ok_dbee_utils, dbee_utils = pcall(require, "dbee.utils")
+  local ok_core_log, core_log_mod
+  do
+    local ok_ac, ac = pcall(require, "auto-core")
+    if ok_ac and type(ac.log) == "table" then
+      ok_core_log, core_log_mod = true, ac.log
+    end
+  end
+
+  if not (ok_dbee_utils and ok_core_log and setup_mod.is_setup_done()) then
+    skip("log-bridge round-trip",
+      string.format("dbee_utils=%s core_log=%s setup_done=%s",
+        tostring(ok_dbee_utils), tostring(ok_core_log),
+        tostring(setup_mod.is_setup_done())))
+  else
+    ok("setup_mod reports log bridge installed",
+      setup_mod._log_bridge_installed == true)
+    ok("dbee.utils.log is wrapped (not the original)",
+      dbee_utils.log ~= setup_mod._original_dbee_log)
+
+    -- Fire a synthetic dbee log. ERROR level so it doesn't depend on
+    -- whatever the auto-core log level happens to be configured at.
+    -- vim.notify will fire too but that's fine in headless mode.
+    dbee_utils.log("error", "spike-probe-message", "spike-subtitle")
+
+    -- Scan recent entries for the bridged line.
+    local entries = core_log_mod.recent(50)
+    local found
+    for _, e in ipairs(entries) do
+      if e.component == "auto-finder.dbase.upstream.spike-subtitle"
+          and tostring(e.message):find("spike%-probe%-message") then
+        found = e
+        break
+      end
+    end
+    ok("auto-core.log captured the bridged dbee entry",
+      found ~= nil)
+    ok("captured entry has level_name=ERROR",
+      found and found.level_name == "ERROR",
+      found and ("got " .. tostring(found.level_name)) or "")
+
+    -- nil subtitle path: should bucket under .upstream.core
+    dbee_utils.log("warn", "no-subtitle-message")
+    local entries2 = core_log_mod.recent(50)
+    local found_core
+    for _, e in ipairs(entries2) do
+      if e.component == "auto-finder.dbase.upstream.core"
+          and tostring(e.message):find("no%-subtitle%-message") then
+        found_core = e
+        break
+      end
+    end
+    ok("nil-subtitle bridges to .upstream.core",
+      found_core ~= nil)
+  end
+end
+
 -- ───────────────────── 6. event bridge (slice 2) ───────────────────────
 -- Round-trip: subscribe to dbase.* topics on auto-core's bus, fire
 -- synthetic dbee events via the internal event_bus, then assert the

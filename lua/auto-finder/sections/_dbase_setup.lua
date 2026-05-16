@@ -18,7 +18,52 @@ local logger = require("auto-finder.logger")
 local M = {
   _done = false,    ---@type boolean        — setup ran AND returned ok
   _err  = nil,      ---@type string|nil     — last failure, retained until reset
+  _log_bridge_installed = false,
+  _original_dbee_log = nil,
 }
+
+---Install a wrap around `dbee.utils.log` so dbee-originated messages
+---also enter the auto-core ring buffer under `auto-finder.dbase.upstream.*`.
+---
+---dbee calls `vim.notify(...)` directly from its `lua/dbee/utils.lua`
+---(signature: `M.log(level, message, subtitle)` — see
+---`nvim-dbee/lua/dbee/utils.lua:46`). That bypasses
+---`auto-core.log` and the family-wide [[auto-family-logging]]
+---convention's "no direct vim.notify" rule (which is binding on us,
+---not on upstream).
+---
+---Bridge strategy: keep dbee's original `vim.notify` behavior so any
+---existing dbee UI that reads `:messages` still works, AND emit a
+---parallel `auto-core.log` entry under
+---`auto-finder.dbase.upstream.<subtitle>` so a unified `:AutoCoreLog`
+---viewer surfaces dbee messages alongside ours.
+---
+---Idempotent (second call no-ops). Reversed by `M.reset()` for
+---tests. Sensitive to upstream dbee changing the `M.log` signature —
+---if `level`/`message`/`subtitle` ever shift, the bridge silently
+---degrades to a pass-through (original is always called via pcall).
+local function install_dbee_log_bridge()
+  if M._log_bridge_installed then return end
+  local ok, dbee_utils = pcall(require, "dbee.utils")
+  if not ok or type(dbee_utils) ~= "table" or type(dbee_utils.log) ~= "function" then
+    return
+  end
+  M._original_dbee_log = dbee_utils.log
+  dbee_utils.log = function(level, message, subtitle)
+    -- Emit to auto-core.log first. If our logger errors for any
+    -- reason, we still want dbee's original log to fire — never
+    -- shadow upstream behavior.
+    pcall(function()
+      local ns = "dbase.upstream." .. (type(subtitle) == "string" and subtitle ~= ""
+        and subtitle or "core")
+      local fn = logger[level] or logger.info
+      fn(ns, tostring(message or ""))
+    end)
+    -- Preserve original behavior (vim.notify with title="nvim-dbee").
+    return M._original_dbee_log(level, message, subtitle)
+  end
+  M._log_bridge_installed = true
+end
 
 ---@class AutoFinderDbaseSetupOpts
 ---@field sources? table[]   list of dbee Source instances; defaults to a single empty MemorySource
@@ -69,16 +114,30 @@ function M.ensure_setup(opts)
     return false, M._err
   end
 
+  -- Bridge dbee's own logging into auto-core.log. Done AFTER setup so
+  -- the wrap doesn't interfere with dbee's internal init. Idempotent.
+  install_dbee_log_bridge()
+
   M._done = true
   return true, nil
 end
 
 ---Test-only: break the singleton so a fresh `ensure_setup` can run.
 ---Production callers must not touch this — dbee state is module-global
----and re-running setup mid-session produces undefined behavior.
+---and re-running setup mid-session produces undefined behavior. Also
+---restores dbee.utils.log to its pre-bridge function so a clean test
+---reproduces the wrap from scratch.
 function M.reset()
   M._done = false
   M._err = nil
+  if M._log_bridge_installed and M._original_dbee_log then
+    local ok, dbee_utils = pcall(require, "dbee.utils")
+    if ok and type(dbee_utils) == "table" then
+      dbee_utils.log = M._original_dbee_log
+    end
+  end
+  M._log_bridge_installed = false
+  M._original_dbee_log = nil
 end
 
 ---@return boolean
