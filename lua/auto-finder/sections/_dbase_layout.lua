@@ -1,0 +1,225 @@
+---Companion-pane lifecycle for the dbase section.
+---
+---Phase 2, slice 1 of lector ADR 0020 §Implementation Plan paired
+---with the white-vision §8 refinement: dbee's editor / result /
+---call_log tiles live in the **main editor area**, not in the
+---auto-finder panel column. The drawer stays in the panel
+---(`sections.dbase` handles that); this module owns the OTHER
+---three tiles.
+---
+---Boundary recap:
+---  - dbee owns the tile internals (buffers, rendering, content).
+---  - This module owns the **windows** that host those tiles, and
+---    where they land in the layout.
+---  - Auto-finder's panel is OFF-LIMITS — never `ui.editor_show`,
+---    `ui.result_show`, or `ui.call_log_show` into the panel winid.
+---
+---API:
+---  ensure_editor()    → winid|nil   mount editor tile, return winid
+---  ensure_result()    → winid|nil   mount result tile (split below editor)
+---  ensure_call_log()  → winid|nil   mount call_log tile (split below result)
+---  close_all()                      tear down anything we mounted
+---  is_open()          → boolean     any companion winid still valid
+---
+---All ensure_*() calls are idempotent — they return the existing
+---winid if still valid, otherwise re-mount.
+---@module 'auto-finder.sections._dbase_layout'
+
+local logger = require("auto-finder.logger")
+
+local M = {
+  _editor_winid = nil,    ---@type integer|nil
+  _result_winid = nil,    ---@type integer|nil
+  _call_log_winid = nil,  ---@type integer|nil
+}
+
+---Is `winid` the auto-finder panel? Detected via the marker that
+---auto-core.ui.panel stamps (`w:auto_finder_panel = 1`). Avoids a
+---direct dependency on the section's own _panel field.
+---@param winid integer
+---@return boolean
+local function is_panel(winid)
+  if not vim.api.nvim_win_is_valid(winid) then return false end
+  return vim.w[winid].auto_finder_panel == 1
+    or vim.w[winid].auto_core_panel_name == "auto-finder"
+end
+
+---Find a usable editor-area window — any window that is NOT
+---auto-finder's panel and isn't itself a dbee tile we already own.
+---Prefers the most-recently-current matching window (vim's `#`
+---alt-window) so the editor lands where the user was last working.
+---Returns nil if no such window exists (only the panel is open).
+---@return integer|nil
+local function find_editor_window()
+  -- Prefer the alt-window (previous window) if it qualifies. This is
+  -- the most likely "where the user was just typing" location.
+  local alt = vim.fn.win_getid(vim.fn.winnr("#"))
+  if alt and alt > 0 and vim.api.nvim_win_is_valid(alt)
+      and not is_panel(alt)
+      and alt ~= M._result_winid
+      and alt ~= M._call_log_winid then
+    return alt
+  end
+
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(w)
+        and not is_panel(w)
+        and w ~= M._editor_winid
+        and w ~= M._result_winid
+        and w ~= M._call_log_winid then
+      return w
+    end
+  end
+  return nil
+end
+
+---Create a fresh editor-area window when none qualifies (the user
+---has only the panel open, e.g. `nvim .` then closed all other
+---splits). vsplit to the right of the panel.
+---@return integer winid
+local function create_editor_window()
+  -- Focus the panel briefly so the split lands right of it; the
+  -- vsplit then becomes the new current window, which we capture.
+  local panel = nil
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if is_panel(w) then panel = w; break end
+  end
+  if panel and vim.api.nvim_win_is_valid(panel) then
+    pcall(vim.api.nvim_set_current_win, panel)
+    vim.cmd("rightbelow vsplit")
+    local newwin = vim.api.nvim_get_current_win()
+    -- Open with an empty scratch buffer so we don't displace any
+    -- buffer the user had — ui.editor_show will swap its own
+    -- bufnr in next.
+    local b = vim.api.nvim_create_buf(false, true)
+    pcall(vim.api.nvim_win_set_buf, newwin, b)
+    return newwin
+  end
+  -- No panel either; fall back to a plain split.
+  vim.cmd("vsplit")
+  return vim.api.nvim_get_current_win()
+end
+
+---Mount the dbee editor tile in an editor-area window. Idempotent.
+---@return integer|nil winid
+function M.ensure_editor()
+  if M._editor_winid and vim.api.nvim_win_is_valid(M._editor_winid) then
+    return M._editor_winid
+  end
+
+  local ok, dbee = pcall(require, "dbee")
+  if not ok then return nil end
+
+  local winid = find_editor_window() or create_editor_window()
+  if not winid or not vim.api.nvim_win_is_valid(winid) then
+    logger.error("dbase.layout", "could not resolve editor window")
+    return nil
+  end
+
+  local show_ok, err = pcall(dbee.api.ui.editor_show, winid)
+  if not show_ok then
+    logger.error("dbase.layout", "editor_show failed: " .. tostring(err))
+    return nil
+  end
+  M._editor_winid = winid
+  return winid
+end
+
+---Generic helper: ensure a tile is shown in a split below `parent_winid`.
+---Used for both result and call_log. Idempotent on the tracked winid.
+---@param current_winid integer|nil  the cached winid (may be invalid)
+---@param parent_winid integer|nil   reference window to split below
+---@param show_fn fun(winid: integer)  dbee api.ui.<tile>_show
+---@param label string                 for logging
+---@return integer|nil winid
+local function ensure_below_split(current_winid, parent_winid, show_fn, label)
+  if current_winid and vim.api.nvim_win_is_valid(current_winid) then
+    return current_winid
+  end
+  if not parent_winid or not vim.api.nvim_win_is_valid(parent_winid) then
+    -- Parent gone; auto-recover by mounting the editor first.
+    parent_winid = M.ensure_editor()
+    if not parent_winid then
+      logger.error("dbase.layout",
+        label .. ": no parent winid (editor mount failed)")
+      return nil
+    end
+  end
+
+  pcall(vim.api.nvim_set_current_win, parent_winid)
+  vim.cmd("belowright split")
+  local newwin = vim.api.nvim_get_current_win()
+  local scratch = vim.api.nvim_create_buf(false, true)
+  pcall(vim.api.nvim_win_set_buf, newwin, scratch)
+
+  -- dbee's tile :show() methods do "bind buffer to window" first, then
+  -- finish with `:refresh()`. The refresh leans on the Go backend
+  -- (e.g. call_log → `handler:connection_get_calls`), which can error
+  -- if the backend is absent or the cached connection_id is stale.
+  -- That refresh failure is downstream of the window+buffer binding
+  -- we actually care about — log it as a warning but DO NOT tear down
+  -- the window. A subsequent legitimate refresh will recover.
+  local ok, err = pcall(show_fn, newwin)
+  if not ok then
+    logger.warn("dbase.layout",
+      label .. "_show errored mid-init (probably a refresh failure): "
+        .. tostring(err))
+  end
+  if not vim.api.nvim_win_is_valid(newwin) then
+    logger.error("dbase.layout",
+      label .. "_show closed the window before we could capture it")
+    return nil
+  end
+  return newwin
+end
+
+---@return integer|nil winid
+function M.ensure_result()
+  local ok, dbee = pcall(require, "dbee")
+  if not ok then return nil end
+  local winid = ensure_below_split(M._result_winid, M._editor_winid,
+    dbee.api.ui.result_show, "result")
+  M._result_winid = winid
+  return winid
+end
+
+---@return integer|nil winid
+function M.ensure_call_log()
+  local ok, dbee = pcall(require, "dbee")
+  if not ok then return nil end
+  local winid = ensure_below_split(M._call_log_winid,
+    M._result_winid or M._editor_winid,
+    dbee.api.ui.call_log_show, "call_log")
+  M._call_log_winid = winid
+  return winid
+end
+
+---Close every companion window we own. Does NOT touch the panel.
+---Idempotent.
+function M.close_all()
+  for _, key in ipairs({ "_call_log_winid", "_result_winid", "_editor_winid" }) do
+    local w = M[key]
+    if w and vim.api.nvim_win_is_valid(w) and not is_panel(w) then
+      pcall(vim.api.nvim_win_close, w, true)
+    end
+    M[key] = nil
+  end
+end
+
+---@return boolean
+function M.is_open()
+  for _, w in ipairs({ M._editor_winid, M._result_winid, M._call_log_winid }) do
+    if w and vim.api.nvim_win_is_valid(w) then return true end
+  end
+  return false
+end
+
+---Test-only — clear cached winids without closing the windows. Useful
+---when a test wants to assert auto-recovery from invalid winids.
+function M._reset_state()
+  M._editor_winid = nil
+  M._result_winid = nil
+  M._call_log_winid = nil
+end
+
+return M

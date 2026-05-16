@@ -609,6 +609,100 @@ do
   af.open(true)
 end
 
+-- ───────────────────── 6b. companion-pane layout (slice 8) ────────────
+-- Phase 2 starts here: the dbase section drawer stays in the panel,
+-- but editor/result/call_log live in the **main editor area** per the
+-- white-vision §8 refinement. Verify the layout module mounts them
+-- without contaminating the panel.
+print("\n[6b] companion-pane layout — editor/result/call_log in editor area")
+do
+  local layout = require("auto-finder.sections._dbase_layout")
+
+  -- Need the panel open + at least one editor-area window. Re-open
+  -- the panel (closed by [5f] keymap audit), then guarantee a
+  -- second window exists. Create one synthetic editor buffer to
+  -- give layout.ensure_editor() a candidate target.
+  if af.state.panel_winid == nil then af.open(true) end
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+  local panel_winid = af.state.panel_winid
+
+  -- If only the panel exists, force-create a non-panel window so the
+  -- "prefer existing editor-area window" path is exercised.
+  if #vim.api.nvim_list_wins() < 2 then
+    vim.cmd("rightbelow vsplit")
+    local scratch = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_win_set_buf(0, scratch)
+  end
+
+  ok("layout.is_open returns false before any ensure_*()",
+    layout.is_open() == false)
+
+  local editor_winid = layout.ensure_editor()
+  ok("[6b.1] ensure_editor returns a valid winid",
+    editor_winid and vim.api.nvim_win_is_valid(editor_winid),
+    "got " .. tostring(editor_winid))
+  ok("[6b.2] editor winid is NOT the panel",
+    editor_winid and editor_winid ~= panel_winid,
+    string.format("editor=%s panel=%s",
+      tostring(editor_winid), tostring(panel_winid)))
+  ok("[6b.3] editor winid carries no auto_finder_panel marker",
+    editor_winid and vim.w[editor_winid].auto_finder_panel ~= 1)
+
+  local result_winid = layout.ensure_result()
+  ok("[6b.4] ensure_result returns a valid winid",
+    result_winid and vim.api.nvim_win_is_valid(result_winid))
+  ok("[6b.5] result is NOT the panel and NOT the editor winid",
+    result_winid and result_winid ~= panel_winid
+      and result_winid ~= editor_winid)
+
+  local call_log_winid = layout.ensure_call_log()
+  ok("[6b.6] ensure_call_log returns a valid winid",
+    call_log_winid and vim.api.nvim_win_is_valid(call_log_winid))
+  ok("[6b.7] call_log is NOT the panel/editor/result winid",
+    call_log_winid and call_log_winid ~= panel_winid
+      and call_log_winid ~= editor_winid
+      and call_log_winid ~= result_winid)
+
+  ok("[6b.8] layout.is_open returns true after mounts",
+    layout.is_open() == true)
+
+  -- Boundary: the panel buffer must NOT have been clobbered.
+  ok("[6b.9] panel buffer is still the dbee drawer",
+    panel_winid and vim.api.nvim_win_is_valid(panel_winid)
+      and vim.bo[vim.api.nvim_win_get_buf(panel_winid)].filetype:find("^dbee"),
+    panel_winid and ("panel ft=" .. tostring(
+      vim.bo[vim.api.nvim_win_get_buf(panel_winid)].filetype)) or "no panel")
+  ok("[6b.10] winfixbuf still true on panel after companion mounts",
+    panel_winid and vim.wo[panel_winid].winfixbuf == true)
+  ok("[6b.11] winfixwidth still true on panel after companion mounts",
+    panel_winid and vim.wo[panel_winid].winfixwidth == true)
+
+  -- Idempotence: second ensure_* returns the SAME winids.
+  local editor2 = layout.ensure_editor()
+  local result2 = layout.ensure_result()
+  local call_log2 = layout.ensure_call_log()
+  ok("[6b.12] ensure_editor is idempotent",
+    editor2 == editor_winid)
+  ok("[6b.13] ensure_result is idempotent",
+    result2 == result_winid)
+  ok("[6b.14] ensure_call_log is idempotent",
+    call_log2 == call_log_winid)
+
+  -- close_all tears down the three but leaves the panel intact.
+  layout.close_all()
+  ok("[6b.15] close_all: editor winid no longer valid",
+    not vim.api.nvim_win_is_valid(editor_winid or -1))
+  ok("[6b.16] close_all: result winid no longer valid",
+    not vim.api.nvim_win_is_valid(result_winid or -1))
+  ok("[6b.17] close_all: call_log winid no longer valid",
+    not vim.api.nvim_win_is_valid(call_log_winid or -1))
+  ok("[6b.18] close_all: panel STILL valid",
+    panel_winid and vim.api.nvim_win_is_valid(panel_winid))
+  ok("[6b.19] close_all: layout.is_open returns false",
+    layout.is_open() == false)
+end
+
 -- ───────────────────── 7. report ───────────────────────────────────────
 print("\n──────────────────────────────────────────────")
 print(string.format("Phase 0a spike: %d passed, %d failed, %d skipped",
