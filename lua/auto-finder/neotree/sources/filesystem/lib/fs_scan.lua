@@ -689,6 +689,21 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
   end
 
   if not parent_id then
+    -- Root-level scan: the user-visible "mapping" event. Large
+    -- project trees can block for several seconds while the scan
+    -- walks directories + builds items; this toast tells the user
+    -- the freeze is auto-finder, not a hung editor. Sub-folder
+    -- expansions (parent_id ~= nil) skip the toast — they're
+    -- normally cheap and would spam during deep navigation.
+    local root_path = state.path or "(unknown)"
+    local short = vim.fn.fnamemodify(root_path, ":~")
+    vim.schedule(function()
+      vim.notify(
+        ("auto-finder: mapping %s…"):format(short),
+        vim.log.levels.INFO,
+        { title = "auto-finder" }
+      )
+    end)
     M.stop_watchers(state)
   end
   ---@type neotree.sources.filesystem.Context
