@@ -18,6 +18,7 @@
 local host = require("auto-finder.panel.host")
 local logger = require("auto-finder.logger")
 local setup_mod = require("auto-finder.sections._dbase_setup")
+local events_mod = require("auto-finder.sections._dbase_events")
 
 local M = {
   name = "dbase",
@@ -97,6 +98,12 @@ function M.get_buffer(panel_winid)
   if not ok then
     M._bufnr = placeholder_buffer(panel_winid, err or "dbee.setup failed")
     return M._bufnr
+  end
+  -- Event bridge attaches after setup so the dbee handler exists; it's
+  -- idempotent and a no-op when auto-core.events is unavailable.
+  local ev_ok, ev_err = events_mod.attach()
+  if not ev_ok then
+    logger.warn("dbase", "event bridge attach failed: " .. tostring(ev_err))
   end
   local b = mount_drawer(panel_winid)
   if b then

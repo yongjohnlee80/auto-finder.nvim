@@ -21,8 +21,13 @@ local plugin_root = vim.fn.fnamemodify(
 local nvim_plugins_root = vim.fn.fnamemodify(plugin_root, ":h:h")
 
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
+-- Prefer the sibling `dbase-events` worktree of auto-core when present
+-- (it carries the six `dbase.*` topic registrations slice 3 added);
+-- fall back to `main` and then the lazy install. Listed first wins
+-- because we prepend.
 for _, p in ipairs({
   plugin_root,
+  nvim_plugins_root .. "/auto-core.nvim/dbase-events",
   nvim_plugins_root .. "/auto-core.nvim/main",
   nvim_plugins_root .. "/nvim-dbee",
   LAZY .. "/auto-core.nvim",
@@ -219,7 +224,102 @@ end, 5)
 ok("reopen — focus(dbase) still works",
   af.state.section == 2)
 
--- ───────────────────── 6. report ───────────────────────────────────────
+-- ───────────────────── 6. event bridge (slice 2) ───────────────────────
+-- Round-trip: subscribe to dbase.* topics on auto-core's bus, fire
+-- synthetic dbee events via the internal event_bus, then assert the
+-- bridge forwarded them with the right payloads. Skips when auto-core
+-- or dbee isn't available.
+print("\n[6] event bridge — dbee → auto-core.events forwarding")
+
+local events_mod = require("auto-finder.sections._dbase_events")
+local ok_core, core = pcall(require, "auto-core")
+local ok_dbee_bus, dbee_event_bus = pcall(require, "dbee.handler.__events")
+
+if not (ok_core and ok_dbee_bus and events_mod.is_attached()) then
+  skip("event bridge round-trip",
+    string.format("auto-core=%s dbee_bus=%s attached=%s",
+      tostring(ok_core), tostring(ok_dbee_bus),
+      tostring(events_mod.is_attached())))
+else
+  local conn_hits = {}
+  local call_hits = {}
+  local h_conn = core.events.subscribe("dbase.connection:changed",
+    function(p) table.insert(conn_hits, p) end)
+  local h_call = core.events.subscribe("dbase.call:*",
+    function(p, topic) table.insert(call_hits, { topic = topic, payload = p }) end)
+
+  -- Synthetic dbee events — bypasses the Go backend.
+  dbee_event_bus.trigger("current_connection_changed",
+    { conn_id = "test-connection-spike" })
+  dbee_event_bus.trigger("call_state_changed", {
+    id = "call-id-1",
+    state = "executing",
+    query = "SELECT 1",
+    time_taken_us = 0,
+  })
+  dbee_event_bus.trigger("call_state_changed", {
+    id = "call-id-1",
+    state = "archived",
+    query = "SELECT 1",
+    time_taken_us = 1234,
+  })
+
+  -- dbee's event_bus.trigger wraps callbacks in vim.schedule(), so the
+  -- listeners fire on the next tick. Drain the schedule queue.
+  vim.wait(150, function() return #conn_hits >= 1 and #call_hits >= 4 end, 5)
+
+  ok("dbase.connection:changed received exactly once",
+    #conn_hits == 1,
+    "got " .. #conn_hits)
+  ok("connection payload carries the right conn_id",
+    conn_hits[1] and conn_hits[1].id == "test-connection-spike",
+    conn_hits[1] and ("got id=" .. tostring(conn_hits[1].id)) or "no hit")
+
+  -- For two trigger calls (executing + archived):
+  --   - dbase.call:state_changed × 2  (always fired)
+  --   - dbase.call:started × 1        (terminal for "executing")
+  --   - dbase.call:completed × 1      (terminal for "archived")
+  local topics = {}
+  for _, h in ipairs(call_hits) do topics[h.topic] = (topics[h.topic] or 0) + 1 end
+  ok("dbase.call:state_changed fired twice (per trigger)",
+    topics["dbase.call:state_changed"] == 2,
+    "got " .. tostring(topics["dbase.call:state_changed"]))
+  ok("dbase.call:started fired once (state=executing)",
+    topics["dbase.call:started"] == 1,
+    "got " .. tostring(topics["dbase.call:started"]))
+  ok("dbase.call:completed fired once (state=archived)",
+    topics["dbase.call:completed"] == 1,
+    "got " .. tostring(topics["dbase.call:completed"]))
+
+  -- Failure case: executing_failed → :state_changed + :failed
+  dbee_event_bus.trigger("call_state_changed", {
+    id = "call-id-2",
+    state = "executing_failed",
+    query = "SELECT bogus",
+    error = "syntax near 'bogus'",
+  })
+  vim.wait(150, function()
+    for _, h in ipairs(call_hits) do
+      if h.topic == "dbase.call:failed" then return true end
+    end
+    return false
+  end, 5)
+
+  local failed_payload
+  for _, h in ipairs(call_hits) do
+    if h.topic == "dbase.call:failed" then failed_payload = h.payload end
+  end
+  ok("dbase.call:failed fired for executing_failed state",
+    failed_payload ~= nil)
+  ok("failure payload carries err",
+    failed_payload and failed_payload.err == "syntax near 'bogus'",
+    failed_payload and ("got err=" .. tostring(failed_payload.err)) or "no hit")
+
+  core.events.unsubscribe(h_conn)
+  core.events.unsubscribe(h_call)
+end
+
+-- ───────────────────── 7. report ───────────────────────────────────────
 print("\n──────────────────────────────────────────────")
 print(string.format("Phase 0a spike: %d passed, %d failed, %d skipped",
   pass_count, fail_count, skip_count))
