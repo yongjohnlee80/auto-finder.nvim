@@ -40,13 +40,13 @@ local function load_section(name, number, section_modules)
   end
   local ok, mod = pcall(require, module_path)
   if not ok then
-    require("auto-finder.logger").error("sections",
+    require("auto-finder.log").error("sections",
       "failed to load section '" .. name .. "' from '" .. module_path
         .. "': " .. tostring(mod))
     return nil
   end
   if type(mod) ~= "table" or type(mod.get_buffer) ~= "function" then
-    require("auto-finder.logger").error("sections",
+    require("auto-finder.log").error("sections",
       "section '" .. name .. "' missing get_buffer()")
     return nil
   end

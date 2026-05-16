@@ -42,7 +42,7 @@ function M.read_json(filename)
   if raw == "" then return {} end
   local ok, decoded = pcall(vim.fn.json_decode, raw)
   if not ok or type(decoded) ~= "table" then
-    require("auto-finder.logger").warn("_storage",
+    require("auto-finder.log").warn("_storage",
       "failed to decode " .. path .. " — defaults will apply: " .. tostring(decoded))
     return {}
   end
@@ -57,12 +57,12 @@ end
 function M.write_json(filename, data)
   local err = M.ensure_dir()
   if err then
-    require("auto-finder.logger").warn("_storage", err)
+    require("auto-finder.log").warn("_storage", err)
     return
   end
   local ok, encoded = pcall(vim.fn.json_encode, data)
   if not ok then
-    require("auto-finder.logger").warn("_storage",
+    require("auto-finder.log").warn("_storage",
       "json_encode failed: " .. tostring(encoded))
     return
   end

@@ -10,15 +10,27 @@ local plugin_root = vim.fn.fnamemodify(
   vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
 
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
+-- `plugin_root` is `…/nvim-plugins/auto-finder.nvim/<worktree>`. The
+-- sibling auto-core checkouts live two `:h` levels up at
+-- `…/nvim-plugins/auto-core.nvim/<worktree>`. The old code used a
+-- single `:h` which landed on `auto-finder.nvim/auto-core.nvim/…`
+-- (a path that doesn't exist), so neither sibling rtp entry was
+-- ever picked up.
+local plugins_root = vim.fn.fnamemodify(plugin_root, ":h:h")
 for _, p in ipairs({
   plugin_root,
   -- auto-core soft-dep: when present, enables Phase 4b live-refresh
-  -- in the files section AND the help-overlay path. Prefer a sibling
-  -- bare-repo worktree if present; fall back to the lazy install.
-  vim.fn.fnamemodify(plugin_root, ":h") .. "/auto-core.nvim/main",
+  -- in the files section AND the help-overlay path. We list both
+  -- candidate worktrees so the smoke exercises whichever auto-core
+  -- branch is currently active. `comms-1` is listed LAST so that —
+  -- when it exists — its runtimepath prepend wins over `main`,
+  -- letting the suite validate ADR 0021 Phase 1's surface
+  -- (`core_log.events`, `notify`, `notifyIf`) against the wrapper.
+  plugins_root .. "/auto-core.nvim/main",
   LAZY .. "/auto-core.nvim",
   LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
+  plugins_root .. "/auto-core.nvim/comms-1",
 }) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:prepend(p)
@@ -741,20 +753,26 @@ ok("_stop_fs_watch clears watcher handle",
 ok("_stop_fs_watch clears watcher root",
   files_section._fs_watch_root == nil)
 
--- ─────────── 15. auto-core.log shim (logger.lua) ──────────
-print("\n[15] auto-core.log shim")
-local logger = require("auto-finder.logger")
-ok("logger module loads", type(logger) == "table")
-ok("logger exposes level functions",
-  type(logger.error) == "function"
-    and type(logger.warn) == "function"
-    and type(logger.info) == "function"
-    and type(logger.debug) == "function"
-    and type(logger.trace) == "function")
-ok("logger.levels exposed", type(logger.levels) == "table"
-  and logger.levels.ERROR ~= nil and logger.levels.WARN ~= nil)
+-- ─────────── 15. auto-finder.log — wrapper over auto-core.log ──────────
+print("\n[15] auto-finder.log wrapper")
+local log = require("auto-finder.log")
+ok("log module loads", type(log) == "table")
+ok("log exposes level functions",
+  type(log.error) == "function"
+    and type(log.warn) == "function"
+    and type(log.info) == "function"
+    and type(log.debug) == "function"
+    and type(log.trace) == "function")
+ok("log.levels exposed", type(log.levels) == "table"
+  and log.levels.ERROR ~= nil and log.levels.WARN ~= nil)
 
--- Drive the shim and inspect the auto-core.log ring buffer to verify
+-- ADR 0021 §6 — wrapper convention surface check.
+ok("log exposes notify / notifyIf / register_events",
+  type(log.notify) == "function"
+    and type(log.notifyIf) == "function"
+    and type(log.register_events) == "function")
+
+-- Drive the wrapper and inspect the auto-core.log ring buffer to verify
 -- the namespace prefix lands as `auto-finder.<component>`.
 local core_log = require("auto-core").log
 core_log.clear()
@@ -763,9 +781,9 @@ core_log.clear()
 local prev_notify = (core_log.inspect and core_log.inspect().notify)
 core_log.configure({ notify = false, level = "trace" })
 
-logger.warn("smoke", "shim wiring probe")
-logger.error("panel.host", "another component")
-logger.debug("smoke", "trace-level too")
+log.warn("smoke", "wrapper wiring probe")
+log.error("panel.host", "another component")
+log.debug("smoke", "trace-level too")
 local entries = core_log.recent(10)
 ok("warn entry recorded with auto-finder.smoke component",
   vim.tbl_contains(vim.tbl_map(function(e) return e.component end, entries),
@@ -777,10 +795,6 @@ ok("debug entry body strips legacy 'auto-finder: ' prefix",
   (function()
     for _, e in ipairs(entries) do
       if e.level_name == "DEBUG" then
-        -- auto-core.log stores the formatted line (prefix + body).
-        -- Confirm the namespace prefix is present and the body
-        -- doesn't carry the redundant `auto-finder: ` prefix the
-        -- shim is supposed to remove.
         return e.message:find("[auto-finder.smoke]", 1, true) ~= nil
           and e.message:find("trace-level too", 1, true) ~= nil
           and e.message:find("auto-finder: trace-level", 1, true) == nil
@@ -790,10 +804,40 @@ ok("debug entry body strips legacy 'auto-finder: ' prefix",
   end)())
 
 -- Already-prefixed component name passes through (idempotent ns()).
-logger.warn("auto-finder.preprefixed", "no double prefix")
+log.warn("auto-finder.preprefixed", "no double prefix")
 local last = core_log.recent(1)[1]
 ok("idempotent namespace prefix",
   last and last.component == "auto-finder.preprefixed")
+
+-- ADR 0021 Phase 2: register_events / notifyIf round trip via the
+-- wrapper. Bare names auto-prefix; subscribing through the registry
+-- gates the toast.
+core_log.clear()
+core_log._reset_for_tests()
+core_log.configure({ notify = false, level = "trace" })
+log.register_events({ "scan.started", "scan.completed.slow" })
+local registered = core_log.events.list("auto-finder")
+ok("register_events fully-qualifies bare names under auto-finder.*",
+  #registered >= 2
+    and vim.tbl_contains(vim.tbl_map(function(r) return r.event end, registered),
+        "auto-finder.scan.started")
+    and vim.tbl_contains(vim.tbl_map(function(r) return r.event end, registered),
+        "auto-finder.scan.completed.slow"))
+
+-- notifyIf with a bare event name auto-prefixes inside the wrapper.
+core_log.clear()
+log.notifyIf("scan.started", "test message", { component = "scan" })
+local nf = core_log.recent(1)[1]
+ok("notifyIf auto-prefixes bare event name in the ring entry",
+  nf and nf.event_type == "auto-finder.scan.started"
+    and nf.component == "auto-finder.scan")
+
+-- notify with bare component auto-prefixes too.
+core_log.clear()
+log.notify("hello", { component = "scan", level = "info" })
+local nn = core_log.recent(1)[1]
+ok("notify auto-prefixes bare opts.component",
+  nn and nn.component == "auto-finder.scan")
 
 -- Restore notify mirroring so subsequent test runs (and real usage)
 -- aren't silenced.

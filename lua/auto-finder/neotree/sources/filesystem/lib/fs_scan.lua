@@ -692,29 +692,46 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
     -- Root-level scan: the user-visible "mapping" event. Large
     -- project trees can block for several seconds while the scan
     -- walks directories + builds items; the toast tells the user
-    -- the freeze is auto-finder, not a hung editor. The start/end
-    -- pair is also recorded into auto-core's log ring (namespace
-    -- `auto-finder.scan`) so it's available in `log.recent()` /
-    -- `:checkhealth auto-core` for after-the-fact triage. The
-    -- "completed" toast only fires when the scan was slow enough
-    -- that the user has been wondering whether the editor is dead.
+    -- the freeze is auto-finder, not a hung editor.
+    --
+    -- ADR 0021 Phase 2 wiring (commit "wire fs_scan instrumentation
+    -- to auto-finder.log"):
+    --   - `notifyIf("scan.started", …)`            always rings,
+    --                                              toasts iff user
+    --                                              subscribed
+    --   - `notifyIf("scan.completed.slow", …)`     fired ONLY when
+    --                                              the scan crossed
+    --                                              the slow threshold;
+    --                                              this is the toast
+    --                                              users typically
+    --                                              subscribe to
+    --   - `log.info("scan", "mapping completed", { fields = … })`
+    --                                              ring-only timing
+    --                                              record on every
+    --                                              scan (no toast,
+    --                                              no event hook)
+    --
+    -- Both event-type strings are registered in init.lua setup()
+    -- via `log.register_events({ "scan.started", "scan.completed.slow" })`.
     local root_path = state.path or "(unknown)"
     local short = vim.fn.fnamemodify(root_path, ":~")
     local start_ms = vim.uv.now()
     local SLOW_MS = 1000
 
-    local ok_core, core = pcall(require, "auto-core")
-    local log_ac = ok_core and core.log and core.log.namespace("auto-finder.scan") or nil
+    -- Aliased as `af_log` to avoid shadowing the file-scoped
+    -- `local log = require("auto-finder.neotree.log")` (the
+    -- vendored vlog used by the rest of the fork). The two
+    -- loggers will converge once Phase 2 §10.1 decommissions the
+    -- vendored vlog.
+    local ok_log, af_log = pcall(require, "auto-finder.log")
+    if not ok_log then af_log = nil end
 
-    if log_ac then log_ac.info("mapping started", { path = short }) end
-
-    vim.schedule(function()
-      vim.notify(
-        ("auto-finder: mapping %s…"):format(short),
-        vim.log.levels.INFO,
-        { title = "auto-finder" }
-      )
-    end)
+    if af_log then
+      af_log.notifyIf("scan.started",
+        ("mapping %s…"):format(short),
+        { component = "scan",
+          fields    = { path = short } })
+    end
 
     -- Wrap the caller's callback so we can time the scan + emit
     -- the completion event from the same place. `callback` is what
@@ -723,20 +740,18 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
     local original_cb = callback
     callback = function(...)
       local elapsed_ms = vim.uv.now() - start_ms
-      if log_ac then
-        log_ac.info("mapping completed", {
-          path       = short,
-          elapsed_ms = elapsed_ms,
+      if af_log then
+        -- Always: unconditional ring record with structured timing.
+        af_log.info("scan", "mapping completed", {
+          fields = { path = short, elapsed_ms = elapsed_ms },
         })
-      end
-      if elapsed_ms >= SLOW_MS then
-        vim.schedule(function()
-          vim.notify(
-            ("auto-finder: mapped %s (%.1fs)"):format(short, elapsed_ms / 1000),
-            vim.log.levels.INFO,
-            { title = "auto-finder" }
-          )
-        end)
+        -- Slow path: separate event the user can subscribe to.
+        if elapsed_ms >= SLOW_MS then
+          af_log.notifyIf("scan.completed.slow",
+            ("mapped %s (%.1fs)"):format(short, elapsed_ms / 1000),
+            { component = "scan",
+              fields    = { path = short, elapsed_ms = elapsed_ms } })
+        end
       end
       if original_cb then original_cb(...) end
     end

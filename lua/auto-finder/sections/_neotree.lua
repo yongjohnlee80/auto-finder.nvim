@@ -155,7 +155,7 @@ local function setup_live_refresh(section, source)
     else
       -- Soft-fail: log + continue. The section still works without
       -- auto-refresh.
-      require("auto-finder.logger").debug("sections._neotree",
+      require("auto-finder.log").debug("sections._neotree",
         "fs.watch.start failed for '" .. cwd .. "': " .. tostring(err))
     end
   end
@@ -213,8 +213,9 @@ end
 local function show_help(section_name, bufnr)
   local entries = collect_keymaps(bufnr)
   if #entries == 0 then
-    vim.notify("auto-finder: no keymaps found for '" .. section_name .. "'",
-      vim.log.levels.INFO)
+    require("auto-finder.log").notify(
+      "no keymaps found for '" .. section_name .. "'",
+      { level = "info", component = "sections._neotree.help" })
     return
   end
 
@@ -317,7 +318,7 @@ local function mount(panel_winid, source, section_label)
 
   local ok, cmd = pcall(require, "auto-finder.neotree.command")
   if not ok then
-    require("auto-finder.logger").error("sections._neotree",
+    require("auto-finder.log").error("sections._neotree",
       "neo-tree is not installed; the '" .. section_label ..
       "' section requires nvim-neo-tree/neo-tree.nvim")
     return nil
@@ -335,7 +336,7 @@ local function mount(panel_winid, source, section_label)
     reveal = false,
   })
   if not exec_ok then
-    require("auto-finder.logger").error("sections._neotree",
+    require("auto-finder.log").error("sections._neotree",
       "neo-tree.execute failed for source '" .. source .. "': " .. tostring(err))
     return nil
   end

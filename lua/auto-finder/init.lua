@@ -38,6 +38,19 @@ function M.setup(user_opts)
   local cfg = require("auto-finder.config").apply(user_opts)
   M.state.config = cfg
 
+  -- ADR 0021 §5: declare event types the plugin emits so users can
+  -- toggle per-event notifications via `:AutoCoreLogEvent notify
+  -- <event>`. Bare names auto-prefix to `auto-finder.<name>` via
+  -- the wrapper. Idempotent — safe to re-call on setup re-runs.
+  do
+    local log = require("auto-finder.log")
+    log.setup(cfg)  -- forward cfg.log_level if set
+    log.register_events({
+      "scan.started",
+      "scan.completed.slow",
+    })
+  end
+
   -- v0.2.5: per-project sections override. If we already have a
   -- workspace key (auto-core's worktree.nvim usually captures cwd
   -- at session start and we run AFTER that), seed cfg.sections
@@ -1507,7 +1520,7 @@ function M._register_neotree_workspace_source(extra)
 
   local ok_src, src = pcall(require, "auto-finder-repos")
   if not ok_src then
-    require("auto-finder.logger").error("init",
+    require("auto-finder.log").error("init",
       "failed to require 'auto-finder-repos': " .. tostring(src))
     return
   end
@@ -1590,7 +1603,7 @@ end
 ---@param force boolean?
 function M.open(force)
   if not M.state.config then
-    require("auto-finder.logger").error("init", "setup() must be called first")
+    require("auto-finder.log").error("init", "setup() must be called first")
     return
   end
   local host = require("auto-finder.panel.host")

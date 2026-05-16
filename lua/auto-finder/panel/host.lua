@@ -85,13 +85,13 @@ function M.ensure_open(cfg, state, force)
   -- references our specific UX expectation.
   local cols = vim.o.columns
   if not force and cols < cfg.width.min + 20 then
-    require("auto-finder.logger").warn("panel.host",
+    require("auto-finder.log").warn("panel.host",
       "terminal width " .. cols .. " too narrow; use :AutoFinder! to force")
     return nil
   end
   local p = panel()
   if not p then
-    require("auto-finder.logger").error("panel.host",
+    require("auto-finder.log").error("panel.host",
       "panel singleton not initialized — setup() must run first")
     return nil
   end
@@ -162,7 +162,7 @@ end
 ---@param state table
 ---@param n integer
 function M.resize(cfg, state, n)
-  local logger = require("auto-finder.logger")
+  local logger = require("auto-finder.log")
   if type(n) ~= "number" or n < 1 then
     logger.error("panel.host", "resize N must be a positive integer")
     return
