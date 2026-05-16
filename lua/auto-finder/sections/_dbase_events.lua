@@ -102,16 +102,29 @@ function M.attach()
   end)
 
   -- ── call_state_changed → dbase.call:state_changed (+ terminal) ──
-  -- CallDetails doesn't include conn_id in its shape doc (see
-  -- nvim-dbee/lua/dbee/doc.lua:51-58), so we attempt a best-effort
-  -- enrichment via `get_current_connection()`. If a call belongs to
-  -- a connection that's no longer current (rare but possible for
-  -- archived calls fired late), conn_id will be the live one. Mark
-  -- this in the payload only when we successfully resolve it.
+  -- dbee's Go backend emits this event as a NESTED table:
+  --   { call = { id, query, state, time_taken_us, timestamp_us, error } }
+  -- (see `nvim-dbee/dbee/handler/event_bus.go:30-44`). dbee's own
+  -- result UI destructures `local call = data.call` at
+  -- `nvim-dbee/lua/dbee/ui/result/init.lua:75-77`.
+  --
+  -- We accept `data.call or data` so the bridge is robust to both
+  -- the real nested shape AND any future flattening (or a test
+  -- harness that ergonomically passes flat payloads).
+  --
+  -- CallDetails has no `conn_id` field (see `dbee/doc.lua:51-58`),
+  -- so conn_id is best-effort enrichment via `get_current_connection()`.
+  -- If a call belongs to a connection that's no longer current (rare
+  -- but possible for archived calls fired late), conn_id will be
+  -- the live one rather than the call's original. This is documented
+  -- as optional in the topic registry on the auto-core side.
   dbee.api.core.register_event_listener("call_state_changed", function(data)
-    if type(data) ~= "table" or not data.id or not data.state then return end
-    local call_id = data.id
-    local to_state = data.state
+    if type(data) ~= "table" then return end
+    local call = data.call or data
+    if type(call) ~= "table" or not call.id or not call.state then return end
+
+    local call_id = call.id
+    local to_state = call.state
     local conn_id
     do
       local ok, conn = pcall(dbee.api.core.get_current_connection)
@@ -131,20 +144,20 @@ function M.attach()
       events.publish(terminal, {
         call_id = call_id,
         conn_id = conn_id,
-        query = data.query or "",
+        query = call.query or "",
       })
     elseif terminal == "dbase.call:completed" then
       events.publish(terminal, {
         call_id = call_id,
         conn_id = conn_id,
-        duration_ms = type(data.time_taken_us) == "number"
-          and math.floor(data.time_taken_us / 1000) or nil,
+        duration_ms = type(call.time_taken_us) == "number"
+          and math.floor(call.time_taken_us / 1000) or nil,
       })
     elseif terminal == "dbase.call:failed" then
       events.publish(terminal, {
         call_id = call_id,
         conn_id = conn_id,
-        err = data.error or to_state,
+        err = call.error or to_state,
       })
     end
   end)

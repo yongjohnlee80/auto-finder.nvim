@@ -369,19 +369,34 @@ else
     function(p, topic) table.insert(call_hits, { topic = topic, payload = p }) end)
 
   -- Synthetic dbee events — bypasses the Go backend.
+  -- IMPORTANT: payloads MUST match dbee's real shape. The Go backend
+  -- emits `call_state_changed` as a NESTED table — see
+  -- `nvim-dbee/dbee/handler/event_bus.go:30-44`:
+  --   { call = { id, query, state, time_taken_us, timestamp_us, error } }
+  -- An earlier version of this smoke used flat `{ id, state, ... }`
+  -- payloads and the bridge happily processed them — but real events
+  -- would have early-returned at the guard, silently dropping every
+  -- query lifecycle topic in production. Lector caught this in the
+  -- 2026-05-16 review (must-fix §1). The bridge now accepts both
+  -- nested and flat (defensive); the smoke triggers nested ONLY so
+  -- the regression cannot recur.
   dbee_event_bus.trigger("current_connection_changed",
     { conn_id = "test-connection-spike" })
   dbee_event_bus.trigger("call_state_changed", {
-    id = "call-id-1",
-    state = "executing",
-    query = "SELECT 1",
-    time_taken_us = 0,
+    call = {
+      id = "call-id-1",
+      state = "executing",
+      query = "SELECT 1",
+      time_taken_us = 0,
+    },
   })
   dbee_event_bus.trigger("call_state_changed", {
-    id = "call-id-1",
-    state = "archived",
-    query = "SELECT 1",
-    time_taken_us = 1234,
+    call = {
+      id = "call-id-1",
+      state = "archived",
+      query = "SELECT 1",
+      time_taken_us = 1234,
+    },
   })
 
   -- dbee's event_bus.trigger wraps callbacks in vim.schedule(), so the
@@ -413,10 +428,12 @@ else
 
   -- Failure case: executing_failed → :state_changed + :failed
   dbee_event_bus.trigger("call_state_changed", {
-    id = "call-id-2",
-    state = "executing_failed",
-    query = "SELECT bogus",
-    error = "syntax near 'bogus'",
+    call = {
+      id = "call-id-2",
+      state = "executing_failed",
+      query = "SELECT bogus",
+      error = "syntax near 'bogus'",
+    },
   })
   vim.wait(150, function()
     for _, h in ipairs(call_hits) do
