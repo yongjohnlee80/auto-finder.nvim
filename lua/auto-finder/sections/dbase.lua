@@ -19,6 +19,7 @@ local host = require("auto-finder.panel.host")
 local logger = require("auto-finder.logger")
 local setup_mod = require("auto-finder.sections._dbase_setup")
 local events_mod = require("auto-finder.sections._dbase_events")
+local layout_mod = require("auto-finder.sections._dbase_layout")
 
 local M = {
   name = "dbase",
@@ -85,7 +86,41 @@ local function mount_drawer(panel_winid)
     return vim.api.nvim_buf_is_valid(b)
   end, 5)
 
-  return vim.api.nvim_win_get_buf(panel_winid)
+  local bufnr = vim.api.nvim_win_get_buf(panel_winid)
+
+  -- Override dbee's drawer <CR> mapping. dbee's default <CR> calls
+  -- action_1 directly, which for notes hits `editor:set_current_note`
+  -- — and that function silently no-ops if editor.winid is not yet
+  -- bound to a window (see `nvim-dbee/lua/dbee/ui/editor/init.lua:431`).
+  -- Our override mounts editor + result in the main editor area
+  -- BEFORE delegating to dbee, so action_1 finds a valid editor
+  -- window when it goes to render a note. Buffer-local so it doesn't
+  -- pollute the other panel sections.
+  --
+  -- Set AFTER `drawer_show` (which installs dbee's mappings via
+  -- `common.configure_buffer_mappings`) so our binding wins last-
+  -- write. Idempotent on subsequent get_buffer calls because
+  -- `vim.keymap.set` overwrites.
+  if vim.api.nvim_buf_is_valid(bufnr) then
+    pcall(vim.keymap.set, "n", "<CR>", function()
+      -- Mount the companion panes (no-op if already mounted).
+      layout_mod.ensure_editor()
+      layout_mod.ensure_result()
+      -- Now fire dbee's drawer action_1. Wrap in pcall — some nodes
+      -- have no action_1 defined; dbee's dispatcher raises in that
+      -- case and we shouldn't surface a stack trace to the user.
+      pcall(function()
+        require("dbee").api.ui.drawer_do_action("action_1")
+      end)
+    end, {
+      buffer = bufnr,
+      silent = true,
+      nowait = true,
+      desc = "auto-finder.dbase: mount companions then dbee drawer action_1",
+    })
+  end
+
+  return bufnr
 end
 
 ---@param panel_winid integer

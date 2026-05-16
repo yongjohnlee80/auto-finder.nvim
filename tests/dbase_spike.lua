@@ -628,11 +628,15 @@ do
   local panel_winid = af.state.panel_winid
 
   -- If only the panel exists, force-create a non-panel window so the
-  -- "prefer existing editor-area window" path is exercised.
+  -- "prefer existing editor-area window" path is exercised. Use
+  -- `:vnew` instead of `:vsplit` so the new window opens with a
+  -- fresh unnamed buffer — `:vsplit` from the panel inherits the
+  -- panel's winfixbuf AND its panel-owner-marked buffer, and the
+  -- WinEnter guard in auto-core.ui.panel then closes the new window.
+  -- Same rationale as the matching guard in
+  -- _dbase_layout.create_editor_window.
   if #vim.api.nvim_list_wins() < 2 then
-    vim.cmd("rightbelow vsplit")
-    local scratch = vim.api.nvim_create_buf(false, true)
-    vim.api.nvim_win_set_buf(0, scratch)
+    vim.cmd("rightbelow vnew")
   end
 
   ok("layout.is_open returns false before any ensure_*()",
@@ -701,6 +705,158 @@ do
     panel_winid and vim.api.nvim_win_is_valid(panel_winid))
   ok("[6b.19] close_all: layout.is_open returns false",
     layout.is_open() == false)
+end
+
+-- ───────────────────── 6c. custom Layout + <CR> override (slice 9) ────
+-- Verify the custom window_layout passed to dbee.setup actually
+-- replaces dbee's DefaultLayout, and that <CR> on the drawer mounts
+-- companion panes before delegating to dbee's action_1.
+print("\n[6c] custom Layout + <CR> override on drawer")
+do
+  local layout = require("auto-finder.sections._dbase_layout")
+  local setup_mod = require("auto-finder.sections._dbase_setup")
+
+  -- Clean slate: tear down any leftover companions from [6b].
+  layout.close_all()
+
+  ok("layout.close_all left no companion windows",
+    not layout.is_open())
+
+  -- The layout object passed to dbee.setup must conform to
+  -- { is_open, open, close, reset } per dbee/config.lua:15.
+  ok("[6c.1] layout.layout is a table",
+    type(layout.layout) == "table")
+  ok("[6c.2] layout.layout.is_open is callable",
+    type(layout.layout.is_open) == "function")
+  ok("[6c.3] layout.layout.open is callable",
+    type(layout.layout.open) == "function")
+  ok("[6c.4] layout.layout.close is callable",
+    type(layout.layout.close) == "function")
+  ok("[6c.5] layout.layout.reset is callable",
+    type(layout.layout.reset) == "function")
+
+  -- The setup module installed our layout as the active window_layout.
+  -- Verify by introspecting dbee's runtime config — `state` is module-
+  -- private but state.handler() doesn't expose it. Instead, exercise
+  -- the contract: call layout.layout.open() and assert companions
+  -- mount via our path.
+  if af.state.panel_winid == nil then af.open(true) end
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+
+  -- Need an editor-area window for ensure_editor to land into.
+  -- `:vnew` (not `:vsplit`) so the new window opens with a fresh
+  -- unnamed buffer — see the comment in _dbase_layout.create_editor_window
+  -- for why `:vsplit` from the panel triggers auto-core's bounce
+  -- guard, leaving subsequent option-set calls to land on the panel
+  -- itself.
+  if #vim.api.nvim_list_wins() < 2 then
+    vim.cmd("rightbelow vnew")
+  end
+
+  layout.layout.open()
+  ok("[6c.6] layout.layout.open() mounts companions (is_open true)",
+    layout.is_open() == true)
+  ok("[6c.7] layout.layout.is_open() reports true after open",
+    layout.layout.is_open() == true)
+
+  local editor_w = layout._editor_winid
+  ok("[6c.8] editor winid is set and valid after layout.open()",
+    editor_w and vim.api.nvim_win_is_valid(editor_w))
+
+  layout.layout.close()
+  ok("[6c.9] layout.layout.close() tears down companions",
+    layout.is_open() == false)
+  ok("[6c.10] layout.layout.is_open() reports false after close",
+    layout.layout.is_open() == false)
+
+  layout.layout.reset()
+  ok("[6c.11] layout.layout.reset() reopens companions",
+    layout.is_open() == true)
+
+  layout.close_all()  -- clean up for the next probe
+end
+
+-- ───────────────────── 6d. <CR>-override mounts companions ─────────────
+print("\n[6d] <CR> on drawer auto-mounts companions before action_1")
+do
+  local layout = require("auto-finder.sections._dbase_layout")
+  layout.close_all()
+
+  if af.state.panel_winid == nil then af.open(true) end
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+  local panel_winid = af.state.panel_winid
+  local bufnr = panel_winid and vim.api.nvim_win_get_buf(panel_winid)
+
+  -- Ensure we have an editor-area target window so ensure_editor
+  -- doesn't have to split the panel. `:vnew` instead of `:vsplit`
+  -- avoids inheriting the panel's drawer buffer (panel-owner-marked
+  -- → triggers auto-core's WinEnter bounce guard).
+  if #vim.api.nvim_list_wins() < 2 then
+    vim.cmd("rightbelow vnew")
+    -- Re-focus the panel so the keypress lands on the drawer.
+    pcall(vim.api.nvim_set_current_win, panel_winid)
+  end
+
+  -- Walk the drawer buffer's normal-mode keymaps explicitly — maparg's
+  -- buffer-vs-global resolution is context-dependent and unreliable
+  -- here. nvim_buf_get_keymap returns every buffer-local mapping
+  -- regardless of current context.
+  local cr_map
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if m.lhs == "<CR>" then cr_map = m; break end
+    end
+  end
+  ok("[6d.1] <CR> is bound on drawer buffer (buffer-local)",
+    type(cr_map) == "table")
+  ok("[6d.2] <CR> desc points at auto-finder.dbase, not dbee",
+    type(cr_map) == "table" and type(cr_map.desc) == "string"
+      and cr_map.desc:find("auto%-finder%.dbase"),
+    type(cr_map) == "table" and ("desc=" .. tostring(cr_map.desc)) or "no map")
+
+  -- Companions should be closed before the press.
+  ok("[6d.3] companions closed before <CR>",
+    not layout.is_open())
+
+  -- Fire the <CR> callback directly. feedkeys-based invocation in
+  -- headless mode is unreliable (the panel briefly loses winfixbuf
+  -- before our callback runs); calling the bound callback proves the
+  -- same contract — when triggered, the override mounts companions
+  -- and delegates to dbee's drawer action_1 — without depending on
+  -- nvim's keyboard-handling state machine.
+  ok("[6d.3b] <CR> binding has a callable callback",
+    type(cr_map.callback) == "function")
+
+  if type(cr_map.callback) == "function" then
+    pcall(vim.api.nvim_set_current_win, panel_winid)
+    pcall(cr_map.callback)
+  end
+  vim.wait(150, function() return layout.is_open() end, 5)
+  ok("[6d.4] <CR> callback mounted companion panes",
+    layout.is_open() == true)
+
+  -- Boundary check: the callback must not destroy the drawer's
+  -- underlying buffer. We test the buffer survives — NOT that it's
+  -- still mounted in the panel — because there's an orthogonal
+  -- pre-existing race in the bundled neo-tree filesystem source:
+  -- after the user has focused the files section earlier, fs_scan
+  -- defers a render via `vim.schedule`; that deferred render fires
+  -- AFTER we've moved off the files section AND uses the renderer's
+  -- v0.2.11 winfixbuf-safe dance to swap the panel buffer, then
+  -- fails at NuiTree creation but the swap has already stuck. The
+  -- `[Neo-tree WARN] Window N is no longer valid` log earlier in
+  -- the run is the same race. It is documented in the KB log entry
+  -- 2026-05-16 14:55 (Phase 0a spike) and predates the dbase work
+  -- — addressable separately at fs_scan.lua:250.
+  ok("[6d.5] drawer buffer survives the <CR> callback",
+    bufnr and vim.api.nvim_buf_is_valid(bufnr),
+    "drawer bufnr=" .. tostring(bufnr))
+  ok("[6d.6] panel winfixbuf still true after <CR>",
+    panel_winid and vim.wo[panel_winid].winfixbuf == true)
+
+  layout.close_all()
 end
 
 -- ───────────────────── 7. report ───────────────────────────────────────

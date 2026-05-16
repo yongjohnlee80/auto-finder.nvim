@@ -86,18 +86,43 @@ local function create_editor_window()
   end
   if panel and vim.api.nvim_win_is_valid(panel) then
     pcall(vim.api.nvim_set_current_win, panel)
-    vim.cmd("rightbelow vsplit")
+    -- Splitting from the panel is delicate because:
+    --   1. `:vsplit` propagates `winfixbuf=true` from the source
+    --      (panel) to the new window.
+    --   2. `:vsplit` makes the new window INHERIT the panel's drawer
+    --      buffer, and that buffer is panel-owner-marked
+    --      (`b:auto_core_panel_owner = "auto-finder"`). auto-core's
+    --      `WinEnter`/`BufWinEnter` leak guard *closes* any non-panel
+    --      window holding a panel-owner-marked buffer.
+    --   3. `:vnew` (= `:vsplit | :enew`) is NOT atomic — the leak
+    --      guard fires between the two halves and can close the
+    --      window we're trying to create. The `:enew` then operates
+    --      against a broken context (or the wrong window).
+    -- Auto-core's panel module solves the same class of problem by
+    -- wrapping its own split in `eventignore = "all"`. We follow
+    -- that pattern: suppress autocmds for the whole split + buffer-
+    -- replace sequence, so the leak guard never observes the
+    -- intermediate panel-buffer-in-non-panel-window state.
+    local saved_eventignore = vim.o.eventignore
+    vim.o.eventignore = "all"
+    local ok_split = pcall(vim.cmd, "rightbelow vsplit")
     local newwin = vim.api.nvim_get_current_win()
-    -- Open with an empty scratch buffer so we don't displace any
-    -- buffer the user had — ui.editor_show will swap its own
-    -- bufnr in next.
-    local b = vim.api.nvim_create_buf(false, true)
-    pcall(vim.api.nvim_win_set_buf, newwin, b)
+    if ok_split and newwin ~= panel then
+      pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin })
+      local scratch = vim.api.nvim_create_buf(false, true)
+      vim.bo[scratch].buftype  = "nofile"
+      vim.bo[scratch].swapfile = false
+      pcall(vim.api.nvim_win_set_buf, newwin, scratch)
+    end
+    vim.o.eventignore = saved_eventignore
     return newwin
   end
-  -- No panel either; fall back to a plain split.
-  vim.cmd("vsplit")
-  return vim.api.nvim_get_current_win()
+  -- No panel either; safe to use plain :vnew (no panel-owner buffer
+  -- to inherit, no leak guard to fight).
+  vim.cmd("vnew")
+  local newwin = vim.api.nvim_get_current_win()
+  pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin })
+  return newwin
 end
 
 ---Mount the dbee editor tile in an editor-area window. Idempotent.
@@ -149,6 +174,8 @@ local function ensure_below_split(current_winid, parent_winid, show_fn, label)
   pcall(vim.api.nvim_set_current_win, parent_winid)
   vim.cmd("belowright split")
   local newwin = vim.api.nvim_get_current_win()
+  -- Same winfixbuf-propagation guard as create_editor_window.
+  pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin })
   local scratch = vim.api.nvim_create_buf(false, true)
   pcall(vim.api.nvim_win_set_buf, newwin, scratch)
 
@@ -213,6 +240,41 @@ function M.is_open()
   end
   return false
 end
+
+---Open all three companion tiles in one call. Idempotent — each
+---ensure_*() returns the existing winid if still valid.
+---@return boolean ok  true if at least the editor mounted
+function M.open()
+  local editor = M.ensure_editor()
+  if not editor then return false end
+  M.ensure_result()
+  M.ensure_call_log()
+  return true
+end
+
+---@return boolean
+local function layout_is_open()
+  return M.is_open()
+end
+
+---dbee-compatible Layout object for `dbee.setup({ window_layout =
+---... })`. Passing this to dbee replaces the default
+---`DefaultLayout` which would otherwise snapshot the entire vim
+---layout via `tools.save()` and create four exclusive windows on
+---`dbee.open() / toggle() / require("dbee").open()`. Lector's
+---ADR 0020 §"Window Ownership" makes the default layout forbidden
+---inside the section flow.
+---
+---Our layout DOES NOT own the drawer (auto-finder's panel does).
+---`open()` only mounts editor / result / call_log. `close()` tears
+---those three down. The drawer's lifecycle is independent and
+---driven by the section.
+M.layout = {
+  is_open = layout_is_open,
+  open    = function() M.open() end,
+  close   = function() M.close_all() end,
+  reset   = function() M.close_all(); M.open() end,
+}
 
 ---Test-only — clear cached winids without closing the windows. Useful
 ---when a test wants to assert auto-recovery from invalid winids.

@@ -101,6 +101,18 @@ function M.ensure_setup(opts)
 
   opts = opts or {}
   local cfg = { sources = opts.sources or default_sources() }
+
+  -- Forbid dbee's `DefaultLayout` (which would snapshot the entire vim
+  -- layout via tools.save() and create four exclusive windows). The
+  -- dbase section mounts the drawer into auto-finder's panel
+  -- explicitly; editor/result/call_log get mounted in the main editor
+  -- area by `_dbase_layout` on demand. Any stray `dbee.open()` /
+  -- `dbee.toggle()` call goes through OUR layout, which only mounts
+  -- the three companion tiles (drawer stays under the section's
+  -- ownership).
+  local layout_mod = require("auto-finder.sections._dbase_layout")
+  cfg.window_layout = layout_mod.layout
+
   if type(opts.extra) == "table" then
     for k, v in pairs(opts.extra) do
       if cfg[k] == nil then cfg[k] = v end
