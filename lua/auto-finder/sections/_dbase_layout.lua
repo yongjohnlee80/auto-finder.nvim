@@ -103,18 +103,34 @@ local function create_editor_window()
     -- that pattern: suppress autocmds for the whole split + buffer-
     -- replace sequence, so the leak guard never observes the
     -- intermediate panel-buffer-in-non-panel-window state.
+    --
+    -- Restoration MUST be guaranteed (lector review should-fix §3) —
+    -- any unhandled Lua error between set and restore would leave
+    -- `eventignore = "all"` globally, silently breaking every
+    -- autocmd-driven feature in the editor. xpcall provides the
+    -- finally-equivalent: capture the error inside the protected
+    -- body, restore in the outer scope unconditionally.
     local saved_eventignore = vim.o.eventignore
     vim.o.eventignore = "all"
-    local ok_split = pcall(vim.cmd, "rightbelow vsplit")
-    local newwin = vim.api.nvim_get_current_win()
-    if ok_split and newwin ~= panel then
-      pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin })
-      local scratch = vim.api.nvim_create_buf(false, true)
-      vim.bo[scratch].buftype  = "nofile"
-      vim.bo[scratch].swapfile = false
-      pcall(vim.api.nvim_win_set_buf, newwin, scratch)
-    end
+    local newwin
+    local ok, err = xpcall(function()
+      vim.cmd("rightbelow vsplit")
+      newwin = vim.api.nvim_get_current_win()
+      if newwin ~= panel then
+        vim.api.nvim_set_option_value("winfixbuf", false, { win = newwin })
+        local scratch = vim.api.nvim_create_buf(false, true)
+        vim.bo[scratch].buftype  = "nofile"
+        vim.bo[scratch].swapfile = false
+        vim.api.nvim_win_set_buf(newwin, scratch)
+      end
+    end, debug.traceback)
+    -- Restore unconditionally — runs even if xpcall caught an error.
     vim.o.eventignore = saved_eventignore
+    if not ok then
+      logger.error("dbase.layout",
+        "create_editor_window xpcall body errored: " .. tostring(err))
+      return nil
+    end
     return newwin
   end
   -- No panel either; safe to use plain :vnew (no panel-owner buffer

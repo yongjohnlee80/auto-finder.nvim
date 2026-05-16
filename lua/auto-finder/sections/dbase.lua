@@ -159,12 +159,18 @@ function M.configure(opts)
   M._setup_opts = opts
 end
 
----Drop the cached bufnr so the next focus remounts cleanly. Matches
----the _neotree on_close contract — without this, dbee's drawer
----buffer could be wiped externally between panel-close and reopen
----and the section would attempt to restore a stale bufnr.
+---Drop the cached bufnr so the next focus remounts cleanly, AND
+---tear down any companion editor / result / call_log windows the
+---section opened. Matches the _neotree on_close contract — without
+---the bufnr clear, dbee's drawer buffer could be wiped externally
+---between panel-close and reopen and the section would attempt to
+---restore a stale bufnr. Without the companion teardown (lector
+---review should-fix §1), editor/result/call_log windows would
+---orphan in the editor area after the user closes the panel,
+---producing UX rough edges.
 function M.on_close()
   M._bufnr = nil
+  pcall(layout_mod.close_all)
 end
 
 return M

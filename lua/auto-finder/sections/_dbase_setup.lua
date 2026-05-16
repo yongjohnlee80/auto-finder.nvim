@@ -100,7 +100,16 @@ function M.ensure_setup(opts)
   end
 
   opts = opts or {}
-  local cfg = { sources = opts.sources or default_sources() }
+  -- Treat an EMPTY sources list the same as nil — fall through to the
+  -- default MemorySource so the drawer always renders against
+  -- something. Without this, `cfg.dbase = { sources = {} }` (legal
+  -- per the config schema) would hand dbee zero sources and produce
+  -- a "No sources :(" drawer. Lector review should-fix §2.
+  local user_sources = opts.sources
+  if type(user_sources) == "table" and #user_sources == 0 then
+    user_sources = nil
+  end
+  local cfg = { sources = user_sources or default_sources() }
 
   -- Forbid dbee's `DefaultLayout` (which would snapshot the entire vim
   -- layout via tools.save() and create four exclusive windows). The
