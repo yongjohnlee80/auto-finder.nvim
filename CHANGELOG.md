@@ -2,6 +2,104 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.15] — 2026-05-16 — ADR 0021 Phase 2 wrapper + scan toasts + `<space>` released
+
+Three user-visible changes plus the ADR 0021 Phase 2 internal
+wiring all rolled into one bundle.
+
+### Added — `auto-finder.scan.started` / `scan.completed.slow` events
+
+Large-tree scans (`<leader>e` on a 50k-file project, the `R`
+keymap inside the filesystem section, worktree-switched re-anchor
+of the panel) used to block the editor with no visible signal that
+auto-finder was working. v0.2.15 fires a toast at scan start so
+the user knows the freeze is auto-finder and not a hung editor.
+
+Two registered events, toggled via `:AutoCoreLogEvent notify
+<event>`:
+
+- `auto-finder.scan.started` — fires every time `fs_scan.get_items`
+  enters the root-level path. Ring entry always lands; toast only
+  if the user has opted in.
+- `auto-finder.scan.completed.slow` — fires only when the scan
+  elapsed `≥ 1000ms`. Ring entry always lands; toast only if the
+  user has opted in.
+
+Default subscription state: both silent. Opt in via
+`:AutoCoreLogEvent notify auto-finder.scan.completed.slow` for
+the recommended "tell me when scans are taking forever" UX.
+
+A timing record (`log.info("scan", "mapping completed",
+{ fields = { path, elapsed_ms } })`) writes the ring on every scan
+for triage. With `auto-core v0.1.12+` (echo OFF by default) this
+is invisible in `:messages`; older auto-core users see it as an
+nvim_echo line and can re-silence via `log.configure({ echo =
+false })` if the noise bothers them.
+
+### Changed — `<space>` no longer toggles folders in the panel
+
+`<space>` was a buffer-local mapping inside the panel sections
+(files / repos / buffers) that toggled folder open/close. `<cr>`
+already covers that action. The buffer-local bind shadowed nvim's
+global `<leader>` (default `<space>`), so leader chords typed
+inside the panel would silently do nothing or activate the wrong
+action. Removed via the neo-tree fork's `"none"` sentinel; the
+key now falls through to the user's global leader handler.
+
+### Changed — wrapper convention: `auto-finder.log`
+
+Per ADR 0021 §6, every auto-family plugin owns one
+`lua/<plugin>/log.lua` that delegates to `auto-core.log`. Feature
+code in auto-finder now calls `require("auto-finder.log")`
+exclusively; `auto-core.log` is reachable only through the
+wrapper. The old `logger.lua` shim is gone (replaced by the
+broader `log.lua`); call sites that imported it were swept (one
+direct `vim.notify` site in `sections/_neotree.lua` plus the
+fs_scan instrumentation).
+
+The wrapper exposes:
+
+```lua
+local log = require("auto-finder.log")
+
+log.error / .warn / .info / .debug / .trace   -- with auto-finder.* component prefix
+log.notify(msg, opts?)                         -- force-toast single emission
+log.notifyIf(event, msg, opts?)                -- toast iff event subscribed
+log.register_events(events)                    -- declare at setup
+log.is_level_enabled(name)                     -- predicate
+log.setup(cfg)                                 -- forward cfg.log_level
+```
+
+Soft-dep tolerant: when running against an auto-core older than
+v0.1.11 (no `notify` / `notifyIf` / `events.register`), the
+wrapper degrades to ring-only emissions instead of crashing.
+
+### Changed — `tests/smoke.lua` rtp prelude fixed
+
+Latent bug surfaced by the Phase 2 work: the prelude used
+`vim.fn.fnamemodify(plugin_root, ":h")` (single `:h`) which
+produced a path that didn't exist
+(`auto-finder.nvim/auto-core.nvim/...`), so the `isdirectory`
+gate silently failed and the suite had been running against
+whichever `~/.local/share/nvim/lazy/auto-core.nvim` happened to
+be installed for its entire history. Now uses `:h:h` to land on
+the family workspace dir and lists candidate auto-core worktrees
+last so they win the prepend. Issued + codified as
+`lua-nvim-plugin-development.md` rule 2 in the auto-agents kb.
+
+### Tests
+
+`tests/smoke.lua` 188 passed, 0 failed (was 184 — four new
+assertions covering the wrapper surface).
+
+### Migration
+
+Soft. Consumers pin via `version = "^0.2.0"` and auto-update.
+`require("auto-finder.logger")` callers — none in the family —
+should switch to `require("auto-finder.log")`. The wrapper
+soft-deps against pre-Phase-1 auto-core so consumers can stage
+the upgrade in any order.
+
 ## [v0.2.14] — 2026-05-14 — buffers panel: group out-of-cwd buffers as sibling root folders
 
 ### Added
