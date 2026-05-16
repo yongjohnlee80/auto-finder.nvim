@@ -224,6 +224,62 @@ end, 5)
 ok("reopen — focus(dbase) still works",
   af.state.section == 2)
 
+-- ───────────────────── 5b. config-forwarding (slice 5) ────────────────
+-- Verify `cfg.dbase = { sources = ... }` actually reaches the section's
+-- `_setup_opts` and through to `_dbase_setup.ensure_setup(opts)`.
+print("\n[5b] config-forwarding — cfg.dbase → section.configure → setup_opts")
+do
+  local section = require("auto-finder.sections.dbase")
+  ok("section.configure exists",
+    type(section.configure) == "function")
+
+  -- The earlier `af.setup({ ... })` call at section [2] did NOT pass
+  -- a dbase block, so `_setup_opts` should be nil-or-default at this
+  -- point. Verify the no-op case first.
+  ok("section._setup_opts is nil when cfg.dbase not provided",
+    section._setup_opts == nil
+      or (type(section._setup_opts) == "table" and section._setup_opts.sources == nil))
+
+  -- Now exercise the forwarding path with a synthetic source. We
+  -- build a real MemorySource so the test stays honest — the wrapper
+  -- shouldn't care what's in it, just that it lands.
+  local ok_src, dbee_sources = pcall(require, "dbee.sources")
+  if not ok_src then
+    skip("config-forwarding round-trip",
+      "dbee.sources unavailable")
+  else
+    local probe_source = dbee_sources.MemorySource:new({
+      { id = "probe-conn-1", name = "probe", type = "sqlite", url = ":memory:" },
+    }, "spike-probe")
+    -- Re-run setup with cfg.dbase. setup is re-entrant from auto-finder's
+    -- side; the section registry rebuilds and our forwarding fires again.
+    -- (dbee.setup is one-shot module-globally, so the setup_mod's cached
+    -- _done flag prevents re-config; this is intentional and we're
+    -- testing the *forwarding* path, not dbee re-setup.)
+    af.setup({
+      width = { default = 38, min = 25, max = 100 },
+      default_section = 1,
+      sections = { "config", "files", "dbase" },
+      dbase = { sources = { probe_source } },
+      neo_tree = {
+        window = { auto_expand_width = true },
+        filesystem = { hijack_netrw_behavior = "disabled" },
+      },
+    })
+    ok("_setup_opts is a table after re-setup with cfg.dbase",
+      type(section._setup_opts) == "table")
+    ok("_setup_opts.sources is forwarded list",
+      type(section._setup_opts) == "table"
+        and type(section._setup_opts.sources) == "table"
+        and #section._setup_opts.sources == 1,
+      "got " .. vim.inspect(section._setup_opts))
+    ok("_setup_opts.sources[1] is the probe MemorySource",
+      type(section._setup_opts) == "table"
+        and section._setup_opts.sources
+        and section._setup_opts.sources[1] == probe_source)
+  end
+end
+
 -- ───────────────────── 6. event bridge (slice 2) ───────────────────────
 -- Round-trip: subscribe to dbase.* topics on auto-core's bus, fire
 -- synthetic dbee events via the internal event_bus, then assert the

@@ -138,6 +138,18 @@ function M.setup(user_opts)
     M._register_neotree_workspace_source(cfg.repos)
   end
 
+  -- If `dbase` is enabled, forward the consumer's `cfg.dbase` (sources
+  -- + extra) to the section. The section reads it lazily on the first
+  -- `get_buffer` call — when `_dbase_setup.ensure_setup(opts)` runs —
+  -- so we can plumb the config here without dbee having to be loaded
+  -- yet. Safe to call even when dbase isn't enabled (no-op).
+  if require("auto-finder.sections")._by_name["dbase"] then
+    local dbase_section = require("auto-finder.sections.dbase")
+    if type(dbase_section.configure) == "function" then
+      dbase_section.configure(cfg.dbase)
+    end
+  end
+
   -- v0.2.0 step 2/4: panel.user_width and panel.last_section now live
   -- in auto-core.state.namespace("auto-finder") with json persist —
   -- see lua/auto-finder/state.lua. The legacy
