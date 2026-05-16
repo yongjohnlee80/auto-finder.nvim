@@ -412,10 +412,11 @@ local config = {
       nowait = true,
     },
     mappings = {
-      ["<space>"] = {
-          "toggle_node",
-          nowait = false, -- disable `nowait` if you have existing combos starting with this char that you want to use
-      },
+      -- `<space>` intentionally unbound so nvim's global `<leader>`
+      -- (Space) reaches normal-mode chords from inside the panel.
+      -- `<cr>` already handles toggle/open — the old `<space> = toggle_node`
+      -- binding was a duplicate that cost us the leader prefix.
+      ["<space>"] = "none",
       ["<2-LeftMouse>"] = "open",
       ["<cr>"] = "open",
       -- ["<cr>"] = { "open", config = { expand_nested_files = true } }, -- expand nested file takes precedence
