@@ -69,15 +69,29 @@ end
 ---@field sources? table[]   list of dbee Source instances; defaults to a single empty MemorySource
 ---@field extra? table       passthrough — merged into the dbee.setup config under the user's responsibility
 
----Default source set: a single empty memory source so the drawer has
----something to render against. Production consumers should pass their
----own `sources = { … }` covering env / file / project-level
----connection inventories.
+---Default source set: a single FileSource pinned at
+---`<state>/auto-finder/dbase/_active.json`. The user manages a
+---library of named connection files via the `dbase` REPL commands
+---(`dbase new`, `dbase load`, `dbase conn add`, …); those commands
+---swap the contents of `_active.json` and call
+---`dbee.api.core.source_reload("_active.json")` so the drawer
+---reflects the change without re-running dbee.setup. Consumers that
+---want to bypass this and pass their own `sources = { ... }`
+---explicitly still can — the user-supplied list short-circuits
+---this default path entirely.
 ---@return table[]
 local function default_sources()
   local ok, dbee_sources = pcall(require, "dbee.sources")
   if not ok then return {} end
-  return { dbee_sources.MemorySource:new({}, "dbase-default") }
+  local ok_files, files = pcall(require, "auto-finder.sections._dbase_files")
+  if not ok_files then
+    -- Defensive fallback: this module ships alongside _dbase_files
+    -- so the require should always succeed, but if it doesn't, an
+    -- empty MemorySource is a less-destructive default than crashing
+    -- setup.
+    return { dbee_sources.MemorySource:new({}, "dbase-default") }
+  end
+  return { dbee_sources.FileSource:new(files.active_path()) }
 end
 
 ---Run dbee.setup exactly once for this nvim session. Subsequent calls

@@ -43,6 +43,13 @@ local function help_lines()
     "  slot remove <N>              remove section at slot N (N>=1; slot 0 is protected)",
     "  slot modify <N> <type>       replace the section at slot N with <type>",
     "  slot types                   list available section types",
+    "  dbase new <name>             create empty connections file (`.json` auto-appended)",
+    "  dbase ls                     list available connections files",
+    "  dbase rm <name>              delete a connections file",
+    "  dbase load [name]            load file as active (prompts if name omitted)",
+    "  dbase conn add               prompt for name/type/url, append to active file",
+    "  dbase conn ls                list connections in the active file",
+    "  dbase conn rm <name>         remove a connection by name",
     "  reload                       re-render the active section",
     "  status                       show current section, width, pin state",
     "  clear                        wipe history above the prompt",
@@ -403,6 +410,159 @@ local function dispatch(input)
         .. tostring(sub) .. "')" })
     end
 
+  elseif verb == "dbase" then
+    local files = require("auto-finder.sections._dbase_files")
+    local sub = toks[2]
+
+    if sub == "new" then
+      local name = toks[3]
+      if not name or name == "" then
+        emit({ "dbase new: name required (e.g. 'dbase new work')" })
+      else
+        local basename, err = files.new(name)
+        if err then
+          emit({ "dbase new: " .. err })
+        else
+          emit({ "dbase: created " .. basename
+            .. "   (use `dbase load " .. basename:gsub("%.json$", "") .. "` to activate)" })
+        end
+      end
+
+    elseif sub == "ls" then
+      local names = files.list()
+      local current = files.current()
+      if #names == 0 then
+        emit({ "dbase: no connection files yet (try `dbase new <name>`)" })
+      else
+        local lines = { "dbase files:" }
+        for _, n in ipairs(names) do
+          local marker = (n == current) and "  * " or "    "
+          lines[#lines + 1] = marker .. n
+        end
+        if current then
+          lines[#lines + 1] = "  (* = active)"
+        else
+          lines[#lines + 1] = "  (none active — use `dbase load <name>`)"
+        end
+        emit(lines)
+      end
+
+    elseif sub == "rm" then
+      local name = toks[3]
+      if not name or name == "" then
+        emit({ "dbase rm: name required (e.g. 'dbase rm work')" })
+      else
+        local ok, err = files.remove(name)
+        if not ok then
+          emit({ "dbase rm: " .. err })
+        else
+          emit({ "dbase: removed " .. name })
+        end
+      end
+
+    elseif sub == "load" then
+      local name = toks[3]
+      if not name or name == "" then
+        local names = files.list()
+        if #names == 0 then
+          emit({ "dbase load: no files to load (try `dbase new <name>` first)" })
+        else
+          emit({ "dbase files:" })
+          for _, n in ipairs(names) do emit({ "    " .. n }) end
+          vim.schedule(function()
+            local pick = vim.fn.input("dbase load: ")
+            if pick == nil or pick == "" then
+              emit({ "dbase load: cancelled" })
+              return
+            end
+            local basename, err = files.load(pick)
+            if err then
+              emit({ "dbase load: " .. err })
+            else
+              emit({ "dbase: loaded " .. basename })
+            end
+          end)
+        end
+      else
+        local basename, err = files.load(name)
+        if err then
+          emit({ "dbase load: " .. err })
+        else
+          emit({ "dbase: loaded " .. basename })
+        end
+      end
+
+    elseif sub == "conn" then
+      local action = toks[3]
+
+      if action == "add" then
+        vim.schedule(function()
+          local cname = vim.fn.input("conn name: ")
+          if cname == nil or cname == "" then
+            emit({ "dbase conn add: cancelled (no name)" })
+            return
+          end
+          local ctype = vim.fn.input("type (postgres|mysql|sqlite|bigquery|redis|mongodb|...): ")
+          if ctype == nil or ctype == "" then
+            emit({ "dbase conn add: cancelled (no type)" })
+            return
+          end
+          local curl = vim.fn.input("url: ")
+          if curl == nil or curl == "" then
+            emit({ "dbase conn add: cancelled (no url)" })
+            return
+          end
+          local ok, err = files.conn_add({ name = cname, type = ctype, url = curl })
+          if not ok then
+            emit({ "dbase conn add: " .. err })
+          else
+            emit({ "dbase: added connection '" .. cname .. "' (" .. ctype .. ")" })
+          end
+        end)
+
+      elseif action == "ls" then
+        local conns, read_err = files.connections()
+        if read_err then
+          emit({ "dbase conn ls: " .. read_err })
+        elseif #conns == 0 then
+          local current = files.current()
+          if current then
+            emit({ "dbase: no connections in '" .. current .. "' yet (try `dbase conn add`)" })
+          else
+            emit({ "dbase: no file loaded — use `dbase load <name>` first" })
+          end
+        else
+          local current = files.current() or "(unsaved)"
+          emit({ "dbase connections in '" .. current .. "':" })
+          for _, c in ipairs(conns) do
+            emit({ "    " .. tostring(c.name or "?")
+              .. "    [" .. tostring(c.type or "?") .. "]" })
+          end
+        end
+
+      elseif action == "rm" then
+        local cname = toks[4]
+        if not cname or cname == "" then
+          emit({ "dbase conn rm: connection name required" })
+        else
+          local ok, err = files.conn_remove(cname)
+          if not ok then
+            emit({ "dbase conn rm: " .. err })
+          else
+            emit({ "dbase: removed connection '" .. cname .. "'" })
+          end
+        end
+
+      else
+        emit({ "dbase conn: action must be 'add', 'ls', or 'rm' (got '"
+          .. tostring(action) .. "')" })
+      end
+
+    else
+      emit({ "dbase: subcommand must be 'new', 'ls', 'rm', 'load', or 'conn' (got '"
+        .. tostring(sub) .. "')" })
+    end
+
   else
     -- Bare numeric input → focus N (e.g. user types "1" then <CR>).
     local n = tonumber(verb)
@@ -512,7 +672,7 @@ local function complete_at(prompt, cursor_col)
   local candidates
   if #prev_toks == 0 then
     candidates = { "help", "?", ":h", "focus", "panel", "files", "repos", "slot",
-                   "reload", "status", "clear", "quit" }
+                   "dbase", "reload", "status", "clear", "quit" }
   elseif #prev_toks == 1 and prev_toks[1] == "focus" then
     -- Numeric indices and section names from the live registry.
     candidates = {}
@@ -596,7 +756,28 @@ local function complete_at(prompt, cursor_col)
   elseif #prev_toks == 1 and prev_toks[1] == "help" then
     -- `help <topic>` opens the topic's help directly. Topics map to
     -- the verb groups so users discover what's available.
-    candidates = { "focus", "panel", "files", "repos", "slot", "general" }
+    candidates = { "focus", "panel", "files", "repos", "slot", "dbase", "general" }
+  elseif #prev_toks == 1 and prev_toks[1] == "dbase" then
+    candidates = { "new", "ls", "rm", "load", "conn" }
+  elseif #prev_toks == 2 and prev_toks[1] == "dbase" and prev_toks[2] == "conn" then
+    candidates = { "add", "ls", "rm" }
+  elseif #prev_toks == 2 and prev_toks[1] == "dbase"
+      and (prev_toks[2] == "rm" or prev_toks[2] == "load") then
+    -- Existing user files (no `.json` suffix in completion — matches
+    -- the dispatch's normalize_name, which appends it if missing).
+    local ok_files, files = pcall(require, "auto-finder.sections._dbase_files")
+    candidates = ok_files and files.list() or {}
+  elseif #prev_toks == 3 and prev_toks[1] == "dbase"
+      and prev_toks[2] == "conn" and prev_toks[3] == "rm" then
+    -- Existing connection names in the currently-active file.
+    local ok_files, files = pcall(require, "auto-finder.sections._dbase_files")
+    candidates = {}
+    if ok_files then
+      local conns = files.connections() or {}
+      for _, c in ipairs(conns) do
+        if type(c.name) == "string" then candidates[#candidates + 1] = c.name end
+      end
+    end
   else
     candidates = {}
   end
@@ -739,28 +920,46 @@ local TOPIC_HELP = {
     "",
     "  dbase                        database UI (drawer + editor + result panes)",
     "",
-    "  Add it with `slot add dbase`. Configure via `cfg.dbase` at setup:",
-    "    sources  list of dbee Source instances (MemorySource, EnvSource,",
-    "             FileSource — see nvim-dbee/lua/dbee/sources.lua). When",
-    "             nil or empty, dbase falls back to a single empty",
-    "             MemorySource so the drawer renders against a baseline.",
-    "    extra    passthrough table merged into `dbee.setup`'s config under",
-    "             keys not already set by `sources`. Escape hatch for",
-    "             per-tile dbee options (drawer, editor, …). Use sparingly.",
+    "  Add the panel section with `slot add dbase` (it's NOT in the",
+    "  default slot set — only added when you want it).",
     "",
+    "  File management — `~/.local/state/nvim/auto-finder/dbase/`:",
+    "    dbase new <name>           create empty connections file",
+    "                                 `.json` is appended automatically",
+    "    dbase ls                   list available files (`*` marks active)",
+    "    dbase rm <name>            delete a file",
+    "    dbase load [name]          activate file (prompts if name omitted)",
+    "",
+    "  Connection management — operates on the ACTIVE file:",
+    "    dbase conn add             prompt for name / type / url",
+    "    dbase conn ls              list connections in the active file",
+    "    dbase conn rm <name>       remove a connection by name",
+    "",
+    "  The active file's contents are mirrored into `_active.json`, which",
+    "  is what dbee's FileSource reads. Swapping files via `dbase load`",
+    "  rewrites `_active.json` and calls `source_reload` — the drawer",
+    "  reflects the change without re-running `dbee.setup`. The named",
+    "  file (e.g. `work.json`) remains the durable record.",
+    "",
+    "  Mounting & companion panes:",
     "  Focusing the dbase slot shows the connection drawer in the panel.",
-    "  <CR> on a connection opens dbee's companion editor + result + call_log",
-    "  panes in the main editor area (NOT in any auto-core panel). Closing",
-    "  the panel, reloading auto-finder, or removing the dbase slot tears",
-    "  those companions down; plain focus changes between sections leave",
-    "  them mounted.",
+    "  <CR> on a connection opens dbee's editor + result + call_log panes",
+    "  in the main editor area (NOT in any auto-core panel). Closing the",
+    "  panel, reloading auto-finder, or removing the dbase slot tears",
+    "  those companions down; plain focus changes leave them mounted.",
+    "",
+    "  Programmatic config (advanced) — `cfg.dbase` at setup:",
+    "    sources  list of dbee Source instances. When set, REPLACES the",
+    "             pinned FileSource default; the file commands above no",
+    "             longer drive the drawer. Use this only if you're",
+    "             bypassing auto-finder's file management.",
+    "    extra    passthrough table merged into `dbee.setup`'s config.",
     "",
     "  Emitted events (subscribe with `:AutoCoreLogEvent notify <topic>`):",
     "    auto-finder.dbase.connection.changed",
     "    auto-finder.dbase.call.started",
     "    auto-finder.dbase.call.completed",
-    "  Failures (setup, call) go through `log.error` and always toast — no",
-    "  subscription needed.",
+    "  Failures (setup, call) go through `log.error` and always toast.",
     "",
   },
   general = {
@@ -782,7 +981,7 @@ help_topic_lines = function(topic)
   local body = TOPIC_HELP[topic]
   if type(body) == "function" then body = body() end
   if type(body) ~= "table" then
-    return { "", "  no help for '" .. tostring(topic) .. "' (try focus|panel|files|repos|dbase|slot|general)", "" }
+    return { "", "  no help for '" .. tostring(topic) .. "' (try focus|panel|files|repos|slot|dbase|general)", "" }
   end
   local out = { "", "  help: " .. topic }
   for _, l in ipairs(body) do table.insert(out, l) end

@@ -2,6 +2,56 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.18] — 2026-05-17 — `dbase`: connection-file management from the config-section REPL
+
+### Added
+
+- **Filesystem-backed dbase connection inventory** under
+  `~/.local/state/nvim/auto-finder/dbase/`. The user maintains a
+  library of named `<name>.json` files (the durable record) and a
+  single pinned `_active.json` (what dbee's `FileSource` reads).
+  Swap semantics happen at the filesystem layer — never via
+  dbee's no-op `remove_source`.
+- **New config-section REPL verbs** (driven by the new module
+  `lua/auto-finder/sections/_dbase_files.lua`):
+  - `dbase new <name>` — create an empty connections file
+    (`.json` auto-appended, path separators rejected).
+  - `dbase ls` — list available files; `*` marks the active one.
+  - `dbase rm <name>` — delete a file (resets `_active.json` if
+    the active one is removed).
+  - `dbase load [name]` — activate a file (prompts when name is
+    omitted). Calls `dbee.api.core.source_reload("_active.json")`
+    so the drawer reflects the swap without re-running
+    `dbee.setup`.
+  - `dbase conn add` — prompt for name/type/url and append to the
+    active file (validates required fields, rejects duplicates).
+  - `dbase conn ls` — list connections in the active file.
+  - `dbase conn rm <name>` — remove a connection by name.
+- **Autocomplete wired at every depth** in the config-section
+  REPL: `dbase` at the root, `new|ls|rm|load|conn` after `dbase `,
+  `add|ls|rm` after `dbase conn `, dynamic file-name completion
+  for `dbase rm` / `dbase load`, and dynamic connection-name
+  completion for `dbase conn rm` (live from the active file).
+  `dbase` also joins the `help <topic>` completion set.
+- **`help dbase` topic rewritten** to cover the new file/conn
+  workflow and clarify that `cfg.dbase.sources = { ... }` at setup
+  bypasses the new file management entirely.
+
+### Changed
+
+- **`_dbase_setup` default source** flipped from an empty
+  `MemorySource` to a `FileSource` pinned at
+  `files.active_path()`. The empty `MemorySource` remains as a
+  defensive fallback only if `_dbase_files` somehow fails to load.
+
+### Tests
+
+- New `tests/smoke.lua` section 23 (35 assertions) covers
+  state-dir creation, list/new round-trips, duplicate + path-
+  traversal rejection, load-swap semantics, conn add/ls/rm,
+  active-file removal recovery, REPL dispatch routing, and the
+  three new autocomplete depths.
+
 ## [v0.2.17] — 2026-05-17 — `dbase`: soft-dep tone fix for missing nvim-dbee
 
 ### Fixed

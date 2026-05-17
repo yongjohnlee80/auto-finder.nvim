@@ -1658,6 +1658,202 @@ repos_mod.load = orig_repos_load
 pcall(vim.cmd, "bwipeout " .. vim.fn.bufnr(tmp_hijack))
 vim.fn.delete(tmp_hijack)
 
+-- ───────────────────────── 23. dbase file/conn management ─────────────────────────
+-- Exercises lua/auto-finder/sections/_dbase_files.lua: filesystem-backed
+-- connection-file CRUD, pinned-active swap semantics, and admin REPL
+-- dispatch routing for the new `dbase` verb. dbee is NOT required —
+-- _reload_dbee soft-fails when dbee isn't loaded, and the durable
+-- state-of-truth lives in plain JSON files we read back directly.
+print("\n[23] dbase file/conn management")
+
+-- XDG_STATE_HOME was overridden at the top of the driver, so
+-- stdpath("state") points into our isolated tmpdir. Clean any
+-- artifacts from earlier test sections that may have touched it
+-- so [23a] sees a pristine dir.
+local _dbase_state_dir = vim.fn.stdpath("state") .. "/auto-finder/dbase"
+vim.fn.delete(_dbase_state_dir, "rf")
+
+local files = require("auto-finder.sections._dbase_files")
+
+-- [23a] state dir is created on first access; _active.json is
+-- materialized as an empty JSON array.
+ok("state_dir created on first call",
+  vim.fn.isdirectory(files.state_dir()) == 1,
+  "expected " .. _dbase_state_dir)
+local active_p = files.active_path()
+ok("active_path created _active.json on first call",
+  vim.fn.filereadable(active_p) == 1, "expected file at " .. active_p)
+ok("_active.json starts as a JSON array",
+  (function()
+    local f = io.open(active_p, "r")
+    if not f then return false end
+    local c = f:read("*a") or ""
+    f:close()
+    return c:match("^%s*%[%s*%]%s*$") ~= nil
+  end)(), "expected '[]'")
+
+-- [23b] new / list round-trip. `.json` is auto-appended; the
+-- pinned _active.json is excluded from `list()`.
+local _, new_err = files.new("work")
+ok("dbase new 'work' creates work.json", new_err == nil, new_err)
+local _, new_err2 = files.new("personal.json")
+ok("dbase new 'personal.json' tolerates explicit .json suffix",
+  new_err2 == nil, new_err2)
+local listed = files.list()
+local has_work, has_personal, has_active = false, false, false
+for _, n in ipairs(listed) do
+  if n == "work" then has_work = true end
+  if n == "personal" then has_personal = true end
+  if n == "_active" then has_active = true end
+end
+ok("list() contains 'work'", has_work)
+ok("list() contains 'personal'", has_personal)
+ok("list() excludes the pinned _active.json", not has_active)
+
+-- [23c] `new` rejects duplicates so an accidental re-create doesn't
+-- clobber a populated file.
+local _, dup_err = files.new("work")
+ok("dbase new rejects duplicate name",
+  dup_err ~= nil and dup_err:match("already exists") ~= nil,
+  tostring(dup_err))
+
+-- [23d] normalize_name rejects path separators (security: don't let
+-- `dbase new ../etc/passwd` escape the state dir).
+local _, traverse_err = files.new("../escape")
+ok("dbase new rejects path separators",
+  traverse_err ~= nil and traverse_err:match("path separators") ~= nil,
+  tostring(traverse_err))
+
+-- [23e] load swaps _active.json content + persists current().
+-- Pre-populate work.json with a real connection so the swap is
+-- observable.
+do
+  local p = files.state_dir() .. "/work.json"
+  local f = assert(io.open(p, "w+"))
+  f:write('[{"name":"local-pg","type":"postgres","url":"postgres://u:p@h/db"}]')
+  f:close()
+end
+local loaded, load_err = files.load("work")
+ok("dbase load 'work' returns the basename",
+  loaded == "work.json", "got " .. tostring(loaded))
+ok("dbase load reports no error", load_err == nil, load_err)
+ok("current() == 'work' after load", files.current() == "work")
+local active_conns = files.connections()
+ok("connections() returns work.json contents",
+  #active_conns == 1 and active_conns[1].name == "local-pg",
+  "got " .. vim.inspect(active_conns))
+
+-- [23f] conn add appends to active + mirrors back into the named
+-- file so the change is durable across future loads.
+local add_ok, add_err = files.conn_add({
+  name = "prod-pg", type = "postgres",
+  url = "postgres://ro:x@prod/db",
+})
+ok("conn_add returns true", add_ok, add_err)
+local after_add = files.connections()
+ok("active file now has 2 connections", #after_add == 2,
+  "got " .. tostring(#after_add))
+do
+  local f = assert(io.open(files.state_dir() .. "/work.json", "r"))
+  local c = f:read("*a"); f:close()
+  ok("conn_add mirrored into work.json",
+    c:find("prod%-pg", 1, false) ~= nil, "work.json: " .. c)
+end
+
+-- [23g] conn add rejects duplicate name.
+local _, dup_conn_err = files.conn_add({
+  name = "prod-pg", type = "postgres", url = "postgres://u:p@h/db",
+})
+ok("conn_add rejects duplicate name",
+  dup_conn_err ~= nil and dup_conn_err:match("already exists") ~= nil,
+  tostring(dup_conn_err))
+
+-- [23h] conn add validates required fields.
+local _, no_url_err = files.conn_add({ name = "missing-url", type = "postgres" })
+ok("conn_add requires url",
+  no_url_err ~= nil and no_url_err:match("url") ~= nil,
+  tostring(no_url_err))
+
+-- [23i] conn rm removes by name from active + mirror.
+local rm_ok, rm_err = files.conn_remove("prod-pg")
+ok("conn_remove returns true", rm_ok, rm_err)
+local after_rm = files.connections()
+ok("active file is back to 1 connection after rm",
+  #after_rm == 1, "got " .. tostring(#after_rm))
+local _, rm_miss_err = files.conn_remove("does-not-exist")
+ok("conn_remove rejects unknown name",
+  rm_miss_err ~= nil and rm_miss_err:match("no such") ~= nil,
+  tostring(rm_miss_err))
+
+-- [23j] load can swap between files; _active.json reflects the new
+-- file's contents and previous-file connections drop from the
+-- drawer's view.
+do
+  local p = files.state_dir() .. "/personal.json"
+  local f = assert(io.open(p, "w+"))
+  f:write('[{"name":"home-sqlite","type":"sqlite","url":"/tmp/home.db"}]')
+  f:close()
+end
+local _, swap_err = files.load("personal")
+ok("load 'personal' succeeds", swap_err == nil, swap_err)
+ok("current() == 'personal' after swap", files.current() == "personal")
+local swapped = files.connections()
+ok("active connections came from personal.json",
+  #swapped == 1 and swapped[1].name == "home-sqlite",
+  "got " .. vim.inspect(swapped))
+
+-- [23k] remove() of the active file clears active marker + resets
+-- _active.json to empty so the drawer doesn't keep stale entries.
+local rm_active_ok, rm_active_err = files.remove("personal")
+ok("remove() of active file succeeds", rm_active_ok, rm_active_err)
+ok("current() is nil after removing the active file",
+  files.current() == nil)
+ok("_active.json reset to empty after removing active",
+  #files.connections() == 0)
+
+-- [23l] admin REPL dispatch routes the new verb without error.
+-- We're not asserting the emit() output text — that's UX surface,
+-- not contract. We assert that dispatch doesn't raise and that
+-- side-effects on the filesystem match.
+local admin = require("auto-finder.panel.admin")
+admin.get_or_create_buffer()  -- materialize the prompt buffer
+-- new via REPL
+admin.dispatch("dbase new repl-created")
+ok("`dbase new repl-created` produced repl-created.json on disk",
+  vim.fn.filereadable(files.state_dir() .. "/repl-created.json") == 1)
+-- ls via REPL — just exercise the code path.
+local ls_ok = pcall(admin.dispatch, "dbase ls")
+ok("`dbase ls` dispatches without raising", ls_ok)
+-- rm via REPL
+admin.dispatch("dbase rm repl-created")
+ok("`dbase rm repl-created` removed the file",
+  vim.fn.filereadable(files.state_dir() .. "/repl-created.json") == 0)
+-- invalid subcommand emits an error line but does NOT raise.
+local bad_ok = pcall(admin.dispatch, "dbase bogus")
+ok("`dbase bogus` is rejected without raising", bad_ok)
+
+-- [23m] completion candidates include `dbase` at the top level + the
+-- expected sub-verbs.
+local _, top_cands = admin._complete_at("", 0)
+local has_dbase = false
+for _, c in ipairs(top_cands) do
+  if c == "dbase" then has_dbase = true; break end
+end
+ok("completion at root includes 'dbase'", has_dbase,
+  "got " .. table.concat(top_cands, ", "))
+local _, dbase_cands = admin._complete_at("dbase ", 6)
+local sub_set = {}
+for _, c in ipairs(dbase_cands) do sub_set[c] = true end
+ok("completion after 'dbase ' includes new/ls/rm/load/conn",
+  sub_set.new and sub_set.ls and sub_set.rm and sub_set.load and sub_set.conn,
+  "got " .. table.concat(dbase_cands, ", "))
+local _, conn_cands = admin._complete_at("dbase conn ", 11)
+local conn_set = {}
+for _, c in ipairs(conn_cands) do conn_set[c] = true end
+ok("completion after 'dbase conn ' includes add/ls/rm",
+  conn_set.add and conn_set.ls and conn_set.rm,
+  "got " .. table.concat(conn_cands, ", "))
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
