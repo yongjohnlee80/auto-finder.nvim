@@ -2,6 +2,66 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.19] — 2026-05-17 — `dbase`: in-panel wizard prompts, full type list, and connection-id healing
+
+### Fixed
+
+- **`dbase conn add` now stamps a dbee-compatible `id` on every new
+  connection.** v0.2.18 wrote specs without `id`, which made dbee's
+  `Handler:source_reload` error with `connection without an id: { name:
+  "...", type: ..., url: ... }` the next time the FileSource was
+  reloaded. The new id format (`file_source_/<10-char>`) matches what
+  dbee's own `FileSource:create()` writes, so files round-trip
+  cleanly between the REPL and dbee's interactive create path.
+- **Legacy id-less entries are healed automatically.** `dbase load`
+  assigns ids when swapping a named file's contents into
+  `_active.json` AND writes the heal back into the named file, so it
+  persists across future loads. `_reload_dbee` also heals
+  `_active.json` just-in-time before calling `source_reload`, so a
+  user upgrading from v0.2.18 with an already-broken `_active.json`
+  recovers without any manual cleanup.
+
+### Changed
+
+- **`dbase conn add` and `dbase load` (without a name argument) now
+  prompt inside the admin REPL via a new wizard.** Previously these
+  verbs called `vim.fn.input()`, which popped a separate prompt at
+  the bottom of the editor — outside the config-section panel. The
+  new flow mirrors auto-agents.nvim's `panel.wizard`: the multi-step
+  prompts (`connection name` → `type` → `url`, or `file name` for
+  load) render in-place above the auto-finder prompt line, and
+  `<C-c>` cancels at any step.
+- **`dbase conn add`'s type picker lists every dbee adapter alias**
+  (`postgres | mysql | sqlite | bigquery | redis | mongodb |
+  clickhouse | databricks | duckdb | oracle | redshift | sqlserver`)
+  instead of `postgres|mysql|sqlite|bigquery|redis|mongodb|...` —
+  the `...` was unhelpful when the whole point of the prompt is to
+  remind the user which backends are available. The wizard's
+  validator rejects values outside this list before
+  `dbee.api.core.source_reload` would.
+
+### Added
+
+- **`lua/auto-finder/panel/wizard.lua`** — step-by-step prompt runner
+  inside the admin prompt buffer. Self-contained (no auto-agents
+  dep). Tracks active state so the admin's `prompt_setcallback`
+  routes input through `wizard.feed()` while a wizard is running,
+  and `<C-c>` cancels.
+- **`_dbase_files.TYPES`** — canonical list of dbee adapter aliases
+  the REPL surfaces. Hand-mirrored from
+  `nvim-dbee/dbee/adapters/*.go` (the registry lives in the Go
+  binary, not in dbee's Lua surface).
+
+### Tests
+
+- Five new smoke-test assertions in section 23 cover (a) `conn_add`
+  stamps a `file_source_/<id>` on every new spec, (b) `load` heals
+  legacy id-less entries in both `_active.json` and the named file,
+  (c) `_ensure_ids` is idempotent on already-healed input, (d)
+  `dbase conn add` activates the wizard and drives `conn_add` to
+  completion when fed the three steps programmatically, and (e)
+  `TYPES` covers the headline backends without a `...` placeholder.
+
 ## [v0.2.18] — 2026-05-17 — `dbase`: connection-file management from the config-section REPL
 
 ### Added
