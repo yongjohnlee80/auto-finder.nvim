@@ -713,23 +713,45 @@ local TOPIC_HELP = {
     "  source. No-op if the repos section's buffer isn't currently live.",
     "",
   },
-  slot = {
+  slot = function()
+    local types = require("auto-finder")._available_section_types()
+    return {
+      "",
+      "  slot add <type>              append a section of <type> at the end",
+      "  slot remove <N>              remove section at slot N (N >= 1)",
+      "  slot modify <N> <type>       replace the section at slot N",
+      "  slot types                   list all available section types",
+      "",
+      "  <type> must be one of `slot types`'s output. Available right now:",
+      "    " .. table.concat(types, ", ") .. ".",
+      "  Third-party sections registered via `cfg.section_modules` also",
+      "  show up; the list is recomputed on every `slot types` call.",
+      "",
+      "  Slot 0 (config) is protected — `remove` / `modify` reject it.",
+      "  Duplicates are rejected: a section type can only live in one slot",
+      "  at a time. Mutations are SESSION-ONLY in v0.2.5 (do not survive",
+      "  nvim restart); persisting via the auto-finder state namespace is",
+      "  a follow-up.",
+      "",
+    }
+  end,
+  dbase = {
     "",
-    "  slot add <type>              append a section of <type> at the end",
-    "  slot remove <N>              remove section at slot N (N >= 1)",
-    "  slot modify <N> <type>       replace the section at slot N",
-    "  slot types                   list all available section types",
+    "  dbase                        database UI (drawer + editor + result panes)",
     "",
-    "  <type> must be one of `slot types`'s output. Bundled today:",
-    "    config, files, repos, buffers.",
-    "  Third-party sections registered via `cfg.section_modules` also",
-    "  show up; the list is recomputed on every `slot types` call.",
+    "  Add it with `slot add dbase`. Connections come from `cfg.dbase.connections`",
+    "  at setup time — an array of `{ name, type, url }` tables (see nvim-dbee's",
+    "  README for supported types). Focusing the dbase slot shows the connection",
+    "  drawer in the panel; <CR> on a connection opens dbee's companion editor",
+    "  and result panes alongside the panel, and switching away from dbase tears",
+    "  those companions down.",
     "",
-    "  Slot 0 (config) is protected — `remove` / `modify` reject it.",
-    "  Duplicates are rejected: a section type can only live in one slot",
-    "  at a time. Mutations are SESSION-ONLY in v0.2.5 (do not survive",
-    "  nvim restart); persisting via the auto-finder state namespace is",
-    "  a follow-up.",
+    "  Emitted events (subscribe with `:AutoCoreLogEvent notify <topic>`):",
+    "    auto-finder.dbase.connection.changed",
+    "    auto-finder.dbase.call.started",
+    "    auto-finder.dbase.call.completed",
+    "  Failures (setup, call) go through `log.error` and always toast — no",
+    "  subscription needed.",
     "",
   },
   general = {
@@ -749,8 +771,9 @@ local TOPIC_HELP = {
 -- forward decl is `local help_topic_lines` and we're filling it in).
 help_topic_lines = function(topic)
   local body = TOPIC_HELP[topic]
-  if not body then
-    return { "", "  no help for '" .. tostring(topic) .. "' (try focus|panel|files|repos|general)", "" }
+  if type(body) == "function" then body = body() end
+  if type(body) ~= "table" then
+    return { "", "  no help for '" .. tostring(topic) .. "' (try focus|panel|files|repos|dbase|slot|general)", "" }
   end
   local out = { "", "  help: " .. topic }
   for _, l in ipairs(body) do table.insert(out, l) end
