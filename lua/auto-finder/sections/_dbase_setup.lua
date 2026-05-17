@@ -13,7 +13,7 @@
 ---types — memory, env, and file — at the wrapper level.
 ---@module 'auto-finder.sections._dbase_setup'
 
-local logger = require("auto-finder.logger")
+local logger = require("auto-finder.log")
 
 local M = {
   _done = false,    ---@type boolean        — setup ran AND returned ok

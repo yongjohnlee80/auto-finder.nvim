@@ -25,7 +25,7 @@
 ---winid if still valid, otherwise re-mount.
 ---@module 'auto-finder.sections._dbase_layout'
 
-local logger = require("auto-finder.logger")
+local logger = require("auto-finder.log")
 
 local M = {
   _editor_winid = nil,    ---@type integer|nil

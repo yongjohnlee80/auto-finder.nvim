@@ -16,7 +16,7 @@
 ---@module 'auto-finder.sections.dbase'
 
 local host = require("auto-finder.panel.host")
-local logger = require("auto-finder.logger")
+local logger = require("auto-finder.log")
 local setup_mod = require("auto-finder.sections._dbase_setup")
 local events_mod = require("auto-finder.sections._dbase_events")
 local layout_mod = require("auto-finder.sections._dbase_layout")

@@ -38,7 +38,7 @@
 ---the namespace once it lands.
 ---@module 'auto-finder.sections._dbase_events'
 
-local logger = require("auto-finder.logger")
+local logger = require("auto-finder.log")
 
 local M = {
   _attached = false,
