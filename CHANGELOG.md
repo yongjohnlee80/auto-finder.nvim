@@ -2,6 +2,26 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.17] — 2026-05-17 — `dbase`: soft-dep tone fix for missing nvim-dbee
+
+### Fixed
+
+- **`dbase` section is now a clean soft-dep on nvim-dbee.** When
+  `require("dbee")` fails because nvim-dbee isn't installed, the
+  setup probe logs at `INFO` instead of `ERROR`. The user-visible
+  signal stays the placeholder buffer rendered into the panel
+  ("dbee unavailable: nvim-dbee is not on the runtimepath — install
+  nvim-dbee and rerun :AutoFinderFocus dbase"); the ERROR-level
+  toast that used to fire on top of it was double-noise. Setup
+  failures with nvim-dbee actually present (i.e. `dbee.setup()`
+  raising) stay at `ERROR` — that's a real broken state.
+- **Test coverage.** `tests/dbase_spike.lua` path B (dbee
+  unloadable) now asserts no `ERROR` toast is emitted for the
+  missing-dep case, locking the soft-dep contract in place.
+
+Mirrors the soft-dep pattern already used by the auto-core.events
+probe in `_dbase_events.lua`.
+
 ## [v0.2.16] — 2026-05-17 — `dbase` section (ADR 0020)
 
 A new bundled panel section that wraps [nvim-dbee] as a database

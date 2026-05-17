@@ -95,7 +95,13 @@ function M.ensure_setup(opts)
   local ok_dbee, dbee = pcall(require, "dbee")
   if not ok_dbee then
     M._err = "nvim-dbee is not on the runtimepath"
-    logger.error("dbase.setup", M._err)
+    -- INFO not ERROR: nvim-dbee is an optional dep. The placeholder
+    -- buffer rendered by the section IS the user-visible signal that
+    -- the section isn't wired up; toasting on top of it (which
+    -- logger.error would do per auto-family-logging) would be noise.
+    -- Mirrors the soft-dep shape used in _dbase_events.lua for the
+    -- auto-core.events probe.
+    logger.info("dbase.setup", M._err)
     return false, M._err
   end
 

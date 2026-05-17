@@ -187,6 +187,17 @@ else
   ok("[Q5-fallback] placeholder rendered when dbee unloadable",
     mounted_placeholder,
     "name=" .. panel_bufname)
+  -- Soft-dep contract (v0.2.17): the missing-nvim-dbee path must NOT
+  -- emit an ERROR toast. The placeholder buffer is the user-visible
+  -- signal; a toast on top of it is double-noise. The ring entry at
+  -- INFO is fine (and not captured by :messages).
+  local has_missing_dep_error =
+    new_messages:find("nvim%-dbee is not on the runtimepath") ~= nil
+    and new_messages:find("ERROR") ~= nil
+  ok("[Q5-fallback] no ERROR toast for missing nvim-dbee (soft-dep)",
+    not has_missing_dep_error,
+    has_missing_dep_error and ("messages contained an ERROR toast:\n" ..
+      new_messages) or "")
 end
 
 -- ───────────────────── 5. close → reopen lifecycle ─────────────────────
