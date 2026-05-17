@@ -2,6 +2,81 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.16] — 2026-05-17 — `dbase` section (ADR 0020)
+
+A new bundled panel section that wraps [nvim-dbee] as a database
+UI inside auto-finder. Connection drawer renders in the panel
+column (the section's home), while dbee's editor / result /
+call_log tiles live in companion windows in the **main editor
+area**. Powered by a custom `Layout` object passed to
+`dbee.setup({ window_layout = ... })` so dbee never snapshots or
+restores the global layout under us.
+
+[nvim-dbee]: https://github.com/kndndrj/nvim-dbee
+
+### Added — bundled `dbase` section
+
+- **`slot add dbase`** registers the section. Auto-discoverable
+  via the existing directory scan (`lua/auto-finder/sections/*.lua`),
+  so tab-completion for `slot add` / `slot modify` picks it up
+  without further wiring.
+- **`cfg.dbase`** configuration namespace forwarded to
+  `auto-finder.sections.dbase.configure(opts)`:
+  - `sources` — list of dbee `Source` instances (`MemorySource`,
+    `EnvSource`, `FileSource` — see `nvim-dbee/lua/dbee/sources.lua`).
+    Falls back to a single empty `MemorySource` when nil/empty so
+    the drawer renders against a benign baseline.
+  - `extra` — passthrough table merged into `dbee.setup`'s config
+    under keys not already set by `sources`; escape hatch for
+    per-tile dbee options (`drawer = {...}`, `editor = {...}`, …).
+- **`help dbase`** topic in the config admin panel covers the
+  config shape, lifecycle, and emitted events.
+- **`help slot`** topic is now dynamic — the bundled-types list
+  resolves via `_available_section_types()` at call time instead
+  of hardcoding `"config, files, repos, buffers."`.
+
+### Added — event surface
+
+The dbase section bridges dbee's internal handler events onto
+auto-core's event bus (requires `auto-core ^0.1.14`). All six
+topics are owned by `auto-finder.nvim`:
+
+- `dbase.connection:changed`
+- `dbase.call:started`
+- `dbase.call:state_changed`
+- `dbase.call:completed`
+- `dbase.call:failed`
+- `dbase.result:shown`
+
+Subscribe with `:AutoCoreLogEvent notify <topic>`. Setup and call
+failures additionally route through `log.error`, which always
+toasts — no subscription required.
+
+### Notes
+
+- **Wrap, don't fork.** dbee stays an external dep; auto-finder
+  owns only the section + companion-window plumbing. See ADR 0020
+  for the wrap-vs-fork analysis.
+- **Panel ownership.** `find_editor_window()` treats any window
+  marked with `w:auto_core_panel_name` (auto-finder, auto-agents,
+  any future panel) as off-limits for companion-tile placement.
+  Companion tiles always land in the main editor area.
+- **Companion lifecycle.** `dbase.on_close()` tears down the
+  editor / result / call_log windows on panel close, auto-finder
+  reload, or section removal — plain focus changes between
+  sections leave companions mounted.
+
+### Compatibility
+
+Additive — no removals, no break-shape. Patch within the v0.2.x
+line per the global plugin version policy. Consumers pinned to
+`version = "^0.2.0"` pick this up automatically.
+
+Requires `auto-core ^0.1.14` for the new `dbase.*` event-topic
+registrations. Older auto-core versions silently drop publishes
+to unknown topics; the section still functions but subscribers
+will not receive events.
+
 ## [v0.2.15] — 2026-05-16 — ADR 0021 Phase 2 wrapper + scan toasts + `<space>` released
 
 Three user-visible changes plus the ADR 0021 Phase 2 internal
