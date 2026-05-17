@@ -2,3 +2,7 @@
 *.swo
 .DS_Store
 tags
+
+# nvim runtime log — written by `nvim --headless` smoke runs in this repo,
+# environment-specific, not part of the release artifact.
+nvim.log
