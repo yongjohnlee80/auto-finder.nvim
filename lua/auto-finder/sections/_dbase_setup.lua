@@ -131,7 +131,18 @@ function M.ensure_setup(opts)
   local ok_setup, err = pcall(dbee.setup, cfg)
   if not ok_setup then
     M._err = "dbee.setup failed: " .. tostring(err)
+    -- Two emissions: error-level ring entry for the audit trail
+    -- (always recorded) + gated user-facing toast through the
+    -- auto-finder.dbase.setup.failed event. Setup-failed is the
+    -- second strong toast candidate alongside dbase.call.failed —
+    -- users care that the section can't initialize, especially
+    -- since the placeholder buffer surfaces the same string.
     logger.error("dbase.setup", M._err)
+    logger.notifyIf("dbase.setup.failed",
+      "dbase: dbee.setup failed — section will render a placeholder",
+      { component = "dbase.setup",
+        level     = "error",
+        fields    = { err = tostring(err) } })
     return false, M._err
   end
 

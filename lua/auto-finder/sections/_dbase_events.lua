@@ -99,6 +99,15 @@ function M.attach()
     local id = type(data) == "table" and data.conn_id or nil
     if not id then return end
     events.publish("dbase.connection:changed", { id = id })
+
+    -- Also log to the auto-core ring + maybe-toast (gated). The pub/sub
+    -- topic is for inter-plugin coupling; the log entry is for the
+    -- audit trail + user-facing toast routing. Two different surfaces;
+    -- both worth firing.
+    logger.notifyIf("dbase.connection.changed",
+      ("dbase: active connection → %s"):format(id),
+      { component = "dbase.events",
+        fields    = { conn_id = id } })
   end)
 
   -- ── call_state_changed → dbase.call:state_changed (+ terminal) ──
@@ -138,27 +147,64 @@ function M.attach()
       to = to_state,
     })
 
-    -- Terminal-state derived events.
+    -- Terminal-state derived events. Each fires BOTH:
+    --   1. `events.publish(...)` — auto-core pub/sub topic for
+    --      inter-plugin coupling (subscribers see the structured
+    --      payload).
+    --   2. `logger.notifyIf(...)` — auto-core log ring entry +
+    --      user-gated toast. The ring captures every terminal call
+    --      event for audit/debug; the toast fires iff the user has
+    --      enabled it via `:AutoFinderLogEvent notify
+    --      dbase.call.<event>`. `dbase.call.failed` is the strong
+    --      candidate for default-on once a sensible default policy
+    --      surfaces.
+    --
+    -- Toast messages truncate `query` / `err` to ~80 chars so the
+    -- toast stays readable; the structured `fields` table carries
+    -- the full untruncated values for the ring entry.
+    local function truncate(s, n)
+      if type(s) ~= "string" or #s <= n then return s end
+      return s:sub(1, n - 1) .. "…"
+    end
+
     local terminal = terminal_topic_for_state(to_state)
     if terminal == "dbase.call:started" then
+      local query = call.query or ""
       events.publish(terminal, {
         call_id = call_id,
         conn_id = conn_id,
-        query = call.query or "",
+        query   = query,
       })
+      logger.notifyIf("dbase.call.started",
+        ("dbase: query started — %s"):format(truncate(query, 80)),
+        { component = "dbase.events",
+          fields    = { call_id = call_id, conn_id = conn_id, query = query } })
     elseif terminal == "dbase.call:completed" then
+      local duration_ms = type(call.time_taken_us) == "number"
+        and math.floor(call.time_taken_us / 1000) or nil
       events.publish(terminal, {
-        call_id = call_id,
-        conn_id = conn_id,
-        duration_ms = type(call.time_taken_us) == "number"
-          and math.floor(call.time_taken_us / 1000) or nil,
+        call_id     = call_id,
+        conn_id     = conn_id,
+        duration_ms = duration_ms,
       })
+      logger.notifyIf("dbase.call.completed",
+        duration_ms
+          and ("dbase: query completed in %dms"):format(duration_ms)
+          or  "dbase: query completed",
+        { component = "dbase.events",
+          fields    = { call_id = call_id, conn_id = conn_id, duration_ms = duration_ms } })
     elseif terminal == "dbase.call:failed" then
+      local err = call.error or to_state
       events.publish(terminal, {
         call_id = call_id,
         conn_id = conn_id,
-        err = call.error or to_state,
+        err     = err,
       })
+      logger.notifyIf("dbase.call.failed",
+        ("dbase: query failed — %s"):format(truncate(tostring(err), 80)),
+        { component = "dbase.events",
+          level     = "error",
+          fields    = { call_id = call_id, conn_id = conn_id, err = err } })
     end
   end)
 

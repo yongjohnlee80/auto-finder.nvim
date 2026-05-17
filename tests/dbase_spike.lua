@@ -452,6 +452,39 @@ else
     failed_payload and failed_payload.err == "syntax near 'bogus'",
     failed_payload and ("got err=" .. tostring(failed_payload.err)) or "no hit")
 
+  -- notifyIf adoption probe: the bridge now ALSO writes to the
+  -- auto-core ring via `auto-finder.log.notifyIf` so terminal call
+  -- events surface in `:AutoCoreLog`. The earlier synthetic call_state_changed
+  -- triggers above produced one entry per terminal-state transition;
+  -- match by component + message substring (auto-core's ring entry
+  -- doesn't surface the `event` arg as a top-level field — it's
+  -- carried by the format prefix in the formatted line).
+  do
+    local entries = require("auto-core").log.recent(200)
+    local function find_one(needle)
+      for _, e in ipairs(entries) do
+        if e.component == "auto-finder.dbase.events"
+            and type(e.message) == "string"
+            and e.message:find(needle, 1, true) then
+          return e
+        end
+      end
+    end
+    local failed_entry    = find_one("query failed")
+    local started_entry   = find_one("query started")
+    local completed_entry = find_one("query completed")
+    local connection_entry = find_one("active connection")
+    ok("notifyIf wrote dbase.call.failed to the auto-core ring",
+      failed_entry ~= nil,
+      failed_entry and "" or "no matching ring entry")
+    ok("notifyIf wrote dbase.call.started to the auto-core ring",
+      started_entry ~= nil)
+    ok("notifyIf wrote dbase.call.completed to the auto-core ring",
+      completed_entry ~= nil)
+    ok("notifyIf wrote dbase.connection.changed to the auto-core ring",
+      connection_entry ~= nil)
+  end
+
   core.events.unsubscribe(h_conn)
   core.events.unsubscribe(h_call)
 end
