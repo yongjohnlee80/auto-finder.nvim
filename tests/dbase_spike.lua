@@ -21,19 +21,25 @@ local plugin_root = vim.fn.fnamemodify(
 local nvim_plugins_root = vim.fn.fnamemodify(plugin_root, ":h:h")
 
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
--- Prefer the sibling `dbase-events` worktree of auto-core when present
--- (it carries the six `dbase.*` topic registrations slice 3 added);
--- fall back to `main` and then the lazy install. Listed first wins
--- because we prepend.
+-- `runtimepath:prepend(p)` puts `p` at position 1, so the LAST
+-- prepend wins (per the lua-nvim-plugin-development convention).
+-- List the LEAST-canonical fallbacks FIRST and the most-canonical
+-- (dbase-events worktree carrying the six `dbase.*` topics + ADR
+-- 0021 Phase 1 logging) LAST so it ends up at position 1 on the
+-- rtp. Without this, the lazy install of auto-core wins and a
+-- pre-Phase-1 (v0.1.9) log.lua silently swallows `opts.event` /
+-- `opts.fields` sentinel keys — surfaced 2026-05-16 when the
+-- dbase smoke's event_type assertion came back nil despite the
+-- code being correct against the worktree's auto-core.
 for _, p in ipairs({
-  plugin_root,
-  nvim_plugins_root .. "/auto-core.nvim/dbase-events",
-  nvim_plugins_root .. "/auto-core.nvim/main",
-  nvim_plugins_root .. "/nvim-dbee",
-  LAZY .. "/auto-core.nvim",
-  LAZY .. "/nvim-dbee",
-  LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
+  LAZY .. "/nui.nvim",
+  LAZY .. "/nvim-dbee",
+  LAZY .. "/auto-core.nvim",
+  nvim_plugins_root .. "/nvim-dbee",
+  nvim_plugins_root .. "/auto-core.nvim/main",
+  nvim_plugins_root .. "/auto-core.nvim/dbase-events",
+  plugin_root,
 }) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:prepend(p)
@@ -452,13 +458,15 @@ else
     failed_payload and failed_payload.err == "syntax near 'bogus'",
     failed_payload and ("got err=" .. tostring(failed_payload.err)) or "no hit")
 
-  -- notifyIf adoption probe: the bridge now ALSO writes to the
-  -- auto-core ring via `auto-finder.log.notifyIf` so terminal call
-  -- events surface in `:AutoCoreLog`. The earlier synthetic call_state_changed
-  -- triggers above produced one entry per terminal-state transition;
-  -- match by component + message substring (auto-core's ring entry
-  -- doesn't surface the `event` arg as a top-level field — it's
-  -- carried by the format prefix in the formatted line).
+  -- Logging adoption probe. Two distinct paths now feed the ring:
+  --
+  --   • log.error    — for dbase.call.failed. ERROR level toasts
+  --                    unconditionally per the auto-family-logging
+  --                    convention (level-semantics table).
+  --   • log.notifyIf — for dbase.call.started / completed /
+  --                    connection.changed. INFO level + gated toast.
+  --
+  -- Verify each entry lands with the right component + level.
   do
     local entries = require("auto-core").log.recent(200)
     local function find_one(needle)
@@ -470,13 +478,20 @@ else
         end
       end
     end
-    local failed_entry    = find_one("query failed")
-    local started_entry   = find_one("query started")
-    local completed_entry = find_one("query completed")
+    local failed_entry     = find_one("query failed")
+    local started_entry    = find_one("query started")
+    local completed_entry  = find_one("query completed")
     local connection_entry = find_one("active connection")
-    ok("notifyIf wrote dbase.call.failed to the auto-core ring",
-      failed_entry ~= nil,
-      failed_entry and "" or "no matching ring entry")
+    ok("dbase.call.failed wrote an ERROR ring entry (log.error path)",
+      failed_entry ~= nil
+        and (failed_entry.level_name == "ERROR" or failed_entry.level == 1),
+      failed_entry
+        and ("got level_name=" .. tostring(failed_entry.level_name))
+        or "no matching ring entry")
+    ok("dbase.call.failed entry carries event_type=dbase.call.failed",
+      failed_entry and failed_entry.event_type == "auto-finder.dbase.call.failed",
+      failed_entry and ("got event_type=" .. tostring(failed_entry.event_type))
+        or "no entry")
     ok("notifyIf wrote dbase.call.started to the auto-core ring",
       started_entry ~= nil)
     ok("notifyIf wrote dbase.call.completed to the auto-core ring",

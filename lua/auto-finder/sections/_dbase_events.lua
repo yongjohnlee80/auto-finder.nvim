@@ -200,11 +200,19 @@ function M.attach()
         conn_id = conn_id,
         err     = err,
       })
-      logger.notifyIf("dbase.call.failed",
+      -- ERROR level toasts unconditionally per the auto-family-logging
+      -- convention. No notifyIf gating here — a failed query is
+      -- something the user needs to see, not an opt-in event.
+      --
+      -- `event` is passed FULLY-QUALIFIED here because `auto-finder.log`
+      -- only auto-prefixes via the notifyIf path; the level functions
+      -- forward opts straight through. (Worth surfacing as a wrapper
+      -- consistency follow-up — auto-prefixing on level functions
+      -- would let callers stay namespace-aware everywhere.)
+      logger.error("dbase.events",
         ("dbase: query failed — %s"):format(truncate(tostring(err), 80)),
-        { component = "dbase.events",
-          level     = "error",
-          fields    = { call_id = call_id, conn_id = conn_id, err = err } })
+        { event  = "auto-finder.dbase.call.failed",
+          fields = { call_id = call_id, conn_id = conn_id, err = err } })
     end
   end)
 

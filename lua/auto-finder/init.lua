@@ -48,19 +48,16 @@ function M.setup(user_opts)
     log.register_events({
       "scan.started",
       "scan.completed.slow",
-      -- dbase section (auto-finder.dbase.*) — surface dbee query and
-      -- connection lifecycle through the same toast-routing surface
-      -- the rest of the family uses. All five record to the ring
-      -- unconditionally (audit trail); toast firing is gated by the
-      -- user's `:AutoFinderLogEvent notify <event>` subscription.
-      -- `dbase.call.failed` and `dbase.setup.failed` are the strong
-      -- toast candidates — surfacing them is what makes the dbase
-      -- section behave like a first-class auto-family surface.
+      -- dbase section (auto-finder.dbase.*) — opt-in toast events
+      -- for informational dbee lifecycle. ERROR-class failures
+      -- (`dbase.call.failed`, `dbase.setup.failed`) are NOT in this
+      -- list because `log.error(...)` toasts by default per the
+      -- auto-family-logging convention's level-semantics table
+      -- (ERROR → vim.notify toast + ring). Only events the user
+      -- might WANT to silence belong here; failures always toast.
       "dbase.connection.changed",
       "dbase.call.started",
       "dbase.call.completed",
-      "dbase.call.failed",
-      "dbase.setup.failed",
     })
   end
 
