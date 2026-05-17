@@ -924,6 +924,85 @@ do
   layout.close_all()
 end
 
+-- ───────────────────── 6e. cross-panel exclusion (lector PR1 must-fix) ─
+-- Companion panes must NEVER mount into another auto-core panel
+-- (e.g. auto-agents). Stub a second window with the canonical
+-- `w:auto_core_panel_name` marker set to a non-"auto-finder" value
+-- and verify ensure_editor() does not pick it as the editor target,
+-- even when it is the alt-window.
+print("\n[6e] cross-panel exclusion — auto-agents-style panel is off-limits")
+do
+  local layout = require("auto-finder.sections._dbase_layout")
+
+  -- Tear down anything left from [6d].
+  layout.close_all()
+
+  if af.state.panel_winid == nil then af.open(true) end
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+  local panel_winid = af.state.panel_winid
+
+  -- Stub a second "panel" window carrying the canonical marker set to
+  -- "auto-agents" (rightbelow vsplit so it lands beside the panel).
+  -- `:vsplit` from the auto-finder panel would inherit its winfixbuf +
+  -- panel-owner-marked buffer and trip auto-core's leak guard, so do
+  -- the same eventignore + scratch-buf dance the layout module does
+  -- internally for create_editor_window. End state: a non-panel
+  -- editor window stamped with `auto_core_panel_name = "auto-agents"`
+  -- so it looks like the auto-agents panel for is_panel() purposes.
+  local saved_ei = vim.o.eventignore
+  vim.o.eventignore = "all"
+  local stub
+  pcall(function()
+    vim.api.nvim_set_current_win(panel_winid)
+    vim.cmd("rightbelow vsplit")
+    stub = vim.api.nvim_get_current_win()
+    vim.api.nvim_set_option_value("winfixbuf", false, { win = stub })
+    local b = vim.api.nvim_create_buf(false, true)
+    vim.bo[b].buftype  = "nofile"
+    vim.bo[b].swapfile = false
+    vim.api.nvim_win_set_buf(stub, b)
+  end)
+  vim.o.eventignore = saved_ei
+  vim.api.nvim_win_set_var(stub, "auto_core_panel_name", "auto-agents")
+
+  -- Create a genuine editor-area window for the layout to prefer.
+  vim.cmd("rightbelow vnew")
+  local real_editor = vim.api.nvim_get_current_win()
+
+  -- Make the stub the alt-window so find_editor_window's alt-path
+  -- would pick it if exclusion were too narrow. The alt-window in vim
+  -- is the *previous* current window; visit stub, then return to real
+  -- editor. After this, `:winnr("#")` resolves to the stub.
+  pcall(vim.api.nvim_set_current_win, stub)
+  pcall(vim.api.nvim_set_current_win, real_editor)
+  local alt_winid = vim.fn.win_getid(vim.fn.winnr("#"))
+  ok("[6e.1] stub auto-agents window is the alt-window",
+    alt_winid == stub,
+    string.format("alt=%s stub=%s", tostring(alt_winid), tostring(stub)))
+
+  local editor_winid = layout.ensure_editor()
+  ok("[6e.2] ensure_editor returned a valid winid",
+    editor_winid and vim.api.nvim_win_is_valid(editor_winid),
+    "got " .. tostring(editor_winid))
+  ok("[6e.3] ensure_editor did NOT pick the stub auto-agents panel",
+    editor_winid ~= stub,
+    string.format("editor=%s stub=%s", tostring(editor_winid), tostring(stub)))
+  ok("[6e.4] ensure_editor did NOT pick the auto-finder panel",
+    editor_winid ~= panel_winid)
+  ok("[6e.5] stub auto-agents panel is still valid + still marked",
+    stub and vim.api.nvim_win_is_valid(stub)
+      and vim.w[stub].auto_core_panel_name == "auto-agents")
+
+  layout.close_all()
+  if stub and vim.api.nvim_win_is_valid(stub) then
+    pcall(vim.api.nvim_win_close, stub, true)
+  end
+  if real_editor and vim.api.nvim_win_is_valid(real_editor) then
+    pcall(vim.api.nvim_win_close, real_editor, true)
+  end
+end
+
 -- ───────────────────── 7. report ───────────────────────────────────────
 print("\n──────────────────────────────────────────────")
 print(string.format("Phase 0a spike: %d passed, %d failed, %d skipped",

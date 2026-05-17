@@ -33,22 +33,29 @@ local M = {
   _call_log_winid = nil,  ---@type integer|nil
 }
 
----Is `winid` the auto-finder panel? Detected via the marker that
----auto-core.ui.panel stamps (`w:auto_finder_panel = 1`). Avoids a
----direct dependency on the section's own _panel field.
+---Is `winid` an auto-core panel of any kind? Auto-core panels are a
+---family-wide primitive — auto-finder owns its column, auto-agents
+---owns the right-side terminal/admin panel, and future plugins may
+---register more. Every such panel carries `w:auto_core_panel_name`
+---(canonical) and may also carry the legacy `w:auto_finder_panel = 1`
+---marker for the auto-finder-specific panel. dbase companion tiles
+---must NEVER mount into any of these — replacing e.g. the
+---auto-agents agent terminal with dbee's editor tile would break
+---the panel ownership contract.
 ---@param winid integer
 ---@return boolean
 local function is_panel(winid)
   if not vim.api.nvim_win_is_valid(winid) then return false end
-  return vim.w[winid].auto_finder_panel == 1
-    or vim.w[winid].auto_core_panel_name == "auto-finder"
+  if vim.w[winid].auto_finder_panel == 1 then return true end
+  local name = vim.w[winid].auto_core_panel_name
+  return type(name) == "string" and name ~= ""
 end
 
 ---Find a usable editor-area window — any window that is NOT
----auto-finder's panel and isn't itself a dbee tile we already own.
+---an auto-core panel and isn't itself a dbee tile we already own.
 ---Prefers the most-recently-current matching window (vim's `#`
 ---alt-window) so the editor lands where the user was last working.
----Returns nil if no such window exists (only the panel is open).
+---Returns nil if no such window exists (only panels are open).
 ---@return integer|nil
 local function find_editor_window()
   -- Prefer the alt-window (previous window) if it qualifies. This is
@@ -73,17 +80,34 @@ local function find_editor_window()
   return nil
 end
 
+---Find the auto-finder panel specifically (not any auto-core panel).
+---Used by `create_editor_window` to know which panel to split from
+---when only panels are visible — the dbase drawer lives in the
+---auto-finder panel, so splitting from it lands the editor in the
+---editor area adjacent to the drawer.
+---@return integer|nil
+local function find_auto_finder_panel()
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_is_valid(w)
+        and (vim.w[w].auto_finder_panel == 1
+          or vim.w[w].auto_core_panel_name == "auto-finder") then
+      return w
+    end
+  end
+  return nil
+end
+
 ---Create a fresh editor-area window when none qualifies (the user
 ---has only the panel open, e.g. `nvim .` then closed all other
----splits). vsplit to the right of the panel.
+---splits). vsplit to the right of the auto-finder panel.
 ---@return integer winid
 local function create_editor_window()
-  -- Focus the panel briefly so the split lands right of it; the
-  -- vsplit then becomes the new current window, which we capture.
-  local panel = nil
-  for _, w in ipairs(vim.api.nvim_list_wins()) do
-    if is_panel(w) then panel = w; break end
-  end
+  -- Focus the auto-finder panel briefly so the split lands right of
+  -- it; the vsplit then becomes the new current window, which we
+  -- capture. Other auto-core panels (e.g. auto-agents) are NOT
+  -- valid split anchors — the dbase drawer lives in auto-finder's
+  -- panel, so the editor area should land beside that one.
+  local panel = find_auto_finder_panel()
   if panel and vim.api.nvim_win_is_valid(panel) then
     pcall(vim.api.nvim_set_current_win, panel)
     -- Splitting from the panel is delicate because:
