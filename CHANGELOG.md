@@ -2,6 +2,59 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.20] — 2026-05-17 — Files panel refreshes on external git state (ADR 0025 Phase 3)
+
+Closes the long-standing bug where the `files` section's git
+decorators (`M` / `A` / `??` / staged column) stayed stale after any
+git mutation performed outside nvim — terminal `git add` /
+`git commit` / `git checkout` / `git reset`. Root cause was a
+refresh-trigger gap on the panel side; the auto-core side of the fix
+shipped in `auto-core@v0.1.19` (ADR 0025 Phase 1, new
+`auto-core.git.watch` module + `core.git.state:changed` topic). This
+release lands the consumer-side wire-up.
+
+### Changed
+
+- **`lua/auto-finder/sections/_neotree.lua` — `setup_live_refresh`**
+  now opens an `auto-core.git.watch` handle on the cwd's `.git/`
+  plumbing alongside the existing `fs.watch` working-tree handle,
+  and adds a third `events.subscribe("core.git.state:changed", …)`
+  filtered by exact `repo_root` match against the section's watched
+  root. Calls the same `schedule_refresh()` coalescer the existing
+  subscriptions use. Handles are stopped+restarted by the existing
+  `worktree:switched` cycle through `_stop_fs_watch` /
+  `_ensure_fs_watch` — no new lifecycle concept.
+
+### Soft-dep contract
+
+Gated on `auto-core ≥ v0.1.19` via a capability probe
+(`type(core.git.watch.start) == "function"`). Older auto-core pins
+get the existing working-tree refresh + worktree-switch behavior
+unchanged; only the `.git/`-side refresh requires the new surface.
+
+### Tests
+
+Section [14b] of `tests/smoke.lua` adds 9 assertions: capability
+probe, handle present after focus, normalized-root match, synthetic
+`core.git.state:changed` for the watched repo triggers
+`manager.refresh`, unrelated `repo_root` does NOT refresh, malformed
+payload (missing `repo_root`) is ignored safely, and
+`_stop_fs_watch` clears both handles. The smoke harness also got a
+small precedence fix so the workspace `main` and active feature-
+branch worktrees of `auto-core.nvim` win the rtp race over the
+LAZY-installed copy — necessary for the new wire-up to exercise the
+just-shipped auto-core surface. Suite green at 232 passed / 0 failed.
+
+### Versioning
+
+Patch within `v0.2.x` per `auto-core-maintenance`-style additive-only
+discipline. Linear descendant of `v0.2.19` after that branch
+(`feat/dbase-conn`) was merged into `main` ahead of this release —
+satisfies `git merge-base --is-ancestor v0.2.19 v0.2.20` so
+`lazy.nvim` consumers on `version = "^0.2.0"` upgrade without
+losing v0.2.19's `dbase` work. Autovim consumer caret `^0.2.0`
+already covers.
+
 ## [v0.2.19] — 2026-05-17 — `dbase`: in-panel wizard prompts, full type list, and connection-id healing
 
 ### Fixed

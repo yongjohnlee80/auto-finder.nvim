@@ -24,10 +24,22 @@ local M = {}
 -- absent → silently skipped (auto-finder still works, just without
 -- auto-refresh — the prior behavior).
 --
+-- ADR 0025 extension: alongside the working-tree fs.watch, also
+-- open an `auto-core.git.watch` handle on the cwd's `.git/`
+-- plumbing and subscribe to `core.git.state:changed`. Closes the
+-- refresh-trigger gap on external `git add`/`commit`/`checkout`/
+-- `reset` — those mutate `.git/` only, and `auto-core.fs.watch`
+-- excludes `/.git/` by design. The git.watch surface is gated by
+-- an additional capability check (`core.git.watch.start`) so the
+-- fs-watch path still works if a consumer pins an auto-core
+-- version older than v0.1.19.
+--
 -- Per-section state:
---   section._fs_watch_handle   active watcher handle (or nil)
---   section._fs_watch_root     dir the handle is rooted at
---   section._fs_subscribed     events subscription wired? (one-shot)
+--   section._fs_watch_handle      active fs.watch handle (or nil)
+--   section._fs_watch_root        dir the fs.watch handle is rooted at
+--   section._git_watch_handle     active git.watch handle (or nil)
+--   section._git_watch_root       repo_root the git.watch is rooted at
+--   section._fs_subscribed        events subscription wired? (one-shot)
 local LIVE_REFRESH_DEBOUNCE_MS = 150  -- collapse refresh storms
 
 local function require_core()
@@ -39,6 +51,19 @@ local function require_core()
     return nil
   end
   return core
+end
+
+---True if auto-core ships the v0.1.19+ `git.watch` surface used by
+---the ADR 0025 wire-up. Soft-dep — older auto-core still delivers
+---working-tree refresh via fs.watch + worktree:switched; only the
+---`.git/`-side refresh requires this.
+---@param core table
+---@return boolean
+local function has_git_watch(core)
+  return type(core.git) == "table"
+      and type(core.git.watch) == "table"
+      and type(core.git.watch.start) == "function"
+      and type(core.git.watch.stop) == "function"
 end
 
 ---Wire fs-watch + refresh hooks onto `section`. Mutates `section`:
@@ -129,6 +154,11 @@ local function setup_live_refresh(section, source)
     -- — the user may be inspecting a side directory and doesn't
     -- want the panel to re-anchor every time. The semantic
     -- worktree-switch is the right boundary.
+    --
+    -- `_ensure_fs_watch` and `_stop_fs_watch` handle BOTH the
+    -- working-tree fs.watch and (when auto-core ≥ v0.1.19) the
+    -- `.git/`-plumbing git.watch — the switch handler doesn't need
+    -- to manage them separately.
     core.events.subscribe("worktree:switched", function()
       vim.schedule(function()
         if section._stop_fs_watch then section._stop_fs_watch() end
@@ -136,27 +166,81 @@ local function setup_live_refresh(section, source)
         reanchor_to_cwd()
       end)
     end)
+
+    -- ADR 0025 — `.git/`-plumbing mutations published by
+    -- `auto-core.git.watch`. The auto-core side ships from v0.1.19;
+    -- if a consumer pins an older auto-core, this topic is simply
+    -- never published and the callback is a no-op subscription.
+    -- Filter to events whose `repo_root` covers the section's
+    -- current cwd — the same git_dir can host multiple linked
+    -- worktrees and we only want to refresh when the event belongs
+    -- to the one this panel is rendering.
+    core.events.subscribe("core.git.state:changed", function(payload, _topic)
+      if type(payload) ~= "table" or type(payload.repo_root) ~= "string" then
+        return
+      end
+      local watched = section._git_watch_root
+      if not watched then return end
+      -- Exact match on the watched repo_root: git.watch is started
+      -- per-cwd, so the only payloads that reach us with our own
+      -- watched root are the ones for this section's worktree. A
+      -- prefix check would over-trigger when sibling worktrees
+      -- share a common_dir prefix.
+      if payload.repo_root ~= watched then return end
+      schedule_refresh()
+    end)
   end
 
   function section._ensure_fs_watch()
     ensure_subscribed()
     local cwd = vim.fn.getcwd()
     if section._fs_watch_handle and section._fs_watch_root == cwd then
-      return
+      -- fs.watch is already current. If git.watch is also current
+      -- (or unavailable), we're done. If we're missing only the
+      -- git.watch (e.g. cwd was previously non-git, now is), fall
+      -- through to the start-from-scratch path below.
+      if not has_git_watch(core) then return end
+      if section._git_watch_root == cwd then return end
     end
+    -- Stop any stale handles before starting fresh ones. Stopping
+    -- twice is harmless; stop is idempotent and pcall-guarded.
     if section._fs_watch_handle then
       pcall(core.fs.watch.stop, section._fs_watch_handle)
       section._fs_watch_handle = nil
+      section._fs_watch_root   = nil
     end
+    if section._git_watch_handle then
+      pcall(core.git.watch.stop, section._git_watch_handle)
+      section._git_watch_handle = nil
+      section._git_watch_root   = nil
+    end
+
+    -- Working-tree watcher (existing behavior, unchanged).
     local h, err = core.fs.watch.start(cwd, { recursive = true })
     if h then
       section._fs_watch_handle = h
       section._fs_watch_root   = cwd
     else
-      -- Soft-fail: log + continue. The section still works without
-      -- auto-refresh.
       require("auto-finder.log").debug("sections._neotree",
         "fs.watch.start failed for '" .. cwd .. "': " .. tostring(err))
+    end
+
+    -- ADR 0025 — `.git/`-plumbing watcher. Soft-deps on
+    -- auto-core ≥ v0.1.19. If cwd isn't a git repo, the auto-core
+    -- side returns nil + err; we soft-fail and leave the git.watch
+    -- state nil so the subscription callback short-circuits.
+    if has_git_watch(core) then
+      local gh, gerr = core.git.watch.start(cwd)
+      if gh then
+        section._git_watch_handle = gh
+        section._git_watch_root   = gh.repo_root  -- normalized cwd
+      else
+        -- Most common reason: cwd isn't in a git repo. Debug-level
+        -- because that's a routine condition (e.g. opening
+        -- auto-finder in a non-repo directory), not an error.
+        require("auto-finder.log").debug("sections._neotree",
+          "git.watch.start failed for '" .. cwd .. "': " .. tostring(gerr))
+      end
     end
   end
 
@@ -165,6 +249,11 @@ local function setup_live_refresh(section, source)
       pcall(core.fs.watch.stop, section._fs_watch_handle)
       section._fs_watch_handle = nil
       section._fs_watch_root   = nil
+    end
+    if section._git_watch_handle then
+      pcall(core.git.watch.stop, section._git_watch_handle)
+      section._git_watch_handle = nil
+      section._git_watch_root   = nil
     end
   end
 end

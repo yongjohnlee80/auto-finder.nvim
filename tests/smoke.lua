@@ -19,17 +19,25 @@ local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 local plugins_root = vim.fn.fnamemodify(plugin_root, ":h:h")
 for _, p in ipairs({
   plugin_root,
-  -- auto-core soft-dep: when present, enables Phase 4b live-refresh
-  -- in the files section AND the help-overlay path. We list both
-  -- candidate worktrees so the smoke exercises whichever auto-core
-  -- branch is currently active. `comms-1` is listed LAST so that —
-  -- when it exists — its runtimepath prepend wins over `main`,
-  -- letting the suite validate ADR 0021 Phase 1's surface
-  -- (`core_log.events`, `notify`, `notifyIf`) against the wrapper.
-  plugins_root .. "/auto-core.nvim/main",
+  -- auto-core soft-dep: enables Phase 4b live-refresh in the files
+  -- section AND the help-overlay path. Order matters because each
+  -- `rtp:prepend(p)` pushes p to the FRONT — so the LAST entry in
+  -- this list ends up first on the runtimepath and wins `require`.
+  -- LAZY is listed FIRST among auto-core candidates so the
+  -- workspace `main` (and any feature-branch worktree below)
+  -- overrides it. Rationale: dev work happens on the worktree;
+  -- LAZY is a fallback for when the workspace doesn't carry an
+  -- auto-core checkout at all.
   LAZY .. "/auto-core.nvim",
   LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
+  plugins_root .. "/auto-core.nvim/main",
+  -- Active feature-branch worktrees. Each entry, when its dir
+  -- exists, wins over `main` (last-prepend-wins). Past entries
+  -- like `comms-1` (ADR 0021 Phase 1 work) lived here; the
+  -- current entry is `git-watch` (ADR 0025 Phase 1 — adds
+  -- `auto-core.git.watch`, exercised in smoke section 14b).
+  plugins_root .. "/auto-core.nvim/git-watch",
   plugins_root .. "/auto-core.nvim/comms-1",
 }) do
   if vim.fn.isdirectory(p) == 1 then
@@ -746,12 +754,112 @@ ok("out-of-root event does NOT trigger refresh", not saw_outside_refresh,
 
 manager_mod.refresh = orig_refresh
 
--- Tear-down.
+-- ─────────────────── 14b. auto-core git.watch wire-up (ADR 0025) ──────────────
+-- v0.2.20 integration: the same _ensure_fs_watch path also opens an
+-- auto-core.git.watch handle scoped to the cwd's .git/ plumbing,
+-- and the section subscribes to core.git.state:changed. Closes the
+-- stale-decoration gap on external git operations (terminal
+-- `git add`/`commit`/`checkout`/`reset`). Soft-deps on
+-- auto-core ≥ v0.1.19 — these assertions are skipped if the
+-- runtime auto-core is older.
+print("\n[14b] auto-core git.watch wire-up (files section)")
+if not (type(core.git) == "table" and type(core.git.watch) == "table"
+        and type(core.git.watch.start) == "function") then
+  print("  SKIP  auto-core.git.watch not present on rtp; pinned auto-core < v0.1.19")
+else
+  ok("auto-core.git.watch.start is callable",
+    type(core.git.watch.start) == "function")
+  ok("auto-core.git.watch.stop is callable",
+    type(core.git.watch.stop) == "function")
+
+  -- Re-open + re-focus to start fresh watchers (we tore both down).
+  -- Wait — we haven't torn down yet in the new ordering; check below.
+  -- Sanity: files_section still has its handles from section 14.
+  ok("git.watch handle present after focus(files)",
+    files_section._git_watch_handle ~= nil,
+    "handle=" .. tostring(files_section._git_watch_handle))
+  ok("git.watch root matches normalized cwd",
+    files_section._git_watch_root == files_section._git_watch_handle.repo_root,
+    string.format("root=%s handle.repo_root=%s",
+      tostring(files_section._git_watch_root),
+      tostring(files_section._git_watch_handle
+        and files_section._git_watch_handle.repo_root)))
+
+  -- Stub manager.refresh to capture firings driven by the git
+  -- subscription. (Section 14 already restored orig_refresh; rebind.)
+  local orig_refresh2 = manager_mod.refresh
+  local git_refresh_calls = {}
+  manager_mod.refresh = function(source_name, callback)
+    git_refresh_calls[#git_refresh_calls + 1] = source_name
+    if callback then pcall(callback) end
+  end
+
+  -- Synthetic publish with matching repo_root → expect refresh.
+  core.events.publish("core.git.state:changed", {
+    repo_root = files_section._git_watch_root,
+    git_dir   = files_section._git_watch_root .. "/.git",
+    kind      = "index",
+    path      = files_section._git_watch_root .. "/.git/index",
+  })
+  vim.wait(400, function()
+    for _, src in ipairs(git_refresh_calls) do
+      if src == "filesystem" then return true end
+    end
+    return false
+  end)
+  local saw_git_refresh = false
+  for _, src in ipairs(git_refresh_calls) do
+    if src == "filesystem" then saw_git_refresh = true; break end
+  end
+  ok("core.git.state:changed for our repo_root triggers manager.refresh",
+    saw_git_refresh,
+    "git_refresh_calls=" .. vim.inspect(git_refresh_calls))
+
+  -- Synthetic publish with a DIFFERENT repo_root → must NOT refresh.
+  git_refresh_calls = {}
+  core.events.publish("core.git.state:changed", {
+    repo_root = "/tmp/some-other-repo",
+    git_dir   = "/tmp/some-other-repo/.git",
+    kind      = "index",
+    path      = "/tmp/some-other-repo/.git/index",
+  })
+  vim.wait(250)
+  local saw_cross_refresh = false
+  for _, src in ipairs(git_refresh_calls) do
+    if src == "filesystem" then saw_cross_refresh = true end
+  end
+  ok("core.git.state:changed for unrelated repo_root does NOT refresh",
+    not saw_cross_refresh,
+    "git_refresh_calls=" .. vim.inspect(git_refresh_calls))
+
+  -- Missing repo_root field → must not crash, must not refresh.
+  git_refresh_calls = {}
+  core.events.publish("core.git.state:changed", {
+    git_dir = "/somewhere/.git",
+    kind    = "head",
+  })
+  vim.wait(250)
+  local saw_malformed_refresh = false
+  for _, src in ipairs(git_refresh_calls) do
+    if src == "filesystem" then saw_malformed_refresh = true end
+  end
+  ok("malformed core.git.state:changed payload is ignored safely",
+    not saw_malformed_refresh)
+
+  manager_mod.refresh = orig_refresh2
+end
+
+-- Tear-down. _stop_fs_watch clears BOTH the fs.watch handle (existing)
+-- and the git.watch handle (ADR 0025) when auto-core ≥ v0.1.19.
 files_section._stop_fs_watch()
-ok("_stop_fs_watch clears watcher handle",
+ok("_stop_fs_watch clears fs.watch handle",
   files_section._fs_watch_handle == nil)
-ok("_stop_fs_watch clears watcher root",
+ok("_stop_fs_watch clears fs.watch root",
   files_section._fs_watch_root == nil)
+ok("_stop_fs_watch clears git.watch handle",
+  files_section._git_watch_handle == nil)
+ok("_stop_fs_watch clears git.watch root",
+  files_section._git_watch_root == nil)
 
 -- ─────────── 15. auto-finder.log — wrapper over auto-core.log ──────────
 print("\n[15] auto-finder.log wrapper")
