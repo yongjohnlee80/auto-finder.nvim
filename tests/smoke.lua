@@ -32,13 +32,13 @@ for _, p in ipairs({
   LAZY .. "/nui.nvim",
   LAZY .. "/plenary.nvim",
   plugins_root .. "/auto-core.nvim/main",
-  -- Active feature-branch worktrees. Each entry, when its dir
-  -- exists, wins over `main` (last-prepend-wins). Past entries
-  -- like `comms-1` (ADR 0021 Phase 1 work) lived here; the
-  -- current entry is `git-watch` (ADR 0025 Phase 1 — adds
-  -- `auto-core.git.watch`, exercised in smoke section 14b).
-  plugins_root .. "/auto-core.nvim/git-watch",
-  plugins_root .. "/auto-core.nvim/comms-1",
+  -- Slot for an active feature-branch worktree, when one is in
+  -- flight. Each entry, when its dir exists, wins over `main`
+  -- (last-prepend-wins). Past entries like `comms-1` (ADR 0021
+  -- Phase 1) and `git-watch` (ADR 0025 Phase 1) lived here while
+  -- their work was unmerged; both have since landed on `main` so
+  -- the slot is intentionally empty. Add the next active feature
+  -- worktree here when one exists.
 }) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:prepend(p)
