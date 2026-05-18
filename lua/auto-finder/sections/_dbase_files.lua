@@ -34,6 +34,67 @@ local NS = "auto-finder.dbase"
 ---@type string
 local KEY_ACTIVE = "active_file"
 
+---Canonical dbee adapter aliases the admin REPL surfaces in its
+---`dbase conn add` type-picker. These are the aliases registered by
+---`nvim-dbee/dbee/adapters/*.go` — the list is hand-mirrored because
+---the adapter registry lives in the Go binary, not in dbee's Lua
+---surface. If dbee adds a backend, append it here; if it removes one,
+---drop it (otherwise `dbee.api.core.source_reload` will error on the
+---unknown type alias). Each name shown here is sufficient — aliases
+---like `pg`, `postgresql`, `mssql`, `duck`, `mongo`, `sqlite3` also
+---work upstream.
+---@type string[]
+M.TYPES = {
+  "postgres", "mysql", "sqlite", "bigquery", "redis", "mongodb",
+  "clickhouse", "databricks", "duckdb", "oracle", "redshift", "sqlserver",
+}
+
+---@private id charset matches dbee's `dbee.utils.random_string` so
+---auto-finder-generated ids are indistinguishable from ids written by
+---dbee's own `FileSource:create()`.
+local ID_CHARSET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890"
+
+---@private
+---@return string
+local function random_string()
+  local s = {}
+  for _ = 1, 10 do
+    local i = math.random(1, #ID_CHARSET)
+    s[#s + 1] = ID_CHARSET:sub(i, i)
+  end
+  return table.concat(s)
+end
+
+---@private Mirror dbee's `FileSource:create()` prefix so a file
+---written by our REPL is interchangeable with one written by dbee's
+---own create-connection path.
+---@return string
+local function gen_id()
+  return "file_source_/" .. random_string()
+end
+
+---@private Ensure every entry in `conns` has a non-empty `id` field.
+---Mutates in place; returns the list plus a boolean indicating
+---whether any entry was healed. dbee's `Handler:source_reload`
+---errors hard on id-less entries, so this runs at every boundary
+---where we write to disk or hand a list to dbee.
+---@param conns table[]
+---@return table[] conns, boolean changed
+local function ensure_ids(conns)
+  local changed = false
+  for _, c in ipairs(conns or {}) do
+    if type(c) == "table" and (type(c.id) ~= "string" or c.id == "") then
+      c.id = gen_id()
+      changed = true
+    end
+  end
+  return conns, changed
+end
+
+-- Exposed for tests; not part of the public surface.
+M._gen_id = gen_id
+M._ensure_ids = ensure_ids
+
 ---Resolve the dbase state directory under `stdpath("state")`. Created
 ---on first call. Mirrors auto-core's `stdpath("state") .. "/auto-core/"`
 ---convention.
@@ -151,6 +212,11 @@ end
 ---Swap the contents of `_active.json` to match the named file's
 ---contents, persist the active marker, and ask dbee to reload its
 ---FileSource. The user picks from `M.list()`.
+---
+---Heals id-less entries on the way through so a legacy file written
+---before id-generation landed (anything from v0.2.18) recovers
+---automatically: ids are assigned and written back to both the named
+---file (so the heal persists across future loads) and `_active.json`.
 ---@param name string
 ---@return string|nil basename, string|nil err
 function M.load(name)
@@ -161,6 +227,14 @@ function M.load(name)
   end
   local connections, read_err = M._read_json(path)
   if read_err then return nil, read_err end
+  local _, healed = ensure_ids(connections)
+  if healed then
+    -- Persist the heal back to the named file so we don't redo this
+    -- on the next load. Silently ignore write failure — the in-memory
+    -- list still has ids, and the active file write below is what
+    -- dbee actually reads.
+    M._write_json(path, connections)
+  end
   local write_ok, write_err = M._write_json(M.active_path(), connections)
   if not write_ok then return nil, write_err end
   M._set_active(vim.fs.basename(path):gsub("%.json$", ""))
@@ -214,10 +288,21 @@ function M.conn_add(spec)
   end
   local conns, read_err = M._read_json(M.active_path())
   if read_err then return false, read_err end
+  -- Heal pre-existing id-less entries before adding to the list so a
+  -- legacy v0.2.18 _active.json doesn't keep blocking dbee's
+  -- source_reload after the user's next `conn add`.
+  ensure_ids(conns)
   for _, existing in ipairs(conns) do
     if existing.name == spec.name then
       return false, "connection name already exists: " .. spec.name
     end
+  end
+  -- dbee's `Handler:source_reload` errors on id-less specs. Always
+  -- stamp our own id when the caller didn't supply one — matches
+  -- dbee's `FileSource:create()` prefix so the file is round-trip
+  -- compatible with anything dbee writes itself.
+  if type(spec.id) ~= "string" or spec.id == "" then
+    spec.id = gen_id()
   end
   conns[#conns + 1] = spec
   local ok, err = M._write_json(M.active_path(), conns)
@@ -280,9 +365,20 @@ end
 
 ---@private Ask dbee to re-read the pinned source. Soft-fails if dbee
 ---isn't loaded yet (the section may not have been focused; that's fine).
+---
+---Heals id-less entries in `_active.json` just in time — the user
+---may have a legacy file on disk written by v0.2.18, and dbee's
+---`Handler:source_reload` errors on id-less specs. This is cheap
+---(one read + at most one write) and idempotent once ids are present.
 function M._reload_dbee()
   local ok_setup, setup = pcall(require, "auto-finder.sections._dbase_setup")
   if not ok_setup or not setup.is_setup_done() then return end
+  local active = M.active_path()
+  local conns, read_err = M._read_json(active)
+  if not read_err then
+    local _, healed = ensure_ids(conns)
+    if healed then M._write_json(active, conns) end
+  end
   local ok_api, api = pcall(require, "dbee.api")
   if not ok_api or type(api) ~= "table" or type(api.core) ~= "table" then return end
   local ok, err = pcall(api.core.source_reload, ACTIVE_BASENAME)

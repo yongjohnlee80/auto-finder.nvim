@@ -1854,6 +1854,107 @@ ok("completion after 'dbase conn ' includes add/ls/rm",
   conn_set.add and conn_set.ls and conn_set.rm,
   "got " .. table.concat(conn_cands, ", "))
 
+-- [23n] conn_add stamps a dbee-compatible id on the spec so
+-- `Handler:source_reload` doesn't reject it. The user reported this
+-- as a `connection without an id: { name: "lm-unit-test", ... }`
+-- runtime error in v0.2.18.
+do
+  -- Fresh active file so we control its contents.
+  files._write_json(files.active_path(), {})
+  local add_ok2, add_err2 = files.conn_add({
+    name = "id-check", type = "postgres",
+    url = "postgres://u:p@h/db",
+  })
+  ok("conn_add succeeded", add_ok2, add_err2)
+  local got = files.connections()
+  ok("conn_add stamped a non-empty id on the new spec",
+    type(got[1]) == "table"
+      and type(got[1].id) == "string" and got[1].id ~= "",
+    "got " .. vim.inspect(got))
+  ok("stamped id matches dbee's file_source_/ prefix",
+    type(got[1].id) == "string"
+      and got[1].id:match("^file_source_/") ~= nil,
+    "got id=" .. tostring(got[1] and got[1].id))
+end
+
+-- [23o] legacy id-less entries get healed when `load` swaps them
+-- into _active.json. Simulates a v0.2.18 file on disk.
+do
+  local legacy_path = files.state_dir() .. "/legacy.json"
+  local f = assert(io.open(legacy_path, "w+"))
+  f:write('[{"name":"legacy-pg","type":"postgres","url":"postgres://u:p@h/db"}]')
+  f:close()
+  local _, load_err2 = files.load("legacy")
+  ok("load 'legacy' succeeds", load_err2 == nil, load_err2)
+  local active = files.connections()
+  ok("load healed id-less legacy entry in _active.json",
+    type(active[1]) == "table"
+      and type(active[1].id) == "string" and active[1].id ~= "",
+    "got " .. vim.inspect(active))
+  -- Heal was persisted back to the named file too. vim's
+  -- json_encode emits `"id": "..."` with a space after the colon,
+  -- so we match against the value pattern, not the whole key+value.
+  local f2 = assert(io.open(legacy_path, "r"))
+  local body = f2:read("*a"); f2:close()
+  ok("heal persisted back into legacy.json",
+    body:find('"file_source_/', 1, true) ~= nil,
+    "legacy.json body: " .. body)
+end
+
+-- [23p] _ensure_ids is idempotent: a second pass over an already-
+-- healed list reports no changes.
+do
+  local healed = { { name = "a", type = "postgres", url = "u",
+                     id = "file_source_/abcdefghij" } }
+  local _, changed = files._ensure_ids(healed)
+  ok("ensure_ids reports no change when ids already present", not changed)
+end
+
+-- [23q] `dbase conn add` REPL verb starts the wizard rather than
+-- popping vim.fn.input(): after dispatching, the wizard module
+-- reports active and feeding the three steps drives conn_add to
+-- completion. The buffer was created earlier in [23l].
+do
+  local wizard = require("auto-finder.panel.wizard")
+  if wizard.is_active() then wizard.cancel() end  -- defensive
+  -- Ensure there's an active file so the new connection persists.
+  files._write_json(files.active_path(), {})
+  admin.dispatch("dbase conn add")
+  ok("dbase conn add activated the wizard", wizard.is_active())
+  wizard.feed("smoke-conn")  -- step 1: name
+  wizard.feed("postgres")    -- step 2: type
+  wizard.feed("postgres://u:p@h/db")  -- step 3: url
+  ok("wizard completed (no longer active)", not wizard.is_active())
+  local got2 = files.connections()
+  local found = false
+  for _, c in ipairs(got2) do
+    if c.name == "smoke-conn" then
+      found = (type(c.id) == "string" and c.id ~= "")
+      break
+    end
+  end
+  ok("wizard's conn_add wrote the new connection with an id", found,
+    "got " .. vim.inspect(got2))
+end
+
+-- [23r] DBASE_TYPES exposes every dbee-supported alias the REPL
+-- offers (no trailing "..." — the user complained about that in
+-- v0.2.18). Verify the list shape and that postgres is in it.
+do
+  ok("DBASE_TYPES is a non-empty list",
+    type(files.TYPES) == "table" and #files.TYPES >= 10,
+    "got " .. tostring(#(files.TYPES or {})))
+  local has_pg, has_mongo, has_sqlserver = false, false, false
+  for _, t in ipairs(files.TYPES) do
+    if t == "postgres" then has_pg = true end
+    if t == "mongodb" then has_mongo = true end
+    if t == "sqlserver" then has_sqlserver = true end
+  end
+  ok("TYPES covers postgres + mongodb + sqlserver",
+    has_pg and has_mongo and has_sqlserver,
+    "got " .. table.concat(files.TYPES or {}, ", "))
+end
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

@@ -467,21 +467,39 @@ local function dispatch(input)
         if #names == 0 then
           emit({ "dbase load: no files to load (try `dbase new <name>` first)" })
         else
-          emit({ "dbase files:" })
-          for _, n in ipairs(names) do emit({ "    " .. n }) end
-          vim.schedule(function()
-            local pick = vim.fn.input("dbase load: ")
-            if pick == nil or pick == "" then
-              emit({ "dbase load: cancelled" })
-              return
-            end
-            local basename, err = files.load(pick)
-            if err then
-              emit({ "dbase load: " .. err })
-            else
-              emit({ "dbase: loaded " .. basename })
-            end
-          end)
+          -- In-panel wizard pick. Listing the available names as the
+          -- banner keeps the conversation in the REPL — no separate
+          -- cmdline prompt at the bottom of the editor.
+          local banner = { "dbase load: pick a file" }
+          for _, n in ipairs(names) do banner[#banner + 1] = "    " .. n end
+          local valid = {}
+          for _, n in ipairs(names) do valid[n] = true end
+          require("auto-finder.panel.wizard").start({
+            name = "dbase.load",
+            banner = banner,
+            steps = {
+              {
+                field = "name",
+                prompt = "file name",
+                choices = names,
+                validate = function(v)
+                  if not v or v == "" then return false, "name is required" end
+                  if not valid[v] and not valid[v:gsub("%.json$", "")] then
+                    return false, "no such file: " .. v
+                  end
+                  return true
+                end,
+              },
+            },
+            on_complete = function(values)
+              local basename, err = files.load(values.name)
+              if err then
+                emit({ "dbase load: " .. err })
+              else
+                emit({ "dbase: loaded " .. basename })
+              end
+            end,
+          }, emit)
         end
       else
         local basename, err = files.load(name)
@@ -496,29 +514,57 @@ local function dispatch(input)
       local action = toks[3]
 
       if action == "add" then
-        vim.schedule(function()
-          local cname = vim.fn.input("conn name: ")
-          if cname == nil or cname == "" then
-            emit({ "dbase conn add: cancelled (no name)" })
-            return
-          end
-          local ctype = vim.fn.input("type (postgres|mysql|sqlite|bigquery|redis|mongodb|...): ")
-          if ctype == nil or ctype == "" then
-            emit({ "dbase conn add: cancelled (no type)" })
-            return
-          end
-          local curl = vim.fn.input("url: ")
-          if curl == nil or curl == "" then
-            emit({ "dbase conn add: cancelled (no url)" })
-            return
-          end
-          local ok, err = files.conn_add({ name = cname, type = ctype, url = curl })
-          if not ok then
-            emit({ "dbase conn add: " .. err })
-          else
-            emit({ "dbase: added connection '" .. cname .. "' (" .. ctype .. ")" })
-          end
-        end)
+        -- Multi-step prompt runs inside the admin REPL via the wizard
+        -- (mirrors auto-agents' agent.add). Cancelling with <C-c>
+        -- preserves the partial state on screen as history.
+        local DBASE_TYPES = require("auto-finder.sections._dbase_files").TYPES
+        local type_set = {}
+        for _, t in ipairs(DBASE_TYPES) do type_set[t] = true end
+        require("auto-finder.panel.wizard").start({
+          name = "dbase.conn.add",
+          banner = "dbase conn add — Enter blank to cancel any step.",
+          steps = {
+            {
+              field = "name",
+              prompt = "connection name",
+              validate = function(v)
+                if not v or v == "" then return false, "name is required" end
+                return true
+              end,
+            },
+            {
+              field = "type",
+              prompt = "type",
+              choices = DBASE_TYPES,
+              default = "postgres",
+              validate = function(v)
+                if not type_set[v] then
+                  return false, "type must be one of " .. table.concat(DBASE_TYPES, "|")
+                end
+                return true
+              end,
+            },
+            {
+              field = "url",
+              prompt = "url",
+              validate = function(v)
+                if not v or v == "" then return false, "url is required" end
+                return true
+              end,
+            },
+          },
+          on_complete = function(values)
+            local ok, err = files.conn_add({
+              name = values.name, type = values.type, url = values.url,
+            })
+            if not ok then
+              emit({ "dbase conn add: " .. err })
+            else
+              emit({ "dbase: added connection '" .. values.name
+                .. "' (" .. values.type .. ")" })
+            end
+          end,
+        }, emit)
 
       elseif action == "ls" then
         local conns, read_err = files.connections()
@@ -595,8 +641,28 @@ function M.get_or_create_buffer()
     -- Defer so vim has time to add the new prompt line. Without this,
     -- emit() would land between the user's input and the new prompt
     -- rather than above it.
-    vim.schedule(function() dispatch(input) end)
+    vim.schedule(function()
+      local wizard = require("auto-finder.panel.wizard")
+      if wizard.is_active() then
+        wizard.feed(input or "")
+      else
+        dispatch(input)
+      end
+    end)
   end)
+
+  -- <C-c> aborts an active wizard so multi-step prompts (dbase conn
+  -- add, dbase load) can be cancelled in-panel. Falls through to the
+  -- prompt buffer's default ^C when no wizard is running.
+  vim.keymap.set({ "i", "n" }, "<C-c>", function()
+    local wizard = require("auto-finder.panel.wizard")
+    if wizard.is_active() then
+      wizard.cancel()
+    else
+      local termcoded = vim.api.nvim_replace_termcodes("<C-c>", true, false, true)
+      vim.api.nvim_feedkeys(termcoded, "n", false)
+    end
+  end, { buffer = bufnr, silent = true })
 
   -- Banner: written above the auto-generated prompt line.
   local banner = {
