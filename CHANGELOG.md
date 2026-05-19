@@ -2,6 +2,59 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.23] — 2026-05-18 — Buffers panel: `:badd`'d files now visible + user-story smoke
+
+> Note on numbering: v0.2.21 and v0.2.22 shipped between my branch-out
+> and tag time (`guard nvim_set_current_win against closed window` and
+> `defer scan.started toast behind MAPPING_TOAST_MS` respectively).
+> Both are tagged on origin but don't have CHANGELOG entries here —
+> the maintainer can add them retrospectively if desired. This commit
+> linearly descends from v0.2.22 and bumps to v0.2.23 to preserve a
+> monotonic tag sequence for lazy.nvim caret consumers.
+
+
+Fixes a latent bug where files added to the buffer list via `:badd`
+(or any path that leaves a buffer `listed=true, loaded=false` —
+session restore, LSP workspace registration, scripted buffer adds)
+were silently dropped from the auto-finder buffers panel despite
+showing up in `:ls`. Surfaced this session via `:badd`'ing five
+random files; the panel rendered only the legitimate terminal
+buffers, with the file buffers nowhere to be found.
+
+### Fixed
+
+- **`lua/auto-finder/neotree/defaults.lua` — `buffers.show_unloaded`
+  default flipped from `false` → `true`.** The bundled `add_buffer`
+  filter at `buffers/lib/items.lua:60-62` short-circuits on
+  `is_loaded or state.show_unloaded`. With `show_unloaded = false`
+  (the upstream default we inherited), listed-but-unloaded buffers
+  were excluded. The auto-finder panel's expected role is "every
+  buffer my session knows about", not "every buffer I've actually
+  visited" — flipping the default brings the panel's contents in
+  line with `:ls` semantics. Consumers who want the upstream-strict
+  behavior can opt back in via
+  `cfg.neo_tree.buffers.show_unloaded = false`.
+
+### Added
+
+- **Section [24] `tests/smoke.lua` — user-story coverage for the
+  buffers panel.** Seven assertions: `:edit` shows up, **`:badd`
+  shows up (regression guard)**, `:bd` removes, terminal buffers
+  group, out-of-cwd buffer appears, `/tmp` bucket as a depth=1
+  sibling group.
+- **Section [25] — user-story coverage for the files panel.** Two
+  assertions: writefile-creates-new-file → tree shows it; delete →
+  tree drops it.
+- **Section [26] — user-story coverage for the repos panel.** Two
+  assertions: focus mounts a live state; tree has ≥1 node for the
+  current workspace.
+
+### Versioning
+
+Patch within v0.2.x. Linear descendant of v0.2.20. Suite green at
+**259 passed, 0 failed** (was 244 → +15). Autovim consumer caret
+`^0.2.0` already covers.
+
 ## [v0.2.20] — 2026-05-17 — Files panel refreshes on external git state (ADR 0025 Phase 3)
 
 Closes the long-standing bug where the `files` section's git

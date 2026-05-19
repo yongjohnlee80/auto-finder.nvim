@@ -633,8 +633,17 @@ local config = {
       leave_dirs_open = false, -- `false` closes auto expanded dirs, such as with `:Neotree reveal`
     },
     group_empty_dirs = true,  -- when true, empty directories will be grouped together
-    show_unloaded = false,    -- When working with sessions, for example, restored but unfocused buffers
-                              -- are mark as "unloaded". Turn this on to view these unloaded buffer.
+    show_unloaded = true,     -- auto-finder fork default: TRUE. Matches `:ls` semantics — every
+                              -- listed buffer is visible in the panel regardless of whether
+                              -- it's been loaded into a window yet. Without this, buffers added
+                              -- via `:badd` (or restored from a session, or registered by an
+                              -- LSP workspace) silently disappear because `add_buffer` in
+                              -- `buffers/lib/items.lua` short-circuits on `is_loaded or
+                              -- state.show_unloaded`. Upstream default was `false` — we flip
+                              -- it because the auto-finder panel's expected role is "every
+                              -- buffer my session knows about", not "every buffer I've actually
+                              -- visited." Consumers who want the upstream-strict behavior can
+                              -- override via `cfg.neo_tree.buffers.show_unloaded = false`.
     terminals_first = false,  -- when true, terminals will be listed before file buffers
     window = {
       mappings = {

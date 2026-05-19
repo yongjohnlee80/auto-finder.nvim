@@ -2172,6 +2172,281 @@ print("\n[25] v0.2.22 — deferred scan.started load toast")
   af_log.notifyIf = orig_notifyIf
 end)()
 
+-- ───────────────────────── 26. user-stories — buffers panel (v0.2.23) ─────────────────────────
+--
+-- End-to-end user-story coverage for the buffers section, exercising
+-- the actual tree contents (not just refresh plumbing). Section [19]
+-- already covers BufAdd autocmd → refresh; this section covers the
+-- USER-OBSERVABLE outcome: "when I :badd / :edit a file, does it
+-- appear in the panel? when I :bd it, does it disappear?".
+--
+-- Regression context: v0.2.20 the buffers panel silently dropped any
+-- `:badd`'d file because the bundled `add_buffer` filter at
+-- `buffers/lib/items.lua:60-62` evaluates `is_loaded or
+-- state.show_unloaded` and our fork's defaults.lua:636 had
+-- `show_unloaded = false`. v0.2.21 flips the default to `true` so
+-- listed-but-unloaded buffers (`:badd`, session restore, lsp
+-- workspace registration) match `:ls` semantics. This section is
+-- the regression guard.
+print("\n[24] user-stories — buffers panel")
+;(function()
+local mgr = require("auto-finder.neotree.sources.manager")
+
+-- Helper: count buffers-source nodes by id in the panel's state.
+local function buffers_tree_node_ids()
+  local out = {}
+  for _, s in ipairs(mgr._get_all_states()) do
+    if s.name == "buffers" and s.tree
+        and s.winid == af.state.panel_winid then
+      for id in pairs(s.tree.nodes.by_id or {}) do
+        out[id] = true
+      end
+    end
+  end
+  return out
+end
+local function buffers_tree_has_file(path)
+  local ids = buffers_tree_node_ids()
+  -- Neo-tree's file-items create_item indexes by absolute path.
+  return ids[path] == true
+end
+
+-- Make sure buffers is the active section + the autocmd-refresh is wired.
+if not require("auto-finder.sections")._by_name["buffers"] then
+  af.slot_add("buffers")
+end
+local _buf_slot = require("auto-finder.sections")._by_name["buffers"]
+af.focus(_buf_slot)
+vim.wait(150)
+
+-- Probe files under cwd (so `is_subpath(state.path, file)` matches).
+local _probe_dir = vim.fn.getcwd() .. "/tests/_user_story_probes"
+vim.fn.mkdir(_probe_dir, "p")
+local _probe_edit = _probe_dir .. "/edit_probe.txt"
+local _probe_badd = _probe_dir .. "/badd_probe.txt"
+do
+  for _, p in ipairs({ _probe_edit, _probe_badd }) do
+    local fh = io.open(p, "w"); fh:write("probe"); fh:close()
+  end
+end
+
+-- ── User-story: `:edit <file>` shows up in the panel ────────────
+ok("baseline: edit_probe NOT yet in tree",
+  not buffers_tree_has_file(_probe_edit))
+local _prev_win = vim.api.nvim_get_current_win()
+-- Open in a side split so we don't clobber the panel.
+vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_edit))
+vim.api.nvim_set_current_win(_prev_win)
+af._refresh_buffers_now(af.state.panel_winid)
+vim.wait(200, function() return buffers_tree_has_file(_probe_edit) end, 20)
+ok("user-story: `:edit <file>` adds the file to the buffers tree",
+  buffers_tree_has_file(_probe_edit))
+
+-- ── User-story: `:badd <file>` shows up in the panel (THE REGRESSION GUARD) ──
+ok("baseline: badd_probe NOT yet in tree",
+  not buffers_tree_has_file(_probe_badd))
+vim.cmd("badd " .. vim.fn.fnameescape(_probe_badd))
+-- `:badd` doesn't load the buffer — `nvim_buf_is_loaded == false`.
+-- Pre-v0.2.21, the panel filtered this out via show_unloaded=false.
+-- v0.2.21 flips the default; the file should appear.
+local _badd_bufnr = vim.fn.bufnr(_probe_badd)
+ok("badd probe registered as a listed-but-unloaded buffer (pre-state)",
+  vim.fn.buflisted(_badd_bufnr) == 1
+    and vim.api.nvim_buf_is_loaded(_badd_bufnr) == false,
+  string.format("listed=%s loaded=%s",
+    tostring(vim.fn.buflisted(_badd_bufnr) == 1),
+    tostring(vim.api.nvim_buf_is_loaded(_badd_bufnr))))
+af._refresh_buffers_now(af.state.panel_winid)
+vim.wait(200, function() return buffers_tree_has_file(_probe_badd) end, 20)
+ok("user-story: `:badd <file>` adds the file to the buffers tree (regression guard)",
+  buffers_tree_has_file(_probe_badd),
+  "this was the v0.2.21 regression — show_unloaded=false was filtering :badd'd buffers")
+
+-- ── User-story: `:bd <bufnr>` removes the file from the panel ────
+local _edit_bufnr = vim.fn.bufnr(_probe_edit)
+pcall(vim.api.nvim_buf_delete, _edit_bufnr, { force = true })
+af._refresh_buffers_now(af.state.panel_winid)
+vim.wait(200, function() return not buffers_tree_has_file(_probe_edit) end, 20)
+ok("user-story: `:bd <bufnr>` removes the file from the buffers tree",
+  not buffers_tree_has_file(_probe_edit))
+
+-- ── User-story: terminal buffers appear under the Terminals group ──
+-- :terminal opens a real PTY; in headless mode that can fail on
+-- platforms without a usable shell. Use a guarded pcall + skip.
+local _term_ok = pcall(function()
+  vim.cmd("topleft split | terminal echo smoke-term-probe")
+end)
+if _term_ok then
+  vim.wait(150)
+  vim.api.nvim_set_current_win(_prev_win)
+  af._refresh_buffers_now(af.state.panel_winid)
+  vim.wait(200)
+  -- Find any node with type=terminal in the tree.
+  local saw_terminal = false
+  for _, s in ipairs(mgr._get_all_states()) do
+    if s.name == "buffers" and s.tree
+        and s.winid == af.state.panel_winid then
+      for _, node in pairs(s.tree.nodes.by_id or {}) do
+        if node.type == "terminal" then saw_terminal = true; break end
+      end
+    end
+  end
+  ok("user-story: a `:terminal` buffer appears in the buffers tree",
+    saw_terminal)
+else
+  ok("user-story: terminal buffer test (skipped — :terminal failed in headless)",
+    true, "headless terminal launch failed; not a regression of the fix")
+end
+
+-- ── User-story: out-of-cwd buffer appears as a sibling root group ──
+-- v0.2.14 added the "out-of-cwd buffers bucket as sibling root
+-- folders" behavior. /tmp is reliably outside cwd in any test env.
+local _ext_probe = "/tmp/auto_finder_external_probe.txt"
+do
+  local fh = io.open(_ext_probe, "w"); fh:write("ext probe"); fh:close()
+end
+vim.cmd("badd " .. vim.fn.fnameescape(_ext_probe))
+af._refresh_buffers_now(af.state.panel_winid)
+vim.wait(200, function() return buffers_tree_has_file(_ext_probe) end, 20)
+ok("user-story: out-of-cwd `:badd`'d file appears in the buffers tree",
+  buffers_tree_has_file(_ext_probe))
+-- Also verify the /tmp bucket exists as a top-level node (v0.2.14
+-- external-root behavior).
+local saw_tmp_bucket = false
+for _, s in ipairs(mgr._get_all_states()) do
+  if s.name == "buffers" and s.tree
+      and s.winid == af.state.panel_winid then
+    for id, node in pairs(s.tree.nodes.by_id or {}) do
+      if id == "/tmp" and node.type == "directory"
+          and node:get_depth() == 1 then
+        saw_tmp_bucket = true; break
+      end
+    end
+  end
+end
+ok("user-story: /tmp bucket appears as a top-level (depth=1) sibling group",
+  saw_tmp_bucket)
+
+-- ── Cleanup ──────────────────────────────────────────────────────
+for _, b in ipairs(vim.api.nvim_list_bufs()) do
+  local nm = vim.api.nvim_buf_get_name(b)
+  if nm == _probe_edit or nm == _probe_badd or nm == _ext_probe then
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+end
+pcall(os.remove, _probe_edit)
+pcall(os.remove, _probe_badd)
+pcall(os.remove, _ext_probe)
+pcall(vim.fn.delete, _probe_dir, "d")
+end)()
+
+-- ───────────────────────── 27. user-stories — files panel (v0.2.23) ─────────────────────────
+print("\n[27] user-stories — files panel")
+;(function()
+local mgr = require("auto-finder.neotree.sources.manager")
+
+local function fs_tree_node_ids()
+  local out = {}
+  for _, s in ipairs(mgr._get_all_states()) do
+    if s.name == "filesystem" and s.tree
+        and s.winid == af.state.panel_winid then
+      for id in pairs(s.tree.nodes.by_id or {}) do
+        out[id] = true
+      end
+    end
+  end
+  return out
+end
+local function fs_tree_has(path) return fs_tree_node_ids()[path] == true end
+
+-- Focus the files section + give the watcher a tick to settle.
+local _files_slot = require("auto-finder.sections")._by_name["files"]
+af.focus(_files_slot)
+vim.wait(200)
+
+-- Top-level under cwd so the default-expanded root sees it on
+-- refresh. A nested subdir would require the panel to have already
+-- expanded the path before the watcher fires, which is fragile.
+local _probe_file = vim.fn.getcwd() .. "/_user_story_fs_probe.txt"
+local _probe_dir = nil
+
+-- ── User-story: writefile creates a new file → tree reflects it ──
+-- Force a synchronous manager.refresh after the write to keep the
+-- test deterministic against fs.watch's libuv timing. (The
+-- production path goes through the auto-core.fs.watch debounce
+-- + schedule, which we cover end-to-end at section [14]; this
+-- assertion is about the panel's tree-content correctness after a
+-- refresh, not the watcher's plumbing.)
+ok("baseline: created_probe NOT in tree yet",
+  not fs_tree_has(_probe_file))
+vim.fn.writefile({ "probe" }, _probe_file)
+require("auto-finder.neotree.sources.manager").refresh("filesystem")
+vim.wait(500, function() return fs_tree_has(_probe_file) end, 25)
+ok("user-story: writefile under cwd → files panel shows the new file",
+  fs_tree_has(_probe_file),
+  "tree should contain " .. _probe_file .. " after refresh")
+
+-- ── User-story: delete the file → tree drops it ──────────────────
+pcall(os.remove, _probe_file)
+require("auto-finder.neotree.sources.manager").refresh("filesystem")
+vim.wait(500, function() return not fs_tree_has(_probe_file) end, 25)
+ok("user-story: deleting a file → files panel drops it",
+  not fs_tree_has(_probe_file))
+
+-- ── Cleanup ──
+pcall(os.remove, _probe_file)
+end)()
+
+-- ───────────────────────── 28. user-stories — repos panel (v0.2.23) ─────────────────────────
+-- The repos source's contents come from auto-core.git.worktree's
+-- workspace-roots registry, not from a public auto-finder API (no
+-- `auto-finder.repos.add` exists; only `root()` / `load()` /
+-- `worktree_paths()`). The actionable user-story for this section
+-- is: "I mount the repos panel, focus it, and see at least one
+-- top-level node corresponding to a registered workspace".
+print("\n[28] user-stories — repos panel")
+;(function()
+local mgr = require("auto-finder.neotree.sources.manager")
+local af_repos = require("auto-finder").repos
+ok("auto-finder.repos surface exists",
+  type(af_repos) == "table" and type(af_repos.root) == "function")
+
+-- Mount the repos section.
+if not require("auto-finder.sections")._by_name["repos"] then
+  af.slot_add("repos")
+end
+local _repos_slot = require("auto-finder.sections")._by_name["repos"]
+af.focus(_repos_slot)
+vim.wait(250)
+
+-- Find the repos state for the panel window.
+local _repos_state
+for _, s in ipairs(mgr._get_all_states()) do
+  if s.name == "auto-finder-repos"
+      and s.winid == af.state.panel_winid then
+    _repos_state = s; break
+  end
+end
+ok("user-story: focusing repos section mounts an auto-finder-repos state",
+  _repos_state ~= nil
+    and _repos_state.tree ~= nil,
+  "expected a live state with tree for the panel winid")
+
+-- The repos tree builds a top-level node for the current workspace
+-- root (the cwd's bare-parent OR the cwd's git_root). Assert ≥1 node
+-- in the tree — this is the "I see my repos when I open the panel"
+-- user-story. The current cwd IS a git worktree, so this is reliable.
+local _repos_nodes = 0
+if _repos_state and _repos_state.tree then
+  for _ in pairs(_repos_state.tree.nodes.by_id or {}) do
+    _repos_nodes = _repos_nodes + 1
+  end
+end
+ok("user-story: repos panel shows ≥1 node for the current workspace",
+  _repos_nodes >= 1,
+  "expected ≥1 node, got " .. _repos_nodes)
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
