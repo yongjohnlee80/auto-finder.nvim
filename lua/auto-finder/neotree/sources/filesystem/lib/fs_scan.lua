@@ -17,6 +17,17 @@ local ignored = require("auto-finder.neotree.sources.filesystem.lib.ignored")
 
 local M = {}
 
+-- v0.2.22: threshold (ms) for the deferred "mapping …" load toast.
+-- Fast scans complete before the timer fires and stay silent; only
+-- scans still running after this surface as a toast. Exposed on M
+-- so tests + power-users can override at runtime.
+M.MAPPING_TOAST_MS = 500
+
+-- Pre-v0.2.22 SLOW_MS, retained: threshold for the post-hoc
+-- "mapped X (N.Ns)" completion toast (`scan.completed.slow`).
+-- Independent of MAPPING_TOAST_MS; subscribe to either or both.
+M.SLOW_THRESHOLD_MS = 1000
+
 --- how many entries to load per readdir
 local ENTRIES_BATCH_SIZE = 1000
 
@@ -694,29 +705,24 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
     -- walks directories + builds items; the toast tells the user
     -- the freeze is auto-finder, not a hung editor.
     --
-    -- ADR 0021 Phase 2 wiring (commit "wire fs_scan instrumentation
-    -- to auto-finder.log"):
-    --   - `notifyIf("scan.started", …)`            always rings,
-    --                                              toasts iff user
-    --                                              subscribed
-    --   - `notifyIf("scan.completed.slow", …)`     fired ONLY when
-    --                                              the scan crossed
-    --                                              the slow threshold;
-    --                                              this is the toast
-    --                                              users typically
-    --                                              subscribe to
+    -- ADR 0021 Phase 2 + v0.2.22:
+    --   - `scan.started` toast is DEFERRED by `M.MAPPING_TOAST_MS`
+    --     so the user only sees "mapping …" when a scan is actually
+    --     blocking. Sub-threshold scans complete first and cancel
+    --     the timer, leaving the editor quiet. Toggle via
+    --     `:AutoCoreLogEvent notify scan.started`.
+    --   - `scan.completed.slow` fires only when elapsed crosses the
+    --     same threshold; subscribe to get a post-hoc "took N.Ns"
+    --     toast.
     --   - `log.info("scan", "mapping completed", { fields = … })`
-    --                                              ring-only timing
-    --                                              record on every
-    --                                              scan (no toast,
-    --                                              no event hook)
+    --     ring-only timing record on every scan (no toast,
+    --     no event hook).
     --
     -- Both event-type strings are registered in init.lua setup()
     -- via `log.register_events({ "scan.started", "scan.completed.slow" })`.
     local root_path = state.path or "(unknown)"
     local short = vim.fn.fnamemodify(root_path, ":~")
     local start_ms = vim.uv.now()
-    local SLOW_MS = 1000
 
     -- Aliased as `af_log` to avoid shadowing the file-scoped
     -- `local log = require("auto-finder.neotree.log")` (the
@@ -726,11 +732,19 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
     local ok_log, af_log = pcall(require, "auto-finder.log")
     if not ok_log then af_log = nil end
 
+    -- Deferred toast: fire the user-visible "mapping …" toast only
+    -- if the scan is still running after MAPPING_TOAST_MS. The
+    -- completion callback below sets `scan_completed = true` to
+    -- suppress the toast for fast scans.
+    local scan_completed = false
     if af_log then
-      af_log.notifyIf("scan.started",
-        ("mapping %s…"):format(short),
-        { component = "scan",
-          fields    = { path = short } })
+      vim.defer_fn(function()
+        if scan_completed then return end
+        af_log.notifyIf("scan.started",
+          ("mapping %s…"):format(short),
+          { component = "scan",
+            fields    = { path = short } })
+      end, M.MAPPING_TOAST_MS)
     end
 
     -- Wrap the caller's callback so we can time the scan + emit
@@ -739,6 +753,7 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
     -- `job_complete` once the async/sync scan finishes.
     local original_cb = callback
     callback = function(...)
+      scan_completed = true
       local elapsed_ms = vim.uv.now() - start_ms
       if af_log then
         -- Always: unconditional ring record with structured timing.
@@ -746,7 +761,7 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
           fields = { path = short, elapsed_ms = elapsed_ms },
         })
         -- Slow path: separate event the user can subscribe to.
-        if elapsed_ms >= SLOW_MS then
+        if elapsed_ms >= M.SLOW_THRESHOLD_MS then
           af_log.notifyIf("scan.completed.slow",
             ("mapped %s (%.1fs)"):format(short, elapsed_ms / 1000),
             { component = "scan",

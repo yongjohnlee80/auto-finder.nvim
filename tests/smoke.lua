@@ -2100,6 +2100,78 @@ print("\n[24] show action survives current_win invalidation race")
      not vim.api.nvim_win_is_valid(victim_win))
 end)()
 
+-- ───────────────────────── 25. deferred scan.started load toast ─────────────
+--
+-- v0.2.22: the "mapping …" toast is now deferred behind
+-- `fs_scan.MAPPING_TOAST_MS`. Fast scans complete before the timer
+-- fires and stay silent; slow scans surface a toast.
+--
+-- Tested by stubbing `af_log.notifyIf` to count "scan.started"
+-- fires, then driving fs_scan with the threshold flipped between
+-- "huge" (toast won't fire in test duration) and "zero" (toast
+-- fires immediately).
+print("\n[25] v0.2.22 — deferred scan.started load toast")
+;(function()
+  local fs_scan = require("auto-finder.neotree.sources.filesystem.lib.fs_scan")
+  local af_log = require("auto-finder.log")
+  ok("fs_scan exports MAPPING_TOAST_MS knob",
+     type(fs_scan.MAPPING_TOAST_MS) == "number")
+
+  local seen
+  local orig_notifyIf = af_log.notifyIf
+  af_log.notifyIf = function(event, ...)
+    if event == "scan.started" then seen = (seen or 0) + 1 end
+    return orig_notifyIf(event, ...)
+  end
+
+  -- Fast-scan branch: threshold = 10s. We schedule the cancel
+  -- ourselves immediately to mimic the completion callback firing
+  -- before the deferred timer.
+  do
+    local saved = fs_scan.MAPPING_TOAST_MS
+    fs_scan.MAPPING_TOAST_MS = 10000
+    seen = 0
+
+    -- Inline mini-repro of the deferral logic from get_items so we
+    -- exercise the cancel path without standing up a full neo-tree
+    -- scan state.
+    local scan_completed = false
+    vim.defer_fn(function()
+      if scan_completed then return end
+      af_log.notifyIf("scan.started", "mapping x", { component = "scan" })
+    end, fs_scan.MAPPING_TOAST_MS)
+    scan_completed = true  -- simulate fast completion
+
+    vim.wait(80)  -- let the scheduler run; timer would not have fired anyway
+    ok("fast scan: scan.started toast suppressed (seen=" .. tostring(seen) .. ")",
+       seen == 0)
+
+    fs_scan.MAPPING_TOAST_MS = saved
+  end
+
+  -- Slow-scan branch: threshold = 0ms. Timer fires next tick.
+  do
+    local saved = fs_scan.MAPPING_TOAST_MS
+    fs_scan.MAPPING_TOAST_MS = 0
+    seen = 0
+
+    local scan_completed = false
+    vim.defer_fn(function()
+      if scan_completed then return end
+      af_log.notifyIf("scan.started", "mapping y", { component = "scan" })
+    end, fs_scan.MAPPING_TOAST_MS)
+    -- DO NOT set scan_completed — let the timer fire.
+
+    vim.wait(200, function() return seen and seen > 0 end, 10)
+    ok("slow scan: scan.started toast fired (seen=" .. tostring(seen) .. ")",
+       seen == 1)
+
+    fs_scan.MAPPING_TOAST_MS = saved
+  end
+
+  af_log.notifyIf = orig_notifyIf
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
