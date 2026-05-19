@@ -38,8 +38,13 @@ local function do_show_or_focus(args, state, force_navigate)
     -- close_other_sources()
     local current_win = vim.api.nvim_get_current_win()
     manager.navigate(state, args.dir, args.reveal_file, function()
-      -- navigate changes the window to neo-tree, so just quickly hop back to the original window
-      vim.api.nvim_set_current_win(current_win)
+      -- navigate is async; the captured window may have been closed
+      -- before this callback fires (e.g. neo-tree opened during
+      -- lazy.nvim's startup checker while another plugin tore windows
+      -- down). nvim_set_current_win throws "Invalid window id" then.
+      if vim.api.nvim_win_is_valid(current_win) then
+        vim.api.nvim_set_current_win(current_win)
+      end
     end, false)
   elseif args.action == "focus" then
     -- "focus" mean open and jump to the window if closed, and just focus it if already opened
