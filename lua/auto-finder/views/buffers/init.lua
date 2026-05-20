@@ -24,6 +24,14 @@ local section = require("auto-finder.shared.neotree").build_section({
   -- Refreshes come from neo-tree's own BufAdd / BufDelete event
   -- handlers (set up inside the bundled source's M.navigate path).
   live_refresh = false,
+  -- ADR 0026 Phase 6: subscribe to auto-finder.core.buffers:changed
+  -- (published by core's Buf*-autocmd cache) so the section
+  -- refreshes on the centralized buffer-list signal in addition
+  -- to neo-tree's internal autocmds. This is the snapshot-and-
+  -- subscribe migration target — Phase 7's mount contract will
+  -- consume snapshot_now directly; Phase 6 establishes the
+  -- subscription pathway.
+  core_refresh_topic = "auto-finder.core.buffers:changed",
 })
 
 -- v0.2.13 — dirty-bit consumer for the v0.2.11 gate.

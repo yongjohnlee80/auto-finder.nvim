@@ -375,6 +375,31 @@ function M.ensure_started(cfg)
     require("auto-finder.core.warm").start(cwd)
   end)
 
+  -- ── Phase 6: Buf* autocmd wiring → core.buffers cache ──
+  --
+  -- The buffers cache tracks every nvim buffer (listed +
+  -- unloaded). Subscribes via an augroup so re-arming from
+  -- ensure_started clears + recreates a single set of autocmds,
+  -- matching the dispose-first-then-resubscribe contract on the
+  -- auto-core events side. Each autocmd updates the cache and
+  -- publishes auto-finder.core.buffers:changed. Views can opt in
+  -- via shared.neotree.build_section's `core_refresh_topic` opt.
+  pcall(function()
+    require("auto-finder.core.buffers")._arm_autocmds()
+  end)
+
+  -- ── Phase 6: repos cache invalidation on worktree:switched ──
+  --
+  -- The translator already publishes auto-finder.core.repos:changed
+  -- on worktree:switched (Phase 3 sweep). Phase 6 adds a single
+  -- internal subscriber that drops core.repos's cache so the next
+  -- snapshot_now re-queries auto-finder.repos / worktree.nvim.
+  _sub("internal_repos", "auto-finder.core.repos:changed", function()
+    pcall(function()
+      require("auto-finder.core.repos").invalidate()
+    end)
+  end)
+
   M._started = true
   M._invalidated = false
 
@@ -407,6 +432,12 @@ function M.stop()
   local ok_w, watchers = pcall(require, "auto-finder.core.watchers")
   if ok_w and type(watchers.close_all) == "function" then
     watchers.close_all()
+  end
+  -- Phase 6: tear down the buffers augroup so a subsequent
+  -- ensure_started re-arms it cleanly (idempotency contract).
+  local ok_b, buffers = pcall(require, "auto-finder.core.buffers")
+  if ok_b and type(buffers._disarm_autocmds) == "function" then
+    buffers._disarm_autocmds()
   end
   M._started = false
 end

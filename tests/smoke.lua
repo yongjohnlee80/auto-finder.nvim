@@ -3439,6 +3439,208 @@ do
 end
 end)()
 
+-- ───────────────────────── 34. ADR 0026 Phase 6: core.buffers + core.repos ──
+-- ADR 0026 Phase 6: real implementations of core.buffers
+-- (Buf*-autocmd-driven cache) and core.repos (auto-finder.repos
+-- denormalized view). Buffers + repos views adopt the new
+-- `core_refresh_topic` opt on shared.neotree.build_section so
+-- they refresh on the centralized auto-finder.core.* signals.
+print("\n[34] ADR 0026 Phase 6 — core.buffers + core.repos")
+;(function()
+local core_buffers = require("auto-finder.core.buffers")
+local core_repos   = require("auto-finder.core.repos")
+local core_init    = require("auto-finder.core")
+local core_events  = require("auto-finder.core.events")
+
+-- core is already started from setup; assert the autocmd-cache
+-- pre-populated.
+core_init.ensure_started(af.state.config)
+vim.wait(20)
+
+-- ── core.buffers shape + cache ──
+local snap = core_buffers.snapshot_now()
+ok("core.buffers.snapshot_now returns { list, readiness }",
+  type(snap) == "table"
+    and type(snap.list) == "table"
+    and type(snap.readiness) == "string",
+  "got " .. vim.inspect(snap))
+
+-- The smoke session has buffers (the smoke file itself, any
+-- :edit'd probe files from earlier sections, …). Assert at least
+-- one entry — sanity check that the cache populated.
+ok("core.buffers cache has ≥1 entry after ensure_started",
+  #snap.list >= 1,
+  "got " .. #snap.list .. " entries")
+
+-- Buffer entries have the documented shape.
+local first = snap.list[1]
+ok("each buffer entry carries { bufnr, name, listed, loaded, modified, filetype, buftype }",
+  type(first.bufnr) == "number"
+    and type(first.name) == "string"
+    and type(first.listed) == "boolean"
+    and type(first.loaded) == "boolean"
+    and type(first.modified) == "boolean"
+    and type(first.filetype) == "string"
+    and type(first.buftype) == "string",
+  "first entry: " .. vim.inspect(first))
+
+-- core.buffers.get(bufnr) returns the entry directly.
+local g = core_buffers.get(first.bufnr)
+ok("core.buffers.get(bufnr) returns the entry",
+  g ~= nil and g.bufnr == first.bufnr,
+  "got " .. vim.inspect(g))
+
+-- ── Buf*-autocmd → translated event ──
+local fires = {}
+local h = core_events.subscribe("auto-finder.core.buffers:changed",
+  function(p) fires[#fires + 1] = p end)
+
+-- :badd a fresh file (avoids the panel-window winfixbuf collision
+-- that would block :edit at this point in the suite — the panel
+-- is mounted and current). :badd fires BufAdd without changing
+-- any window's buffer, which is exactly what core.buffers tracks.
+local probe = vim.fn.tempname()
+vim.fn.writefile({ "phase6 buffers probe" }, probe)
+vim.cmd("badd " .. vim.fn.fnameescape(probe))
+vim.wait(80, function() return #fires > 0 end)
+
+local saw_add = false
+for _, p in ipairs(fires) do
+  if p.kind == "add" or p.kind == "enter" then saw_add = true; break end
+end
+ok("Buf*-autocmd → auto-finder.core.buffers:changed fires on :edit",
+  saw_add,
+  "fires=" .. vim.inspect(fires))
+
+-- :bd should fire kind='remove'.
+local probe_bufnr = vim.fn.bufnr(probe)
+fires = {}
+if probe_bufnr > 0 then
+  vim.cmd("bd! " .. probe_bufnr)
+  vim.wait(80, function()
+    for _, p in ipairs(fires) do
+      if p.kind == "remove" then return true end
+    end
+    return false
+  end)
+  local saw_remove = false
+  for _, p in ipairs(fires) do
+    if p.kind == "remove" then saw_remove = true; break end
+  end
+  ok("BufDelete → auto-finder.core.buffers:changed fires kind='remove'",
+    saw_remove,
+    "fires=" .. vim.inspect(fires))
+end
+core_events.unsubscribe(h)
+pcall(vim.fn.delete, probe)
+
+-- ── core.repos shape ──
+local rsnap = core_repos.snapshot_now()
+ok("core.repos.snapshot_now returns { repos, readiness, root? }",
+  type(rsnap) == "table"
+    and type(rsnap.repos) == "table"
+    and type(rsnap.readiness) == "string",
+  "got " .. vim.inspect({ readiness = rsnap.readiness,
+    repos_count = #rsnap.repos, root = rsnap.root }))
+
+-- Each entry should be an absolute path string. The list MAY be
+-- empty if worktree.nvim isn't on the runtimepath, but the shape
+-- still holds.
+local all_strings = true
+for _, p in ipairs(rsnap.repos) do
+  if type(p) ~= "string" or p == "" then all_strings = false; break end
+end
+ok("each repo entry is a non-empty string",
+  all_strings,
+  "repos=" .. vim.inspect(rsnap.repos))
+
+-- core.repos.get(path) returns boolean.
+if rsnap.repos[1] then
+  ok("core.repos.get(known_path) returns true",
+    core_repos.get(rsnap.repos[1]) == true)
+end
+ok("core.repos.get(unknown_path) returns false",
+  core_repos.get("/this/path/definitely/does/not/exist") == false)
+
+-- ── translator: worktree:switched → core.repos.invalidate ──
+-- Publishing core.workspace_root:changed via worktree:switched
+-- (already wired by Phase 3 translator) fires
+-- auto-finder.core.repos:changed → core.repos.invalidate is
+-- subscribed via Phase 6's internal_repos slot in
+-- core.ensure_started, which drops the cache.
+local up = require("auto-core")
+core_repos._reset_for_tests()
+core_repos.snapshot_now()  -- populate
+ok("core.repos populates after snapshot_now",
+  core_repos._cached ~= nil)
+up.events.publish("worktree:switched", { new_root = "/tmp/phase6-probe" })
+vim.wait(50)
+ok("core.repos cache invalidated by auto-finder.core.repos:changed",
+  core_repos._cached == nil,
+  "cache still: " .. vim.inspect(core_repos._cached))
+
+-- Re-fetch so subsequent tests don't see a cold cache.
+core_repos.snapshot_now()
+
+-- ── views opt-in via core_refresh_topic ──
+-- buffers + repos view modules pass `core_refresh_topic` so
+-- shared.neotree.build_section wires the subscription. The
+-- section.refresh function is also exposed by the new opt path.
+local buffers_view = require("auto-finder.views.buffers")
+local repos_view   = require("auto-finder.views.repos")
+ok("buffers view declares core_refresh_topic = auto-finder.core.buffers:changed",
+  buffers_view._core_refresh_topic == "auto-finder.core.buffers:changed")
+ok("repos view declares core_refresh_topic = auto-finder.core.repos:changed",
+  repos_view._core_refresh_topic == "auto-finder.core.repos:changed")
+ok("buffers view exposes section.refresh (Phase 6 public refresh entry)",
+  type(buffers_view.refresh) == "function")
+ok("repos view exposes section.refresh",
+  type(repos_view.refresh) == "function")
+
+-- ── A1 grep: no view subscribes to upstream auto-core topics ──
+-- Re-run the Phase 4 grep specifically including the buffers +
+-- repos views (which the original grep DID cover, but we
+-- re-assert now that they have new code paths via
+-- core_refresh_topic).
+do
+  local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local s = f:read("*a"); f:close()
+    return s or ""
+  end
+  local function walk(dir, fn)
+    local h2 = vim.uv.fs_scandir(dir)
+    if not h2 then return end
+    while true do
+      local name, t = vim.uv.fs_scandir_next(h2)
+      if not name then break end
+      local p = dir .. "/" .. name
+      if t == "directory" then walk(p, fn)
+      elseif t == "file" and name:match("%.lua$") then fn(p)
+      end
+    end
+  end
+  local views_root = plugin_root .. "/lua/auto-finder/views"
+  local violations = {}
+  walk(views_root, function(path)
+    local content = read_file(path)
+    for forbidden in pairs({
+      ["\"core.file:"]       = true,
+      ["\"core.git.state:"]  = true,
+      ["\"worktree:"]        = true,
+    }) do
+      if content:find(forbidden, 1, true) then
+        violations[#violations + 1] = path .. " contains " .. forbidden
+      end
+    end
+  end)
+  ok("A1 (Phase 6 recheck): no view module subscribes to upstream topics",
+    #violations == 0,
+    "violations: " .. vim.inspect(violations))
+end
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

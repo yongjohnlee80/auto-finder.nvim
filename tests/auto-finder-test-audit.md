@@ -272,6 +272,54 @@ Then section [24] removed in `55c24ed`: **355 passed / 0 failed.**
 
 ---
 
+## Phase 6 — `core-buffers-repos` (2026-05-20, commit pending at audit-doc edit time)
+
+### Initial smoke delta: smoke crashed during section [34]
+
+The Phase 6 smoke fired `vim.cmd("edit " .. probe)` to test that
+`core.buffers` picks up new buffers via BufAdd. The command
+errored hard with:
+
+```
+E1513: Cannot switch buffer. 'winfixbuf' is enabled
+```
+
+… because by the time section [34] runs, the auto-finder panel
+window is the current window AND has `winfixbuf=true` (the
+panel-ownership marker per [[auto-core-panel-ownership]]). The
+`:edit` command tries to switch the current window's buffer to
+the new file's buffer, which `winfixbuf` blocks.
+
+### Failures
+
+#### F6.1 — section [34] crash: `:edit` can't switch panel buffer
+
+**Root cause.** Test fixture chose the wrong nvim command for
+the user-story under test. core.buffers tracks buffer-list
+mutations regardless of which window is current; the test
+needed a "add a buffer to the list" action, not "open this
+file in the current window." `:edit` does both — and the
+"open in current window" half collides with the panel's
+winfixbuf guard.
+
+**Remediation.** Switched the test from `:edit` to `:badd`.
+`:badd` fires `BufAdd` (which is what core.buffers subscribes
+to) without changing any window's buffer — exactly the
+contract core.buffers cares about.
+
+**Why this matters for future smokes.** Anywhere the smoke
+needs to add a probe buffer while the panel is mounted as the
+current window, use `:badd <path>`. If the test specifically
+needs an EDITED buffer (different from added-but-not-loaded),
+focus a non-panel window first via `vim.api.nvim_set_current_win`
+on a previously-opened editor window, then `:edit`.
+
+### Post-remediation smoke delta: **382 passed / 0 failed**
+
+(Phase 5 baseline 366/0 + 16 new Phase 6 asserts.)
+
+---
+
 ## Phase 5 — `core-git-state` (2026-05-20, commit `ac841ad`)
 
 ### Initial smoke delta: 365 passed / **1 failed**

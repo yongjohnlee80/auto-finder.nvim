@@ -23,4 +23,10 @@ return require("auto-finder.shared.neotree").build_section({
   name = "repos",
   description = "registered repos × git worktrees",
   source = "auto-finder-repos",
+  -- ADR 0026 Phase 6: subscribe to auto-finder.core.repos:changed
+  -- (published by core's translator on worktree:switched) so the
+  -- section refreshes on workspace-root changes through the
+  -- centralized signal. Phase 7's mount contract will consume
+  -- core.repos.snapshot_now directly.
+  core_refresh_topic = "auto-finder.core.repos:changed",
 })

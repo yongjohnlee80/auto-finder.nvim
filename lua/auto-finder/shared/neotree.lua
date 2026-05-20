@@ -517,6 +517,67 @@ function M.build_section(opts)
     end
   end
 
+  -- ── ADR 0026 Phase 6: core_refresh_topic opt ──
+  --
+  -- Views that don't subscribe to file/git events (buffers, repos)
+  -- can still hook a refresh against an arbitrary auto-finder.core.*
+  -- topic. Buffers passes `auto-finder.core.buffers:changed`; repos
+  -- passes `auto-finder.core.repos:changed`. The subscription is
+  -- one-shot (per Phase 4 reality — re-arm survives Phase 7's mount
+  -- contract); arm-on-focus so the auto-core subscription tables
+  -- re-pick up the callback after a bus reset / :Lazy reload.
+  if type(opts.core_refresh_topic) == "string" and opts.core_refresh_topic ~= "" then
+    local topic = opts.core_refresh_topic
+    section._core_refresh_topic = topic
+    section._core_refresh_subscribed = false
+
+    function section._arm_core_refresh_sub()
+      if section._core_refresh_subscribed then return end
+      local core = require_core()
+      if not core then return end
+      core.events.subscribe(topic, function(_payload, _t)
+        -- schedule_refresh is the same coalescer used by
+        -- live_refresh; we share its 150ms debounce + metrics:paint
+        -- emit. No extra per-event filter — buffers/repos events
+        -- are already cwd-scoped at the publisher, so any fire is
+        -- relevant to this section.
+        if section._bufnr and vim.api.nvim_buf_is_valid(section._bufnr) then
+          -- Reuse the closure declared in setup_live_refresh by
+          -- calling section.refresh (a public method we expose
+          -- below to drive the same path).
+          if type(section.refresh) == "function" then
+            section.refresh()
+          end
+        end
+      end)
+      section._core_refresh_subscribed = true
+    end
+
+    -- Public refresh entry — drives manager.refresh + the
+    -- metrics:paint emit. Available regardless of whether
+    -- live_refresh is on (so consumers can trigger a refresh
+    -- without going through the upstream event bus).
+    function section.refresh()
+      pcall(function()
+        require("auto-finder.neotree.sources.manager").refresh(source)
+      end)
+      pcall(function()
+        require("auto-finder.core.events").publish(
+          "auto-finder.core.metrics:paint", {
+            view = section.name or "unknown",
+            dur_ms = 0,  -- direct refresh path doesn't measure latency yet
+            generation = 0,
+          })
+      end)
+    end
+
+    local orig_on_focus2 = section.on_focus
+    section.on_focus = function(panel_winid, bufnr)
+      if orig_on_focus2 then orig_on_focus2(panel_winid, bufnr) end
+      section._arm_core_refresh_sub()
+    end
+  end
+
   return section
 end
 
