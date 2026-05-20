@@ -328,54 +328,44 @@ function M.setup(user_opts)
   -- stale.
   M.state.section_buffers = M._registry._bufs
 
-  -- Watchers keep M.state synced + drive panel side-effects on every
-  -- namespace mutation (admin REPL, future remote API, :checkhealth
-  -- probe, etc.). The panel:resize call is idempotent + cheap when
-  -- the panel is closed (auto-core stores user_width on the instance
-  -- and applies it at next open).
-  state_mod.watch_user_width(function(payload)
-    M.state.user_width = payload.new
-    if M._panel then
-      if payload.new then
-        M._panel:resize(payload.new)
-      else
-        M._panel:reset_width()
-      end
-    end
-    require("auto-finder.panel.host")._refresh_after_resize(M.state)
-  end)
-  state_mod.watch_last_section(function(payload)
-    M.state.section = payload.new
-  end)
+  -- ADR 0026 Phase 3: the previous inline `state_mod.watch_*`
+  -- subscribers are now armed inside `core.ensure_started` so
+  -- they're re-armable on bus reset. See the comment block further
+  -- down (immediately after the file-filter prefs hydration) for
+  -- the full lifecycle context. Watchers keep M.state synced +
+  -- drive panel side-effects on every namespace mutation (admin
+  -- REPL, future remote API, :checkhealth probe, etc.).
 
-  -- v0.2.0 step 4: subscribe to `worktree:switched` so the repos
-  -- panel rebases automatically when the active worktree changes.
-  -- Today the event is published only by direct `auto-core.git.
-  -- worktree` callers; once worktree.nvim migrates (the next
-  -- consumer in the family migration order), `<leader>gw` and
-  -- friends will fire it too.
-  require("auto-core").events.subscribe("worktree:switched",
-    function(_payload)
-      if not M._registry then return end
-      -- Find the repos section if enabled.
-      local repos_def
-      for _, s in ipairs(M._registry.sections) do
-        if s.name == "repos" then repos_def = s; break end
-      end
-      if not repos_def then return end
-      -- Drop the cached repos bufnr (fires on_close so neo-tree's
-      -- state cleanup runs). Mutate `_bufs` in place so the
-      -- `state.section_buffers` alias stays valid.
-      local b = M._registry._bufs[repos_def.number]
-      if b and vim.api.nvim_buf_is_valid(b) and repos_def.on_close then
-        pcall(repos_def.on_close, b)
-      end
-      M._registry._bufs[repos_def.number] = nil
-      -- Re-focus to remount immediately if repos is currently active.
-      if M._registry.active == repos_def.number then
-        pcall(function() M._registry:focus(repos_def.number) end)
-      end
-    end)
+  -- ADR 0026 Phase 3: the previous inline `worktree:switched`
+  -- subscriber (drop repos cached bufnr + re-focus) and the inline
+  -- state_mod watchers + the inline `core.workspace_root:changed`
+  -- reseed handlers have ALL been swept into
+  -- `core.ensure_started(cfg)` so they're re-armable on bus reset.
+  --
+  -- core.ensure_started subscribes to upstream auto-core topics,
+  -- translates them into auto-finder.core.* topics, and invokes
+  -- the per-handler functions defined as module-level methods on
+  -- this module (so the auto-finder.init module reference closes
+  -- over them via require, not via inline closure):
+  --
+  --   - core.file:* → auto-finder.core.files:changed
+  --   - core.git.state:changed → auto-finder.core.git:changed
+  --   - worktree:switched → auto-finder.core.repos:changed
+  --                       + M._reseed_sections_for_workspace()
+  --                       + M._drop_repos_bufnr_on_worktree_switched()
+  --   - core.workspace_root:changed → M._reseed_sections_for_workspace()
+  --   - state.auto-finder:user_width   (via state_mod.watch_user_width)
+  --   - state.auto-finder:last_section (via state_mod.watch_last_section)
+  --
+  -- Each is captured into `core._handles[<slot>]`; `core.stop()`
+  -- disposes all; `core.ensure_started()` is idempotent and safe
+  -- to re-call from M.open / M.focus / a bus-reset recovery path
+  -- without growing the subscriber count.
+  --
+  -- Per ADR §2.2 the contract is dispose-first-then-resubscribe;
+  -- the `_handles_still_valid` probe is an optimization (Open
+  -- Question #1) that activates when auto-core publishes
+  -- `core.events:bus_reset`.
   -- Phase 3c note: previously re-synced
   -- `state.window.auto_expand_width` here so a session restart with
   -- a saved pin wouldn't expand on first files focus. The forked
@@ -609,16 +599,13 @@ function M.setup(user_opts)
   --     already-fired event — see [[lua-nvim-plugin-development]]
   --     rule and the auto-core-maintenance §"lazy-load VimEnter
   --     fallback" convention).
-  local ok_core, core = pcall(require, "auto-core")
-  if ok_core and type(core.events) == "table"
-      and type(core.events.subscribe) == "function" then
-    core.events.subscribe("worktree:switched", function()
-      vim.schedule(function() M._reseed_sections_for_workspace() end)
-    end)
-    core.events.subscribe("core.workspace_root:changed", function()
-      vim.schedule(function() M._reseed_sections_for_workspace() end)
-    end)
-  end
+  -- ADR 0026 Phase 3: the previous inline subscriptions to
+  -- `worktree:switched` and `core.workspace_root:changed` for the
+  -- reseed path moved into `core.ensure_started` (see the comment
+  -- block at the top of setup() — both events now invoke
+  -- `M._reseed_sections_for_workspace` via the re-armable
+  -- lifecycle hook).
+  require("auto-finder.core").ensure_started(cfg)
   -- Already-fired path: if vim has finished startup AND the
   -- workspace_root happens to be set by now (lazy-load order put
   -- worktree.nvim's capture before us), the reseed below covers
@@ -1454,6 +1441,33 @@ function M._reseed_sections_for_workspace()
   M._rebuild_section_registry(target)
 end
 
+---Drop the repos section's cached bufnr (firing its `on_close` so
+---neo-tree's state cleanup runs) and re-focus if repos is the
+---active section. Used by `core.ensure_started`'s
+---`worktree:switched` subscriber — extracted from the inline
+---closure that used to live at init.lua:357-378 before ADR 0026
+---Phase 3 swept setup-time subscriptions into core.ensure_started.
+function M._drop_repos_bufnr_on_worktree_switched()
+  if not M._registry then return end
+  local repos_def
+  for _, s in ipairs(M._registry.sections) do
+    if s.name == "repos" then repos_def = s; break end
+  end
+  if not repos_def then return end
+  -- Drop the cached repos bufnr (fires on_close so neo-tree's
+  -- state cleanup runs). Mutate `_bufs` in place so the
+  -- `state.section_buffers` alias stays valid.
+  local b = M._registry._bufs[repos_def.number]
+  if b and vim.api.nvim_buf_is_valid(b) and repos_def.on_close then
+    pcall(repos_def.on_close, b)
+  end
+  M._registry._bufs[repos_def.number] = nil
+  -- Re-focus to remount immediately if repos is currently active.
+  if M._registry.active == repos_def.number then
+    pcall(function() M._registry:focus(repos_def.number) end)
+  end
+end
+
 ---Add a section of `section_type` to the live registry. Appends
 ---at the end (highest section number). No-op if a section with
 ---that name is already enabled.
@@ -1674,6 +1688,10 @@ function M.open(force)
     require("auto-finder.log").error("init", "setup() must be called first")
     return
   end
+  -- ADR 0026 Phase 3: re-armable lifecycle. Defensive call —
+  -- idempotent if core is already started, recovers from a bus
+  -- reset since the previous open.
+  require("auto-finder.core").ensure_started(M.state.config)
   local host = require("auto-finder.panel.host")
   if not host.ensure_open(M.state.config, M.state, force) then return end
   local target = M.state.section or M.state.config.default_section
@@ -1703,6 +1721,10 @@ function M.focus(key)
   if not M.state.config then
     return false, "auto-finder: setup() must be called first"
   end
+  -- ADR 0026 Phase 3: re-armable lifecycle. Defensive call —
+  -- focus is the other entry point that could fire after a bus
+  -- reset (e.g. user hits 0..9 while the panel is still open).
+  require("auto-finder.core").ensure_started(M.state.config)
   if not M._registry then
     return false, "auto-finder: registry not initialized"
   end

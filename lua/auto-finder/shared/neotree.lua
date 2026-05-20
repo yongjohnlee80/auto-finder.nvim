@@ -84,6 +84,12 @@ local function setup_live_refresh(section, source)
   local function schedule_refresh()
     if refresh_pending then return end
     refresh_pending = true
+    -- Mark the event-arrival timestamp so the metrics:paint emit
+    -- below can report a meaningful dur_ms ("event arrival to view
+    -- paint complete"). ADR 0026 §3.12 + Phase 3 instrumentation:
+    -- this is the same emit point pre- and post-refactor so A5's
+    -- "≤ 50% baseline" assertion compares like-for-like.
+    local enqueued_ms = (vim.uv or vim.loop).hrtime() / 1e6
     vim.defer_fn(function()
       refresh_pending = false
       if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
@@ -97,6 +103,23 @@ local function setup_live_refresh(section, source)
       -- `sources/filesystem/init.lua` `handler = wrap(manager.refresh)`).
       pcall(function()
         require("auto-finder.neotree.sources.manager").refresh(source)
+      end)
+      -- ADR 0026 Phase 3: emit the metrics:paint event so smokes
+      -- can measure refresh latency. Currently the v0.2.x render
+      -- path; Phase 7 will fire the same topic from the new view
+      -- mount contract so pre/post-refactor measurements compare
+      -- against the same baseline emit shape. `generation` stays
+      -- at 0 in Phase 3 (the per-view generation counter is added
+      -- in Phase 7 with the loading-placeholder contract); views
+      -- that bump generations will override.
+      local dur_ms = (vim.uv or vim.loop).hrtime() / 1e6 - enqueued_ms
+      pcall(function()
+        require("auto-finder.core.events").publish(
+          "auto-finder.core.metrics:paint", {
+            view = section.name or "unknown",
+            dur_ms = dur_ms,
+            generation = 0,
+          })
       end)
     end, LIVE_REFRESH_DEBOUNCE_MS)
   end

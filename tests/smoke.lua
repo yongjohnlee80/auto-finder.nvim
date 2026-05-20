@@ -2601,10 +2601,10 @@ ok("unsubscribe stops the callback",
   got_payload == nil,
   "callback fired after unsubscribe: " .. tostring(got_payload))
 
--- Cleanup: leave core in the same state Phase 1 callers should
--- assume (not started). Later phases that depend on core being
--- live will call ensure_started themselves.
-core._reset_for_tests()
+-- Phase 1 originally cleaned up with `core._reset_for_tests()` so
+-- later sections could assume "not started." Phase 3 makes that
+-- assumption wrong: setup() now wires ensure_started transitively,
+-- so subsequent sections expect a live core. Leave it running.
 end)()
 
 -- ───────────────────────── 30. ADR 0026 Phase 2: sections → views ──
@@ -2756,6 +2756,216 @@ local ok2 = pcall(function() subs:replace("x", "", function() end) end)
 ok("view_subs:replace rejects empty topic name", not ok2)
 local ok3 = pcall(function() subs:replace("x", "topic", nil) end)
 ok("view_subs:replace rejects non-function callback", not ok3)
+end)()
+
+-- ───────────────────────── 31. ADR 0026 Phase 3: lifecycle (A7/A8) ──
+-- ADR 0026 Phase 3: the re-armable lifecycle ships. ensure_started
+-- is idempotent and survives an auto-core.events bus reset by
+-- unconditionally dispose-first-then-resubscribe. stop() releases
+-- every captured handle.
+--
+-- This section asserts:
+--   (a) ensure_started + stop round-trip: handle table populated /
+--       cleared; is_started() reflects state
+--   (b) ensure_started is idempotent — second call doesn't grow
+--       the handle table beyond its single-handle-per-slot maximum
+--   (c) A7 (bus-reset behavior): force-reset auto-core.events,
+--       call ensure_started, publish a synthetic core.file:*
+--       event, assert the translated auto-finder.core.files:changed
+--       event fires
+--   (d) worktree:switched + core.git.state:changed translations
+--       reach their auto-finder.core.* topics
+--   (e) A8 (handle release): fs.watch.list() + git.watch.list()
+--       return to pre-ensure_started state after stop(). Phase 3
+--       opens zero watchers so both lists stay empty across the
+--       round-trip; Phase 4/5 will add real handles and this
+--       assertion gains teeth.
+--   (f) metrics:paint emit at the existing render path — captured
+--       when the files section is re-mounted via auto-finder.reload
+print("\n[31] ADR 0026 Phase 3 — lifecycle (A7 bus-reset, A8 handle release)")
+;(function()
+local core = require("auto-finder.core")
+local up   = require("auto-core")
+
+-- (f) metrics:paint emit FIRST. The shared/neotree.lua subscriber
+-- registers via the one-shot `_fs_subscribed` flag — once a bus
+-- reset wipes it, the flag stays true and the subscription doesn't
+-- re-arm until Phase 7 migrates that path into the re-armable
+-- shape. So we verify metrics:paint BEFORE the bus-reset test
+-- below, while shared/neotree.lua's subscriber is still alive.
+local paint_seen
+local paint_probe = core.events.subscribe(
+  "auto-finder.core.metrics:paint",
+  function(p) paint_seen = p end)
+local files_idx = require("auto-finder.views")._by_name["files"]
+if files_idx then
+  af.focus(files_idx)
+  vim.wait(100)
+  up.events.publish("core.file:modified",
+    { path = vim.fn.getcwd() .. "/phase3-metrics-probe.txt" })
+  -- LIVE_REFRESH_DEBOUNCE_MS = 150; pad to 300ms for CI variance.
+  vim.wait(300)
+  ok("metrics:paint emit fires from existing render path",
+    type(paint_seen) == "table"
+      and type(paint_seen.dur_ms) == "number"
+      and paint_seen.view == "files",
+    "got " .. vim.inspect(paint_seen))
+end
+core.events.unsubscribe(paint_probe)
+
+-- (a) Setup already called ensure_started via the section [1]
+-- af.setup; verify the contract holds.
+ok("core.is_started() is true after af.setup()",
+  core.is_started() == true)
+local handle_count_after_setup = vim.tbl_count(core._handles)
+ok("ensure_started captured > 0 handles",
+  handle_count_after_setup > 0,
+  "got " .. handle_count_after_setup .. " handles")
+
+-- (b) Idempotency: second call must not grow the table.
+core.ensure_started(af.state.config)
+ok("ensure_started is idempotent (handle count unchanged on re-call)",
+  vim.tbl_count(core._handles) == handle_count_after_setup,
+  "second call grew handle count from " .. handle_count_after_setup
+    .. " to " .. vim.tbl_count(core._handles))
+
+-- (c) A7 bus-reset behavior. The test sequence per ADR §4:
+--   1. force auto-core.events._reset_for_tests
+--   2. focus a view (transitively calls ensure_started)
+--   3. publish synthetic core.file:created event
+--   4. assert auto-finder.core.files:changed fires
+local files_changed_count = 0
+local last_files_payload
+local function reset_files_state()
+  files_changed_count = 0
+  last_files_payload = nil
+end
+
+-- Establish baseline behavior BEFORE the reset: publish a synthetic
+-- event and confirm core's translator fires.
+local probe_handle = core.events.subscribe(
+  "auto-finder.core.files:changed",
+  function(p) files_changed_count = files_changed_count + 1; last_files_payload = p end)
+
+reset_files_state()
+up.events.publish("core.file:created", { path = "/tmp/phase3-probe-pre.txt" })
+vim.wait(20)
+ok("pre-reset: translator fires on core.file:created",
+  files_changed_count == 1,
+  "expected 1 fire, got " .. files_changed_count)
+ok("pre-reset: translated payload carries kind='upsert'",
+  last_files_payload and last_files_payload.kind == "upsert",
+  "got " .. vim.inspect(last_files_payload))
+ok("pre-reset: translated payload carries the path",
+  last_files_payload
+    and type(last_files_payload.paths) == "table"
+    and last_files_payload.paths[1] == "/tmp/phase3-probe-pre.txt",
+  "got " .. vim.inspect(last_files_payload))
+
+-- Now force the bus reset. Both our probe_handle AND core's
+-- internal upstream subscriptions are wiped.
+core.events.unsubscribe(probe_handle)
+up.events._reset_for_tests()
+
+-- Re-arm core (this is what M.open / M.focus would do defensively
+-- in production). The unconditional dispose-first-then-resubscribe
+-- per ADR §2.2 should leave core in a working state.
+core.ensure_started(af.state.config)
+
+-- Subscribe a fresh probe (the prior was wiped along with everything
+-- else). Then publish the synthetic event.
+local probe_post = core.events.subscribe(
+  "auto-finder.core.files:changed",
+  function(p) files_changed_count = files_changed_count + 1; last_files_payload = p end)
+
+reset_files_state()
+up.events.publish("core.file:modified", { path = "/tmp/phase3-probe-post.txt" })
+vim.wait(20)
+ok("A7: translator re-arms after bus reset (event fires)",
+  files_changed_count == 1,
+  "expected 1 fire after reset+ensure_started, got " .. files_changed_count
+    .. " — bus-reset re-arming is broken")
+ok("A7: post-reset payload still carries kind='upsert'",
+  last_files_payload and last_files_payload.kind == "upsert")
+core.events.unsubscribe(probe_post)
+
+-- (d) Translation for the other upstream topics.
+local git_changed
+local git_probe = core.events.subscribe(
+  "auto-finder.core.git:changed",
+  function(p) git_changed = p end)
+up.events.publish("core.git.state:changed",
+  { repo_root = "/tmp/probe-repo", git_dir = "/tmp/probe-repo/.git", kind = "head" })
+vim.wait(20)
+ok("translator: core.git.state:changed → auto-finder.core.git:changed",
+  type(git_changed) == "table"
+    and git_changed.repo_root == "/tmp/probe-repo"
+    and git_changed.kind == "head",
+  "got " .. vim.inspect(git_changed))
+core.events.unsubscribe(git_probe)
+
+local repos_changed
+local repos_probe = core.events.subscribe(
+  "auto-finder.core.repos:changed",
+  function(p) repos_changed = p end)
+up.events.publish("worktree:switched",
+  { new_root = "/tmp/probe-worktree" })
+vim.wait(20)
+ok("translator: worktree:switched → auto-finder.core.repos:changed",
+  type(repos_changed) == "table"
+    and repos_changed.kind == "worktree_switched"
+    and repos_changed.repo_root == "/tmp/probe-worktree",
+  "got " .. vim.inspect(repos_changed))
+core.events.unsubscribe(repos_probe)
+
+-- (e) A8 handle release. Snapshot the watcher lists before stop()
+-- and after; both must return to the pre-ensure_started state.
+-- Phase 3 opens zero watchers (core/watchers.lua is still a no-op);
+-- when Phase 4/5 add real fs.watch + git.watch handles this same
+-- assertion gains teeth without code change.
+local function fs_list_or_empty()
+  if type(up.fs) == "table" and type(up.fs.watch) == "table"
+      and type(up.fs.watch.list) == "function" then
+    return up.fs.watch.list()
+  end
+  return {}
+end
+local function git_list_or_empty()
+  if type(up.git) == "table" and type(up.git.watch) == "table"
+      and type(up.git.watch.list) == "function" then
+    return up.git.watch.list()
+  end
+  return {}
+end
+
+local fs_before  = #fs_list_or_empty()
+local git_before = #git_list_or_empty()
+-- ensure_started has already been called above; the lists already
+-- reflect any handles opened by Phase 3 (which is zero today).
+local fs_during  = #fs_list_or_empty()
+local git_during = #git_list_or_empty()
+core.stop()
+local fs_after   = #fs_list_or_empty()
+local git_after  = #git_list_or_empty()
+
+ok("A8: fs.watch handle count unchanged across ensure_started/stop",
+  fs_during == fs_before and fs_after == fs_before,
+  string.format("before=%d during=%d after=%d", fs_before, fs_during, fs_after))
+ok("A8: git.watch handle count unchanged across ensure_started/stop",
+  git_during == git_before and git_after == git_before,
+  string.format("before=%d during=%d after=%d", git_before, git_during, git_after))
+
+ok("stop() flips is_started() back to false",
+  core.is_started() == false)
+ok("stop() empties the handle table",
+  vim.tbl_count(core._handles) == 0,
+  "remaining: " .. vim.inspect(vim.tbl_keys(core._handles)))
+
+-- Restore for the rest of the suite — anything below this section
+-- that needs core would otherwise see an unsubscribed bus.
+core.ensure_started(af.state.config)
+ok("post-restore: core.is_started() == true",
+  core.is_started() == true)
 end)()
 
 -- ───────────────────────── summary ────────────────────────
