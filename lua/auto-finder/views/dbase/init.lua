@@ -34,6 +34,45 @@ local M = {
   _owned_bufs  = {},
 }
 
+---Notify auto-core's section registry that the active section has
+---swapped from the `shared.loading` placeholder bufnr that
+---`get_buffer()` returned to a new "real" bufnr (the dbee drawer
+---on the success path or a `placeholder_buffer` fallback on the
+---dbee-unavailable / drawer_show-failed paths).
+---
+---Without this notification the registry's `_bufs[dbase]` stays
+---pointed at the discarded `shared.loading` placeholder, and the
+---buffer-local `0..9` / `q` keymaps + the panel winbar — both
+---bound to that placeholder at `Registry:focus` time — vanish
+---from the user's perspective. Symptom: navigating to dbase for
+---the first time hides the winbar and breaks numeric section-hop
+---until a later redraw (`<leader>e` toggle, auto-agents `<F5>`,
+---anything that re-pokes `_refresh_winbar`).
+---
+---The hook lives on auto-core `v0.1.25+`. On older auto-core we
+---fall through silently — the bug persists until the consumer
+---updates, but we don't error.
+---@param real_bufnr integer
+local function _notify_remount(real_bufnr)
+  if not real_bufnr or not vim.api.nvim_buf_is_valid(real_bufnr) then
+    return
+  end
+  local ok, af = pcall(require, "auto-finder")
+  if not ok or not af or not af._registry then return end
+  local registry = af._registry
+  if type(registry.section_did_remount) ~= "function" then
+    -- Pre-v0.1.25 auto-core. The placeholder→real swap will not
+    -- get its keymaps + winbar repaired automatically; toggle the
+    -- panel or trigger a `_refresh_winbar` to recover.
+    logger.debug("view.dbase",
+      "auto-core.ui.section.Registry has no section_did_remount; " ..
+      "skipping post-mount keymap/winbar refresh (auto-core upgrade " ..
+      "to v0.1.25+ recommended)")
+    return
+  end
+  registry:section_did_remount(M.number, real_bufnr)
+end
+
 ---ADR 0026 Phase 7: five-guard `_still_current` predicate. Same
 ---contract as shared/neotree.lua's: returns false if the panel
 ---state has moved on since the deferred dbee mount was scheduled.
@@ -223,6 +262,7 @@ function M.on_focus(panel_winid, bufnr)
         err or "dbee.setup failed")
       M._bufnr = pb
       M._owned_bufs[pb] = gen
+      _notify_remount(pb)
       return
     end
 
@@ -247,11 +287,13 @@ function M.on_focus(panel_winid, bufnr)
     if b then
       M._bufnr = b
       M._owned_bufs[b] = gen
+      _notify_remount(b)
     else
       local pb = placeholder_buffer(panel_winid,
         "drawer_show returned nil")
       M._bufnr = pb
       M._owned_bufs[pb] = gen
+      _notify_remount(pb)
     end
   end)
 end

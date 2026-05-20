@@ -2,6 +2,69 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.27] — 2026-05-20 — dbase: rebind keymaps + refresh winbar after deferred drawer mount
+
+ADR 0026 Phase 7 ships the dbase view through the
+placeholder-pattern: `get_buffer()` returns a `shared.loading`
+placeholder and the real dbee drawer is swapped in by a
+`vim.schedule`-deferred mount inside `on_focus()`. That two-buffer
+transition was invisible to `auto-core.ui.section.Registry`, which
+binds the panel's buffer-local `0..9`/`q` keymaps and refreshes
+the winbar once per `Registry:focus()` — against the placeholder
+bufnr that `get_buffer()` returned, NOT against the dbee drawer
+that landed in the panel a few milliseconds later.
+
+User-visible symptom: navigating to dbase for the first time hid
+the panel winbar and broke numeric section-hop on the drawer
+buffer. Triggering any later `_refresh_winbar` path (`<leader>e`
+toggle, auto-agents `<F5>` open, etc.) healed both because the
+re-toggle re-ran `Registry:focus()` against the now-cached real
+bufnr (`Registry:focus` re-binds keymaps + winbar on every call).
+
+KB: `shared/synthesis/2026-05-20-auto-finder-dbase-winbar-remount-bug-analysis.md`,
+`shared/synthesis/auto-core-registry-keymap-rebind-hook.md`.
+
+### Fixed
+
+- **`views/dbase/init.lua`** — after each terminal branch of the
+  deferred mount sets `M._bufnr`, the new
+  `_notify_remount(real_bufnr)` helper calls
+  `auto-core.ui.section.Registry:section_did_remount(M.number,
+  real_bufnr)`. The registry repairs three things: updates its
+  `_bufs[N]` cache so subsequent `focus(dbase)` reuses the real
+  buffer, re-runs `apply_keymap` so `0..9` and `q` work on the
+  drawer, and refreshes the winbar so the active-section
+  highlight returns. Fires on all three terminal branches —
+  dbee-unavailable placeholder, drawer_show success, and
+  drawer_show-returned-nil placeholder.
+
+### Required auto-core
+
+- **Hard prereq: `auto-core@v0.1.25+`** for the
+  `Registry:section_did_remount` public hook. On older auto-core
+  `_notify_remount` logs a DEBUG entry and falls through silently
+  (the bug persists until consumers update; we don't error).
+- Recommend consumers re-pin both via
+  `:Lazy update auto-core.nvim auto-finder.nvim` together.
+
+### Verified
+
+- Live: pointed `~/.config/nvim/lua/plugins/auto-{core,finder}.lua`
+  at the `registry-rebind-hook` + `dbase-rebind-on-remount`
+  worktrees via `dir=`; cold-focused dbase via
+  `:AutoFinderFocus dbase` from a fresh session. Pre-fix: winbar
+  empty, `0..9` no-op on the drawer. Post-fix: winbar populated
+  with the active dbase highlight; `0..9` switches views; `q`
+  closes the panel.
+
+### Compatibility
+
+- Public API unchanged for direct consumers of
+  `require("auto-finder")`. New `Registry:section_did_remount`
+  dependency is internal to the dbase view; other views
+  (config / files / repos / buffers) don't go through the
+  placeholder pattern yet, so they're unaffected.
+
 ## [v0.2.26] — 2026-05-20 — Post-v0.2.25-approval cleanup (Lector follow-ups)
 
 Lector approved v0.2.25's B1 + B2 fixes (`approved_with_amendments`,
