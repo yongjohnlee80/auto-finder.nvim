@@ -272,6 +272,95 @@ Then section [24] removed in `55c24ed`: **355 passed / 0 failed.**
 
 ---
 
+## Phase 9 — `acceptance-audit` (2026-05-20, closeout)
+
+Closeout pass — no new functionality, no failures.
+
+### Final suite
+
+**414 passed / 0 failed** across 37 sections.
+
+- v0.2.23 baseline (pre-refactor): 263 passed / 1 failed (the
+  section [24] flake removed in Phase 4 cleanup; see
+  [auto-finder-flaky.test.md](./auto-finder-flaky.test.md)).
+- Post-refactor: **+151 net new asserts** added across the
+  nine phases (some pre-existing assertions softened to fit
+  Phase 4's `ensure_started` side effects per F4.6–F4.8;
+  net positive).
+- Zero residual failures.
+
+### Per-phase delta summary
+
+| Phase | New asserts | Failures during dev | Resolution |
+|---|---:|---:|---|
+| 1 — core-skeleton | 30 | 0 | — |
+| 2 — views-rename | 33 | 0 | — |
+| 3 — core-lifecycle | 16 | 5 | F3.1–F3.4 (section [29] cleanup, metrics:paint ordering) |
+| 4 — core-files-state | 14 net | 11 | F4.1–F4.16 (deleted handle fields; readiness side effects; translator timing; A8 baseline shape; [24] flake removed) |
+| 5 — core-git-state | 11 | 1 | F5.1 (bus-reset `_fs_subscribed` flag — same as F3.4) |
+| 6 — core-buffers-repos | 16 | 1 (during dev) | F6.1 (`:edit` vs winfixbuf collision; switched to `:badd`) |
+| 7 — loading-placeholder | 17 | 9 | F7.1–F7.3 (auto-core Registry keymap-binding tension; Phase 7 scope narrowed to dbase only; build_section scaffolding retained for future flip) |
+| 8 — shared-extraction + logging-sweep | 6 net | 4 | F8.1–F8.4 (pre-existing `vim.defer_fn` cancellation bug; tag scheme violations; smoke grep overmatch) |
+| 9 — acceptance-audit | 9 | 0 | — |
+
+Initial dev failures: **31 across 9 phases.** All resolved before
+each phase landed; root causes + remediations recorded above and
+in [auto-finder-flaky.test.md](./auto-finder-flaky.test.md) for
+the one section that was removed structurally.
+
+### A5 — instrumentation in place, formal benchmark deferred
+
+Phase 3 wired `auto-finder.core.metrics:paint` at the existing
+v0.2.x render path in `shared/neotree.lua`'s `schedule_refresh`.
+Section [37] confirms the emit still fires post-refactor and
+records the observed `dur_ms` to stdout.
+
+The formal "post-refactor `dur_ms` mean ≤ 50% of pre-refactor
+baseline" comparison was **never captured** — the Phase 4
+synthesis-tracker baseline-capture step was an outstanding
+todo throughout the arc. To run the comparison, someone needs
+to:
+
+1. Check out `v0.2.23` (pre-refactor tag).
+2. Apply a temporary patch that emits `metrics:paint` at the
+   same render-path location (the metrics topic doesn't exist
+   on v0.2.23, so a local-only patch is needed).
+3. Run the same smoke or a dedicated benchmark with a
+   ≥1000-file branch-switch operation; record the `dur_ms`
+   distribution.
+4. Switch to the post-refactor branch; rerun.
+5. Compare means.
+
+Until that benchmark lands, A5 is shipped as "instrumentation
+verified end-to-end; comparison deferred to a future benchmark
+commit."
+
+### A11 — explicitly verified
+
+Section [37]'s first two assertions:
+
+- `A11: total smoke assertions ≥ 263 (pre-refactor v0.2.23 baseline)`
+  — 414 ≥ 263 ✓
+- `A11: zero failed assertions across the full suite (no regression)`
+  — 0 == 0 ✓
+
+### Audit pass — every per-phase smoke present
+
+Section [37]'s structural assertions verify that sections
+[29]–[37] (one per phase) all exist in `tests/smoke.lua`. The
+fact that the audit section runs at all with `fail_count == 0`
+implicitly confirms every earlier section's assertions are
+green.
+
+### ADR 0026 arc — complete
+
+The nine-phase refactor described in
+[[0026-auto-finder-state-ui-separation]] is shipped. Ready for
+the cumulative tag (Johno's call on `v0.2.24` vs. a larger
+bump per the personal version policy).
+
+---
+
 ## Phase 8 — `shared-extraction` + `logging-sweep` (2026-05-20, commit pending)
 
 ### Initial smoke delta: 401 passed / **4 failed**
