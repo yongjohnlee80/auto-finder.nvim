@@ -448,6 +448,408 @@ The boundary is enforced in two directions:
 
 ---
 
+## Event detection + processing
+
+This section walks through every category of event auto-finder
+observes — how each is detected at the OS / nvim layer, how it
+flows up through auto-core, how `core/` processes it, and what
+the views ultimately see.
+
+### 1. Filesystem mutations
+
+**Detection — `auto-core.fs.watch`** wraps libuv's `fs_event`
+primitive into a recursive watcher rooted at a cwd. On `start`
+it walks the directory tree and opens one `fs_event` handle per
+subdirectory (capped by `cfg.max_handles`, default 1024 per
+session). Each `fs_event` callback fires whenever the kernel
+notifies a change inside its watched directory (inotify on
+Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows).
+
+auto-core publishes three discrete topics off this stream:
+
+- `core.file:created` — entry appeared in a watched directory
+  (the libuv event reports `rename` and a fresh `fs_stat`
+  succeeds).
+- `core.file:modified` — content changed in place (the libuv
+  event reports `change`).
+- `core.file:deleted` — entry vanished (the libuv event
+  reports `rename` and `fs_stat` returns no such file).
+
+**Payload shape:** `{ path: string, change: 'created'|'modified'|'deleted' }`.
+
+**Detection limits worth knowing about:**
+
+- The recursive walk happens at `start` time only. **New
+  directories created after start are NOT auto-extended into
+  the watch tree** (`auto-core/fs/watch.lua:21-28`). Events
+  inside a fresh dir won't fire until either the user causes a
+  re-walk via `core.reload()` or auto-core ships a re-extend
+  hook.
+- libuv's `fs_event` classifies `rename-with-stat` as "created"
+  and `rename-without-stat` as "deleted." It does **not**
+  surface paired old→new rename events. `mv old new` arrives as
+  two unrelated events. ADR §2.5 documents this and Phase 4's
+  cache responds with `subtree_stale` invalidation rather than
+  attempting file-event reassembly.
+- macOS's FSEvents backend is known to drop rename/delete
+  events in rapid-burst scenarios. The user-visible symptom is
+  the files panel needing manual `R` to pick up an external
+  `mv` / `rm`. This is filed against auto-core for a darwin
+  reliability fix (see project KB synthesis
+  `auto-core-fs-event-macos-reliability.md`); auto-finder does
+  not patch this from its side.
+- `auto-core.fs.watch`'s `DEFAULT_IGNORE` excludes `/.git/`
+  paths from publishing — the .git/-plumbing watcher
+  (`auto-core.git.watch`, see §2 below) owns that surface
+  specifically.
+
+**Processing — `core/init.lua` translator:**
+
+```
+core.file:* event
+   │
+   ├─ enqueue_file_event(path, kind)
+   │     │
+   │     ├─ files_mod.upsert(path) | .delete(path)
+   │     │   (IMMEDIATE cache mutation; `get(path)` reflects
+   │     │    reality even mid-debounce)
+   │     │
+   │     └─ append to _file_buf; trigger debounce.coalesce
+   │
+   └─ 100ms later (or sooner if drained via _flush_*_for_tests):
+        │
+        ├─ group buffered events by parent dir
+        ├─ if any parent has >50 events in the window:
+        │   ↦ files_mod.invalidate_subtree(parent)
+        │   ↦ publish auto-finder.core.files:changed { kind = 'subtree_stale',
+        │                                              paths = [parent], parents = [parent] }
+        ├─ otherwise:
+        │   ↦ publish auto-finder.core.files:changed { kind = 'upsert',
+        │                                              paths = upsert_paths }
+        │   ↦ publish auto-finder.core.files:changed { kind = 'delete',
+        │                                              paths = delete_paths }
+        └─ buffer cleared
+```
+
+The burst threshold (>50 events on one parent within 200 ms)
+is the cutoff between "this looks like individual file
+operations" and "this looks like a directory-scoped operation
+we can't reconstruct file-by-file." ADR §2.5 picked these
+numbers from observed branch-switch storms; Phase 4 captured
+the real data and the threshold has held since.
+
+**Cache shape after processing.** Each file entry: `{ kind='file',
+path, stat?, git_status?, gitignored?, generation }`. Each
+directory entry: `{ kind='directory', path, children = {[name]
+= true, …}, children_state = 'cold'|'known'|'stale', generation }`.
+A directory marked `stale` is re-scanned on next render via
+`vim.uv.fs_scandir` — bounded to that one directory; no
+full-tree rewalk.
+
+**Cold-start warming.** On `core.ensure_started(cfg)`,
+`core/warm.lua` opens `vim.uv.fs_scandir` on the cwd's top
+level and walks **8 entries per scheduled tick** (per ADR §2.3
++ A15 — no single tick may exceed 5 ms). The warmer publishes
+`auto-finder.core.ready { areas = { files = 'ready' } }` on
+completion. Subdirectories warm lazily on demand (when a view
+expands a node and asks `files.get(path)` against a `'cold'`
+or `'stale'` directory entry).
+
+### 2. Git plumbing mutations
+
+**Detection — `auto-core.git.watch`** (ADR 0025) opens three
+narrow libuv `fs_event` handles per repo:
+
+- `git_dir/` (filtered to `HEAD`, `index`, `ORIG_HEAD`,
+  `MERGE_HEAD`, `FETCH_HEAD`)
+- `git_dir/refs/heads/`
+- (deliberately excluded: `git_dir/refs/remotes/` — too noisy
+  for fetch-only events; consumers that care subscribe to
+  `core.git.fetch:completed` per ADR 0007)
+
+Each watcher attaches to the **per-worktree** git_dir (linked
+worktrees store HEAD/index under
+`<common_dir>/worktrees/<name>/` rather than the shared
+common_dir) so branch/index events for sibling worktrees don't
+cross-fire.
+
+The watcher coalesces events within a 200 ms window and
+ignores `.lock` files (intermediate writes; the non-lock event
+fires ms later). It publishes a single coarse topic:
+
+- `core.git.state:changed` with payload `{ repo_root, git_dir,
+  kind = 'head'|'index'|'refs'|'merge'|'other' }`.
+
+**Classification by which handle fired:**
+
+- HEAD or ORIG_HEAD → `kind = 'head'` (branch tip moved,
+  checkout, reset)
+- index → `kind = 'index'` (`git add`, `git restore --staged`)
+- refs/heads/* → `kind = 'refs'` (local branch created /
+  deleted)
+- MERGE_HEAD → `kind = 'merge'` (mid-merge state)
+- anything else → `kind = 'other'`
+
+**What triggers a publish:**
+
+- `git commit` mutates HEAD + index → publishes `kind='head'`
+  AND `kind='index'` (debounce collapses them to two emits per
+  logical operation).
+- `git add` / `git restore --staged` mutates index alone →
+  `kind='index'`.
+- `git checkout <branch>` mutates HEAD + may touch refs →
+  `kind='head'` (+ `kind='refs'` if branch tips moved).
+- `git reset` / `git reset --hard` → mostly `kind='head'`.
+- `git fetch` → mutates `refs/remotes/*` which is **deliberately
+  not watched**; no publish. (Use `core.git.fetch:*` if you
+  need fetch events.)
+
+**Processing — `core/init.lua` translator:**
+
+```
+core.git.state:changed { repo_root, kind }
+   │
+   ├─ require("auto-finder.core.git")._set_readiness("cold")
+   │   (drops the auto-finder-side git cache so the next
+   │    snapshot_now triggers a fresh query)
+   │
+   └─ publish auto-finder.core.git:changed { repo_root, kind }
+       │
+       └─ shared/neotree.lua subscriber (files view):
+            ↦ filter: repo_root prefix-matches cwd?
+            ↦ schedule_refresh (150 ms debounce)
+            ↦ neo-tree manager.refresh(source)
+              + emit auto-finder.core.metrics:paint
+```
+
+`auto-core.git.status` (the underlying porcelain cache) also
+subscribes to `core.git.state:changed` directly and invalidates
+its own per-repo cache. Two independent caches both react;
+auto-finder's `core/git.lua` re-queries via auto-core's API on
+the next read.
+
+**Decorator data path** (Phase 5):
+`core.git.snapshot_now(cwd)` resolves cwd → repo_root, calls
+`auto-core.git.status.get(repo_root)` (which shells out to
+`git status --porcelain=v1` on cache miss), denormalizes the
+entries into `by_path[abs_path] = { x, y, code }` where `x`/`y`
+are the staged-side / worktree-side flags (`M`/`A`/`??`/` `)
+and `code = x..y` is the concatenated porcelain string.
+Decorators consume the `by_path` map directly.
+
+### 3. Buffer-list mutations
+
+**Detection — nvim's native autocmd events.** No libuv layer;
+`core/buffers.lua::_arm_autocmds` creates an augroup named
+`auto-finder.core.buffers` and subscribes to:
+
+- `BufAdd` — a new buffer was added to the buffer list (any
+  source: `:edit`, `:badd`, session restore, LSP workspace
+  registration, scripted buffer adds via Lua API).
+- `BufDelete` + `BufWipeout` — buffer was deleted from the
+  list (`:bd`, `:bw`, `vim.api.nvim_buf_delete`).
+- `BufEnter` — buffer became current in some window.
+- `BufWritePost` + `BufModifiedSet` — buffer's modified flag
+  changed (write succeeded; `:set [no]modified`; first
+  modification after open).
+
+Each autocmd carries `args.buf` (the bufnr).
+
+**Processing — `core/buffers.lua::_mutate`:**
+
+```
+autocmd fires { buf }
+   │
+   ├─ if kind == "remove":
+   │     M._cache[buf] = nil
+   │ else:
+   │     M._cache[buf] = _build_entry(buf)
+   │     (re-reads vim.bo[buf].{buflisted, modified, filetype, buftype}
+   │      + nvim_buf_get_name + nvim_buf_is_loaded)
+   │
+   └─ publish auto-finder.core.buffers:changed { kind, bufnr }
+       │
+       └─ views.buffers (via `core_refresh_topic` opt on
+          shared.neotree.build_section):
+            ↦ schedule_refresh (150 ms)
+            ↦ neo-tree manager.refresh(source = "buffers")
+```
+
+Entry shape: `{ bufnr, name, listed, loaded, modified,
+filetype, buftype }`. The cache is pre-populated from
+`nvim_list_bufs()` at arm time so `snapshot_now` works from the
+first call (no lag while events trickle in).
+
+The augroup is cleared + recreated idempotently on every
+`ensure_started` — a re-arm after bus reset or `:Lazy reload`
+leaves a single live group, never duplicates.
+
+### 4. Worktree / workspace-root mutations
+
+**Detection — `worktree.nvim` publishes via `auto-core.events`.**
+Two related topics:
+
+- `worktree:switched { from, to }` — user invoked the worktree
+  picker (`<leader>gw` or programmatic
+  `worktree.switch(path)`); the cwd changed to a sibling
+  worktree.
+- `core.workspace_root:changed { root }` — the workspace root
+  itself was discovered or changed (typically at startup once
+  worktree.nvim's lazy-load completes, OR on
+  `worktree.set_root(p)`).
+
+Detection isn't filesystem-level here; it's a domain event
+published by the worktree.nvim plugin when its own state moves.
+
+**Processing — `core/init.lua` translator:**
+
+```
+worktree:switched { from, to } (or { new_root })
+   │
+   ├─ publish auto-finder.core.repos:changed
+   │   { kind = "worktree_switched", repo_root = to/new_root }
+   │
+   └─ vim.schedule, then invoke (via require("auto-finder")):
+        ↦ M._reseed_sections_for_workspace()
+            (per-project sections override — workspace-keyed
+             from auto-finder.state. if a project has a saved
+             slot composition different from the current
+             one, rebuild the registry.)
+        ↦ M._drop_repos_bufnr_on_worktree_switched()
+            (drop the repos view's cached neo-tree buffer so
+             the next focus re-mounts against the new cwd.)
+
+core.workspace_root:changed { root }
+   │
+   └─ vim.schedule, then invoke M._reseed_sections_for_workspace()
+       (same reseed path; no auto-finder.core.repos:changed
+        publish — that one's reserved for explicit user
+        switches.)
+```
+
+Downstream, `core.repos` listens to its own
+`auto-finder.core.repos:changed` topic via an internal hook in
+`ensure_started` and calls `core.repos.invalidate()` so the
+next `snapshot_now` re-queries `auto-finder.repos.load()`
+(which delegates to `worktree.git.list_child_repos(root)` plus
+the root itself if it's a git repo).
+
+### 5. UI-state mutations (persistent prefs)
+
+**Detection — `auto-core.state.namespace` `:watch`** internally
+subscribes to `state.auto-finder:<key>:changed` topics on the
+events bus. Mutations originate from:
+
+- The config-view REPL (`panel/admin.lua`'s `resize` /
+  `last_section` verbs).
+- The `M.resize(n)` / `M.reset_width()` public API.
+- A future `:AutoCoreState` admin tool, or a peer plugin
+  writing into the same namespace.
+
+**Topics:**
+
+- `state.auto-finder:user_width:changed { namespace, key,
+  new, old }` — resize pin updated.
+- `state.auto-finder:last_section:changed` — last-focused
+  section persisted.
+
+**Processing — `core/init.lua` translator** (Phase 3 swept
+these out of `init.lua`'s setup-time subscribes into
+`ensure_started` for re-armability):
+
+```
+state.auto-finder:user_width:changed { new }
+   │
+   ├─ auto-finder.state.user_width := new
+   │
+   ├─ if M._panel:
+   │     if new: M._panel:resize(new)
+   │     else:   M._panel:reset_width()
+   │
+   └─ panel.host._refresh_after_resize(state)
+
+state.auto-finder:last_section:changed { new }
+   │
+   └─ auto-finder.state.section := new
+```
+
+These watchers honor the events lifecycle convention — they're
+armed inside `ensure_started`'s handle table so a bus reset
+re-arms them on the next `M.open` / `M.focus`.
+
+### 6. dbase view events (forwarded from nvim-dbee)
+
+The dbase view runs a separate event bridge for `nvim-dbee`'s
+own handler events. These are app-level events (database
+connection changed, query lifecycle), not OS-level event sources.
+
+**Detection — `dbee.api.core.register_event_listener`:**
+
+- `current_connection_changed { conn_id }`
+- `call_state_changed { call = { id, query, state,
+  time_taken_us, timestamp_us, error } }`
+
+**Translation — `views/dbase/events.lua::attach`:**
+
+```
+dbee current_connection_changed { conn_id }
+   │
+   ├─ publish dbase.connection:changed { id }
+   └─ log.notifyIf("dbase.connection.changed", "active connection → "..id)
+
+dbee call_state_changed { call }
+   │
+   ├─ publish dbase.call:state_changed { call_id, conn_id, to }  (always)
+   │
+   └─ terminal-state derived topics:
+       state == "executing"     → publish dbase.call:started { call_id, conn_id, query }
+       state == "archived"      → publish dbase.call:completed { call_id, conn_id, duration_ms }
+       state ∈ executing_failed
+              retrieving_failed
+              archive_failed
+              canceled          → publish dbase.call:failed { call_id, conn_id, err }
+```
+
+The bridge is one-way: dbee → auto-finder. dbee's
+`register_event_listener` is append-only (no unregister hook),
+so the bridge tracks `M._attached` to prevent re-binding on
+section remount.
+
+### 7. Section / view-switch events (panel-internal)
+
+When the user presses `0..9` or invokes
+`:AutoFinderFocus <name>`, `auto-core.ui.section.Registry:focus`
+runs through:
+
+```
+M.focus(N|name)
+   │
+   ├─ ensure_started (defensive re-arm)
+   ├─ Registry:_resolve(key) → section_def
+   ├─ if cached _bufs[N] valid: reuse
+   │   else: panel:with_unfixed_buf(function() return section.get_buffer(panel) end)
+   ├─ panel:with_unfixed_buf(function()
+   │     nvim_win_set_buf(panel.winid, bufnr)
+   │   end)
+   ├─ self.active := N
+   ├─ apply_keymap(self, bufnr)   -- 0..9 + q on the buffer
+   ├─ section.on_focus(panel, bufnr)
+   └─ self:_refresh_winbar()
+```
+
+The `with_unfixed_buf` wrapper temporarily lifts `winfixbuf` on
+the panel window so the buffer swap doesn't trip the guard.
+auto-core's panel module enforces the marker
+(`w:auto_core_panel_name = "auto-finder"`) that
+`shared.window.is_auto_finder_panel` checks.
+
+No event-bus topic is emitted for view switches today (a
+future `auto-finder.core.view:switched` topic could surface
+this if a peer plugin needed to react — out of scope for
+ADR 0026).
+
+---
+
 ## Lifecycle
 
 ```
