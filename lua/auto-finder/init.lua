@@ -82,7 +82,7 @@ function M.setup(user_opts)
   -- Build / rebuild the section registry. `cfg.section_modules`
   -- (added in v0.2.1) lets third-party plugins ship sections from
   -- arbitrary require paths; see `config.lua` for the shape.
-  require("auto-finder.sections").setup(cfg.sections, cfg.section_modules)
+  require("auto-finder.views").setup(cfg.sections, cfg.view_modules or cfg.section_modules)
 
   -- Translate `cfg.files.follow` (per-section convenience flag) into
   -- neo-tree's native `filesystem.follow_current_file = { enabled }`
@@ -144,7 +144,7 @@ function M.setup(user_opts)
   -- Order: section registry first (so we know whether repos is enabled),
   -- then neo-tree setup (just above), THEN source registration before
   -- any section mount can fire.
-  if require("auto-finder.sections")._by_name["repos"] then
+  if require("auto-finder.views")._by_name["repos"] then
     M._register_neotree_workspace_source(cfg.repos)
   end
 
@@ -153,8 +153,8 @@ function M.setup(user_opts)
   -- `get_buffer` call — when `_dbase_setup.ensure_setup(opts)` runs —
   -- so we can plumb the config here without dbee having to be loaded
   -- yet. Safe to call even when dbase isn't enabled (no-op).
-  if require("auto-finder.sections")._by_name["dbase"] then
-    local dbase_section = require("auto-finder.sections.dbase")
+  if require("auto-finder.views")._by_name["dbase"] then
+    local dbase_section = require("auto-finder.views.dbase")
     if type(dbase_section.configure) == "function" then
       dbase_section.configure(cfg.dbase)
     end
@@ -195,7 +195,7 @@ function M.setup(user_opts)
     -- registry so a stored index for a now-disabled section silently
     -- falls back to default_section.
     if type(persisted.panel.last_section) == "number"
-        and require("auto-finder.sections").resolve(persisted.panel.last_section) then
+        and require("auto-finder.views").resolve(persisted.panel.last_section) then
       state_mod.set_last_section(persisted.panel.last_section)
     end
     -- The `side` field was removed from the config. We deliberately do
@@ -279,7 +279,7 @@ function M.setup(user_opts)
   -- point that ALSO mirrors `state.section` and persists
   -- `last_section` to the namespace.
   local section_mod  = require("auto-core").ui.section
-  local sections_list = require("auto-finder.sections").enabled()
+  local sections_list = require("auto-finder.views").enabled()
   local section_defs = {}
   for _, s in ipairs(sections_list) do
     section_defs[#section_defs + 1] = {
@@ -538,7 +538,7 @@ function M.setup(user_opts)
   -- admin-DSL toggle `repos follow on|off` can flip behavior live —
   -- the autocmd body reads `M.state.config.repos.follow` at fire
   -- time, so a false flag short-circuits cheaply.
-  if require("auto-finder.sections")._by_name["repos"] then
+  if require("auto-finder.views")._by_name["repos"] then
     M._install_repos_follow_autocmd(group)
   end
 
@@ -554,7 +554,7 @@ function M.setup(user_opts)
   -- Subscribing here gives a single hot path that respects the
   -- live `cfg.files.follow` flag and works regardless of when the
   -- section was mounted.
-  if require("auto-finder.sections")._by_name["files"] then
+  if require("auto-finder.views")._by_name["files"] then
     M._install_files_follow_autocmd(group)
   end
 
@@ -647,7 +647,7 @@ function M._install_files_follow_autocmd(group)
     end
 
     -- Bail unless the files section is the active panel slot.
-    local files_idx = require("auto-finder.sections")._by_name["files"]
+    local files_idx = require("auto-finder.views")._by_name["files"]
     if M.state and M.state.section ~= files_idx then return end
 
     local buf = vim.api.nvim_get_current_buf()
@@ -898,7 +898,7 @@ function M._install_repos_follow_autocmd(group)
     end
 
     -- Bail unless the repos section is the active panel slot.
-    local repos_idx = require("auto-finder.sections")._by_name["repos"]
+    local repos_idx = require("auto-finder.views")._by_name["repos"]
     if M.state and M.state.section ~= repos_idx then return end
 
     local buf = vim.api.nvim_get_current_buf()
@@ -943,7 +943,7 @@ function M._install_repos_follow_autocmd(group)
     local repo_node_id = "auto-finder-repos://" .. repo_path
     local nav_ok = pcall(mgr.navigate, state, nil, repo_node_id)
     if nav_ok then
-      local section = require("auto-finder.sections")._by_number[repos_idx]
+      local section = require("auto-finder.views")._by_number[repos_idx]
       if section and state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
         section._bufnr = state.bufnr
         if M.state and M.state.section_buffers then
@@ -1190,31 +1190,70 @@ function M._workspace_key()
   return sha:sub(1, 16)
 end
 
----Discover the set of section types available to `slot add` /
+---Discover the set of view types available to `slot add` /
 ---`slot modify`. Sources:
----  * bundled modules under `lua/auto-finder/sections/*.lua`
----    (excluding leading-underscore helpers like `_neotree`,
----    `_storage`, and the registry `init.lua`),
----  * keys in `cfg.section_modules` (third-party registrations
----    from v0.2.1).
----Both produce strings that map cleanly to the `cfg.sections`
----list — what `slot add <type>` accepts.
+---  * bundled views under `lua/auto-finder/views/<name>/init.lua`
+---    (each view is a directory after ADR 0026 Phase 2),
+---  * legacy bundled sections under `lua/auto-finder/sections/<name>.lua`
+---    (only the few not yet migrated; today the `sections/` tree
+---    is all facades and contributes nothing new),
+---  * keys in `cfg.view_modules` and the legacy `cfg.section_modules`
+---    alias (third-party registrations from v0.2.1+).
+---Both produce strings that map cleanly to the `cfg.sections` list —
+---what `slot add <type>` accepts.
+---
+---ADR 0026 Phase 2: scan target moved from `sections/*.lua` files to
+---`views/<name>/` directories. The function name retains its
+---`_available_section_types` shape (called by `slot_*` paths that
+---haven't been renamed); the helper is documented as the "view
+---types" discoverer despite the legacy name.
 ---@return string[] sorted, deduped
 function M._available_section_types()
   local seen, out = {}, {}
 
-  -- Bundled — scan our own lua/auto-finder/sections/ directory.
-  -- Resolves the dir from this file's own runtime path so the
+  -- Resolve the plugin lua root from this file's runtime path so the
   -- discovery is portable across install layouts.
   local this = debug.getinfo(1, "S").source:sub(2)        -- init.lua path
-  local sections_dir = vim.fn.fnamemodify(this, ":h") .. "/sections"
-  local handle = vim.uv.fs_scandir(sections_dir)
-  if handle then
+  local lua_root = vim.fn.fnamemodify(this, ":h")          -- lua/auto-finder
+
+  -- Bundled views — each subdir under views/ with an init.lua is a
+  -- view name. Leading-underscore subdirs (if any future internal
+  -- helpers land there) are excluded for parity with the old
+  -- _neotree/_storage exclusion.
+  local views_dir = lua_root .. "/views"
+  local vh = vim.uv.fs_scandir(views_dir)
+  if vh then
     while true do
-      local name, t = vim.uv.fs_scandir_next(handle)
+      local name, t = vim.uv.fs_scandir_next(vh)
+      if not name then break end
+      if t == "directory" and not name:match("^_") then
+        -- Confirm it's actually a loadable view (has init.lua) before
+        -- offering it as a registrable type.
+        local init_path = views_dir .. "/" .. name .. "/init.lua"
+        if vim.uv.fs_stat(init_path) then
+          if not seen[name] then
+            seen[name] = true
+            out[#out + 1] = name
+          end
+        end
+      end
+    end
+  end
+
+  -- Legacy bundled — sections/*.lua. After ADR 0026 Phase 2 these
+  -- are all facades pointing into views/, so the views/ scan above
+  -- already covered them. We keep this scan for any third-party
+  -- module dropped into our sections/ tree by an out-of-tree
+  -- installer (rare but documented). Underscore-prefixed files
+  -- (_neotree, _dbase_*, _storage) and init.lua are excluded.
+  local sections_dir = lua_root .. "/sections"
+  local sh = vim.uv.fs_scandir(sections_dir)
+  if sh then
+    while true do
+      local name, t = vim.uv.fs_scandir_next(sh)
       if not name then break end
       if t == "file" and name:match("%.lua$")
-          and not name:match("^_")       -- _neotree, _storage helpers
+          and not name:match("^_")
           and name ~= "init.lua" then
         local stem = name:gsub("%.lua$", "")
         if not seen[stem] then
@@ -1225,14 +1264,21 @@ function M._available_section_types()
     end
   end
 
-  -- Third-party — keys in cfg.section_modules (v0.2.1 registry).
-  local cfg_modules = M.state and M.state.config
-    and M.state.config.section_modules
-  if type(cfg_modules) == "table" then
-    for k, _ in pairs(cfg_modules) do
-      if type(k) == "string" and not seen[k] then
-        seen[k] = true
-        out[#out + 1] = k
+  -- Third-party — keys in cfg.view_modules (preferred) and the
+  -- legacy cfg.section_modules alias. Both forms are accepted in
+  -- v0.2.x per ADR §2.8 backwards-compat; the alias drops at the
+  -- next minor bump.
+  local cfg = M.state and M.state.config
+  if cfg then
+    for _, key in ipairs({ "view_modules", "section_modules" }) do
+      local modules = cfg[key]
+      if type(modules) == "table" then
+        for k, _ in pairs(modules) do
+          if type(k) == "string" and not seen[k] then
+            seen[k] = true
+            out[#out + 1] = k
+          end
+        end
       end
     end
   end
@@ -1297,9 +1343,9 @@ function M._rebuild_section_registry(new_sections, opts)
   -- registry's `_bufs` keyed by number retains survivor buffers
   -- because the section module's `_bufnr` was preserved.
   cfg.sections = new_sections
-  require("auto-finder.sections").setup(new_sections, cfg.section_modules)
+  require("auto-finder.views").setup(new_sections, cfg.view_modules or cfg.section_modules)
 
-  local sections_list = require("auto-finder.sections").enabled()
+  local sections_list = require("auto-finder.views").enabled()
   local section_defs  = {}
   for _, s in ipairs(sections_list) do
     section_defs[#section_defs + 1] = {
@@ -1347,7 +1393,7 @@ function M._rebuild_section_registry(new_sections, opts)
   local target = opts.focus_after
   if not target then
     local prev = M.state.section
-    if prev ~= nil and require("auto-finder.sections").resolve(prev) then
+    if prev ~= nil and require("auto-finder.views").resolve(prev) then
       target = prev
     else
       target = cfg.default_section or 0
@@ -1693,7 +1739,7 @@ end
 ---neo-tree's filtered_items, or after `repos add` changed the
 ---registry).
 function M.reload()
-  local section = require("auto-finder.sections").resolve(M.state.section or 0)
+  local section = require("auto-finder.views").resolve(M.state.section or 0)
   if not section then return end
   if M.state.section_buffers then
     M.state.section_buffers[section.number] = nil

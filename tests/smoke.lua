@@ -2607,6 +2607,157 @@ ok("unsubscribe stops the callback",
 core._reset_for_tests()
 end)()
 
+-- ───────────────────────── 30. ADR 0026 Phase 2: sections → views ──
+-- ADR 0026 Phase 2: rename sections/ → views/ with each view as a
+-- sibling directory, keep sections/ as a backwards-compat facade.
+-- This section asserts:
+--   (a) facade preservation — require("auto-finder.sections.<name>")
+--       still resolves and returns the same module as
+--       require("auto-finder.views.<name>")
+--   (b) _available_section_types returns the same set as before
+--       the rename (A12 — public API parity)
+--   (c) the deprecated cfg.section_modules alias still works and
+--       migrates into cfg.view_modules at setup time
+--   (d) shared/view_subs.lua helper: replace/dispose/count semantics
+print("\n[30] ADR 0026 Phase 2 — sections → views (facade + parity)")
+;(function()
+-- (a) Facade resolution. Every public section path must return the
+-- same table as the corresponding views path.
+local pairs_to_check = {
+  { sec = "auto-finder.sections",          view = "auto-finder.views" },
+  { sec = "auto-finder.sections.config",   view = "auto-finder.views.config" },
+  { sec = "auto-finder.sections.files",    view = "auto-finder.views.files" },
+  { sec = "auto-finder.sections.buffers",  view = "auto-finder.views.buffers" },
+  { sec = "auto-finder.sections.repos",    view = "auto-finder.views.repos" },
+  { sec = "auto-finder.sections.dbase",    view = "auto-finder.views.dbase" },
+  -- shared helper relocated out of sections/ entirely; facade keeps
+  -- the old require path valid.
+  { sec = "auto-finder.sections._neotree",      view = "auto-finder.shared.neotree" },
+  { sec = "auto-finder.sections._dbase_files",  view = "auto-finder.views.dbase.files" },
+  { sec = "auto-finder.sections._dbase_layout", view = "auto-finder.views.dbase.layout" },
+  { sec = "auto-finder.sections._dbase_events", view = "auto-finder.views.dbase.events" },
+  { sec = "auto-finder.sections._dbase_setup",  view = "auto-finder.views.dbase.setup" },
+}
+for _, pair in ipairs(pairs_to_check) do
+  local sec_mod = require(pair.sec)
+  local view_mod = require(pair.view)
+  ok("facade: require('" .. pair.sec .. "') === require('" .. pair.view .. "')",
+    sec_mod == view_mod,
+    "facade returned a different table than the view module")
+end
+
+-- (b) _available_section_types parity. After the rename it must still
+-- return the same baseline set (config, files, buffers, repos, dbase),
+-- because every legacy section now lives at views/<name>/ AND the
+-- scan honours both directories.
+local types = af._available_section_types()
+local types_set = {}
+for _, t in ipairs(types) do types_set[t] = true end
+ok("_available_section_types includes 'config'",  types_set.config)
+ok("_available_section_types includes 'files'",   types_set.files)
+ok("_available_section_types includes 'buffers'", types_set.buffers)
+ok("_available_section_types includes 'repos'",   types_set.repos)
+ok("_available_section_types includes 'dbase'",   types_set.dbase)
+-- No leading-underscore helpers should leak through.
+local leaked_underscored
+for _, t in ipairs(types) do
+  if t:sub(1, 1) == "_" then leaked_underscored = t; break end
+end
+ok("_available_section_types excludes underscore-prefixed helpers",
+  leaked_underscored == nil,
+  "leaked: " .. tostring(leaked_underscored))
+
+-- (c) cfg.section_modules → cfg.view_modules alias. Pass the legacy
+-- key and assert apply() migrates it into the new shape. We don't
+-- call af.setup() again here (would reset the panel mid-suite); we
+-- exercise config.lua's apply() directly which is the only consumer
+-- of these keys.
+local cfg_mod = require("auto-finder.config")
+local applied = cfg_mod.apply({
+  sections = { "config", "files" },
+  -- Legacy key. apply() should migrate it.
+  section_modules = {
+    ["fake_legacy_view"] = "some.fake.require.path",
+  },
+})
+ok("apply() honours legacy cfg.section_modules", applied ~= nil)
+ok("apply() migrates section_modules → view_modules",
+  type(applied.view_modules) == "table"
+    and applied.view_modules["fake_legacy_view"] == "some.fake.require.path",
+  "view_modules after migration: " .. vim.inspect(applied.view_modules))
+ok("apply() mirrors view_modules back into section_modules for compat",
+  type(applied.section_modules) == "table"
+    and applied.section_modules["fake_legacy_view"] == "some.fake.require.path",
+  "section_modules after migration: " .. vim.inspect(applied.section_modules))
+
+-- New key alone — no migration message expected, just direct accept.
+local applied2 = cfg_mod.apply({
+  sections = { "config", "files" },
+  view_modules = {
+    ["forward_view"] = "another.fake.path",
+  },
+})
+ok("apply() accepts cfg.view_modules directly",
+  type(applied2.view_modules) == "table"
+    and applied2.view_modules["forward_view"] == "another.fake.path")
+
+-- (d) shared/view_subs helper. Replace-or-add semantics, idempotent
+-- on repeat calls, dispose_all clears the set. The helper is the
+-- Phase 7 dependency that Phase 2 ships ahead.
+local view_subs = require("auto-finder.shared.view_subs")
+local subs = view_subs.new()
+ok("view_subs.new() returns an object", type(subs) == "table")
+ok("view_subs.new() starts with count == 0", subs:count() == 0)
+
+local hits = { a = 0, b = 0 }
+subs:replace("a", "auto-finder.core.metrics:paint",
+  function() hits.a = hits.a + 1 end)
+subs:replace("b", "auto-finder.core.metrics:paint",
+  function() hits.b = hits.b + 1 end)
+ok("view_subs:count() == 2 after two replace() calls", subs:count() == 2)
+ok("view_subs:has('a') is true", subs:has("a"))
+ok("view_subs:has('c') is false", not subs:has("c"))
+
+-- Re-replacing slot 'a' must NOT increase count (replace semantics)
+-- AND must swap which callback fires. Publish once, expect one fire
+-- on the NEW callback only.
+local replaced_a_hits = 0
+subs:replace("a", "auto-finder.core.metrics:paint",
+  function() replaced_a_hits = replaced_a_hits + 1 end)
+ok("view_subs:replace() on same slot keeps count == 2", subs:count() == 2)
+
+local before_a = hits.a
+core.events.publish("auto-finder.core.metrics:paint",
+  { view = "viewsubs-test", dur_ms = 0, generation = 1 })
+vim.wait(10)
+ok("re-replaced slot fires the NEW callback, not the old",
+  replaced_a_hits == 1 and hits.a == before_a,
+  string.format("replaced_a_hits=%d, hits.a delta=%d",
+    replaced_a_hits, hits.a - before_a))
+
+-- dispose_all clears the set; subsequent publishes fire nothing.
+subs:dispose_all()
+ok("view_subs:dispose_all() drops count to 0", subs:count() == 0)
+local before_replaced_a = replaced_a_hits
+local before_b = hits.b
+core.events.publish("auto-finder.core.metrics:paint",
+  { view = "viewsubs-after-dispose", dur_ms = 0, generation = 2 })
+vim.wait(10)
+ok("dispose_all stops every slot's callback",
+  replaced_a_hits == before_replaced_a and hits.b == before_b,
+  string.format("post-dispose delta: a=%d, b=%d",
+    replaced_a_hits - before_replaced_a, hits.b - before_b))
+
+-- replace() requires a non-empty slot name + non-empty topic +
+-- function callback. Each missing field raises.
+local ok1 = pcall(function() subs:replace("", "topic", function() end) end)
+ok("view_subs:replace rejects empty slot name", not ok1)
+local ok2 = pcall(function() subs:replace("x", "", function() end) end)
+ok("view_subs:replace rejects empty topic name", not ok2)
+local ok3 = pcall(function() subs:replace("x", "topic", nil) end)
+ok("view_subs:replace rejects non-function callback", not ok3)
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

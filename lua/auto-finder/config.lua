@@ -7,6 +7,8 @@ local M = {}
 ---@field width { default?: integer, percentage?: number, min: integer, max: integer }
 ---@field default_section integer
 ---@field sections string[]      -- ordered list of section names enabled this session
+---@field view_modules? table<string, string>     -- ADR 0026: third-party view registry (name → require path)
+---@field section_modules? table<string, string>  -- deprecated alias for view_modules; accepted in v0.2.x
 ---@field files table            -- per-section opts forwarded to neo-tree's `filesystem` source on setup; consumer keymap overrides go in `files.window.mappings`
 ---@field repos table            -- per-section opts forwarded to the `auto-finder-repos` source on setup; consumer keymap overrides go in `repos.window.mappings`
 ---@field hijack_directories boolean  -- replace directory buffers with the panel + cwd at the dir
@@ -62,21 +64,30 @@ M.defaults = {
   -- setup time AND on every `worktree:switched` topic; this
   -- field is only the FALLBACK when no per-project record exists.
   sections = { "config", "files", "repos" },
-  -- Third-party section modules. When a name in `cfg.sections` is
-  -- not found at `auto-finder.sections.<name>`, the registry checks
-  -- this map for an explicit module path. Lets external plugins ship
-  -- a section without writing into our `lua/auto-finder/sections/`
-  -- namespace.
+  -- Third-party view modules. When a name in `cfg.sections` is not
+  -- found at `auto-finder.views.<name>`, the registry checks this
+  -- map for an explicit module path. Lets external plugins ship a
+  -- view without writing into our `lua/auto-finder/views/` namespace.
   --
   -- Example:
-  --   cfg.section_modules = {
-  --     ["tasks"] = "myplugin.afsection.tasks",
+  --   cfg.view_modules = {
+  --     ["tasks"] = "myplugin.afview.tasks",
   --   }
   --   cfg.sections = { "config", "files", "repos", "tasks" }
   --
-  -- The module must return a section table with the
-  -- AutoFinderSection contract (see `sections/init.lua`).
-  section_modules = {},
+  -- The module must return a view table with the AutoFinderSection
+  -- contract (see `views/init.lua`).
+  --
+  -- ADR 0026 Phase 2: this key was renamed from `section_modules`
+  -- to `view_modules`. The legacy `section_modules` key is still
+  -- accepted as an alias (per ADR §2.8 backwards-compat checklist)
+  -- — `apply()` merges both into `view_modules` and emits a
+  -- one-time deprecation log entry if the legacy key is used. The
+  -- alias drops at the next minor bump.
+  view_modules = {},
+  -- Deprecated alias. Consumers should switch to `view_modules`.
+  -- Both keys are still accepted in v0.2.x.
+  section_modules = nil,
   files = {
     -- Reveal the file backing the currently focused window in the
     -- files tree on every BufEnter. Maps to neo-tree's native
@@ -203,6 +214,36 @@ function M.apply(user_opts)
     user_opts.width.percentage = user_opts.width.percentage  -- keep if explicit
   end
   local merged = vim.tbl_deep_extend("force", {}, M.defaults, user_opts or {})
+  -- ADR 0026 Phase 2 backwards-compat: merge the legacy
+  -- `section_modules` key into `view_modules` so the registry's
+  -- single source of truth is the new name. Both keys are accepted
+  -- in v0.2.x; the legacy form drops at the next minor bump.
+  if type(merged.section_modules) == "table"
+      and next(merged.section_modules) ~= nil then
+    merged.view_modules = merged.view_modules or {}
+    local migrated_keys = {}
+    for k, v in pairs(merged.section_modules) do
+      if merged.view_modules[k] == nil then
+        merged.view_modules[k] = v
+        migrated_keys[#migrated_keys + 1] = k
+      end
+    end
+    -- One-time deprecation log. Routed through auto-finder.log so
+    -- it lands in the auto-core ring AND surfaces as a toast iff
+    -- the user has the corresponding event subscribed. Soft-dep:
+    -- pcall so an early-init failure of the log module doesn't
+    -- crash setup.
+    pcall(function()
+      require("auto-finder.log").warn("config",
+        "cfg.section_modules is deprecated — rename to "
+        .. "cfg.view_modules (alias accepted through v0.2.x). "
+        .. "Migrated keys: " .. table.concat(migrated_keys, ", "))
+    end)
+    -- Mirror back so any reader that still looks at section_modules
+    -- sees the same data (defensive, in case of out-of-tree
+    -- callers reading config directly).
+    merged.section_modules = vim.deepcopy(merged.view_modules)
+  end
   -- If the merged result has BOTH default and percentage and the
   -- consumer set default explicitly, drop percentage so resolve_width
   -- doesn't get a misleading value.

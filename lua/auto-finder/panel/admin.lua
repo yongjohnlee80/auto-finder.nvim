@@ -162,7 +162,7 @@ end
 
 local function status_lines()
   local af = require("auto-finder")
-  local sections = require("auto-finder.sections").enabled()
+  local sections = require("auto-finder.views").enabled()
   local labels = {}
   for _, s in ipairs(sections) do
     table.insert(labels, string.format("%d:%s", s.number, s.name))
@@ -411,7 +411,7 @@ local function dispatch(input)
     end
 
   elseif verb == "dbase" then
-    local files = require("auto-finder.sections._dbase_files")
+    local files = require("auto-finder.views.dbase.files")
     local sub = toks[2]
 
     if sub == "new" then
@@ -517,7 +517,7 @@ local function dispatch(input)
         -- Multi-step prompt runs inside the admin REPL via the wizard
         -- (mirrors auto-agents' agent.add). Cancelling with <C-c>
         -- preserves the partial state on screen as history.
-        local DBASE_TYPES = require("auto-finder.sections._dbase_files").TYPES
+        local DBASE_TYPES = require("auto-finder.views.dbase.files").TYPES
         local type_set = {}
         for _, t in ipairs(DBASE_TYPES) do type_set[t] = true end
         require("auto-finder.panel.wizard").start({
@@ -742,7 +742,7 @@ local function complete_at(prompt, cursor_col)
   elseif #prev_toks == 1 and prev_toks[1] == "focus" then
     -- Numeric indices and section names from the live registry.
     candidates = {}
-    local sections = require("auto-finder.sections").enabled()
+    local sections = require("auto-finder.views").enabled()
     for _, s in ipairs(sections) do
       table.insert(candidates, tostring(s.number))
       table.insert(candidates, s.name)
@@ -831,12 +831,12 @@ local function complete_at(prompt, cursor_col)
       and (prev_toks[2] == "rm" or prev_toks[2] == "load") then
     -- Existing user files (no `.json` suffix in completion — matches
     -- the dispatch's normalize_name, which appends it if missing).
-    local ok_files, files = pcall(require, "auto-finder.sections._dbase_files")
+    local ok_files, files = pcall(require, "auto-finder.views.dbase.files")
     candidates = ok_files and files.list() or {}
   elseif #prev_toks == 3 and prev_toks[1] == "dbase"
       and prev_toks[2] == "conn" and prev_toks[3] == "rm" then
     -- Existing connection names in the currently-active file.
-    local ok_files, files = pcall(require, "auto-finder.sections._dbase_files")
+    local ok_files, files = pcall(require, "auto-finder.views.dbase.files")
     candidates = {}
     if ok_files then
       local conns = files.connections() or {}
