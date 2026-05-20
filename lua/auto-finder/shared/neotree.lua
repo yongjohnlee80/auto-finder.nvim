@@ -21,30 +21,33 @@
 
 local M = {}
 
--- ── live refresh via auto-core.fs.watch (Phase 4b integration) ──
+-- ── live refresh via auto-core.fs.watch / auto-core.git.watch ──
 --
 -- Soft-dep on auto-core: when present, sections that opt in via
--- `opts.live_refresh = true` get a libuv fs watcher rooted at the
--- cwd and debounced neo-tree refresh on file events. Auto-core
--- absent → silently skipped (auto-finder still works, just without
+-- `opts.live_refresh = true` subscribe to refresh-driving topics
+-- and trigger schedule_refresh on each fire. Auto-core absent →
+-- silently skipped (auto-finder still works, just without
 -- auto-refresh — the prior behavior).
 --
--- ADR 0025 extension: alongside the working-tree fs.watch, also
--- open an `auto-core.git.watch` handle on the cwd's `.git/`
--- plumbing and subscribe to `core.git.state:changed`. Closes the
--- refresh-trigger gap on external `git add`/`commit`/`checkout`/
--- `reset` — those mutate `.git/` only, and `auto-core.fs.watch`
--- excludes `/.git/` by design. The git.watch surface is gated by
--- an additional capability check (`core.git.watch.start`) so the
--- fs-watch path still works if a consumer pins an auto-core
--- version older than v0.1.19.
+-- ADR 0026 Phase 4: this module USED to own the fs.watch and
+-- git.watch handles (per `_ensure_fs_watch` / `_stop_fs_watch`).
+-- Those moved into `auto-finder.core.watchers` so a single core
+-- module owns project-domain watch handles regardless of which
+-- view is rendered. This module now only sets up subscriptions
+-- and arms them on each focus via `section._arm_live_refresh_subs`.
+--
+-- The subscriptions that drive schedule_refresh are:
+--   - `auto-finder.core.files:changed` (translated + debounced
+--     by core's translator per ADR §2.5)
+--   - `worktree:switched` (re-anchor cached state to the new cwd)
+--   - `core.git.state:changed` (still a direct upstream sub through
+--     v0.2.x; Phase 5 swaps for `auto-finder.core.git:changed`)
 --
 -- Per-section state:
---   section._fs_watch_handle      active fs.watch handle (or nil)
---   section._fs_watch_root        dir the fs.watch handle is rooted at
---   section._git_watch_handle     active git.watch handle (or nil)
---   section._git_watch_root       repo_root the git.watch is rooted at
---   section._fs_subscribed        events subscription wired? (one-shot)
+--   section._fs_subscribed       events subscription wired? (one-shot
+--                                 per build_section's lifetime; survives
+--                                 panel close/reopen because the view
+--                                 module is cached)
 local LIVE_REFRESH_DEBOUNCE_MS = 150  -- collapse refresh storms
 
 local function require_core()
@@ -58,22 +61,14 @@ local function require_core()
   return core
 end
 
----True if auto-core ships the v0.1.19+ `git.watch` surface used by
----the ADR 0025 wire-up. Soft-dep — older auto-core still delivers
----working-tree refresh via fs.watch + worktree:switched; only the
----`.git/`-side refresh requires this.
----@param core table
----@return boolean
-local function has_git_watch(core)
-  return type(core.git) == "table"
-      and type(core.git.watch) == "table"
-      and type(core.git.watch.start) == "function"
-      and type(core.git.watch.stop) == "function"
-end
-
----Wire fs-watch + refresh hooks onto `section`. Mutates `section`:
----adds `_ensure_fs_watch` and `_stop_fs_watch` methods, and a
----one-shot `_fs_subscribed` flag. No-op if auto-core isn't loadable.
+---Wire refresh hooks onto `section`. Mutates `section`: adds the
+---`_arm_live_refresh_subs` method and a one-shot `_fs_subscribed`
+---flag. No-op if auto-core isn't loadable.
+---
+---ADR 0026 Phase 4: fs.watch + git.watch ownership lives in
+---`auto-finder.core.watchers` (started by core.ensure_started).
+---This function no longer opens / closes handles — it only sets
+---up the subscriptions that drive schedule_refresh.
 ---@param section table
 ---@param source string
 local function setup_live_refresh(section, source)
@@ -157,132 +152,79 @@ local function setup_live_refresh(section, source)
     pcall(mgr.refresh, source)
   end
 
-  local function ensure_subscribed()
+  -- ADR 0026 Phase 4: fs.watch + git.watch handles moved out of
+  -- this module into `auto-finder.core.watchers`. The section no
+  -- longer owns those handles; it just subscribes to the
+  -- translated `auto-finder.core.*` topics core publishes and
+  -- triggers schedule_refresh on each.
+  --
+  -- core.file:* used to be a direct subscription here; now it
+  -- arrives via `auto-finder.core.files:changed` (debounced +
+  -- burst-detected by core's translator per ADR §2.5). The
+  -- payload carries `{ cwd, kind, paths, parents? }` — we filter
+  -- by `payload.cwd == vim.fn.getcwd()` so a section rendering
+  -- worktree A doesn't refresh when worktree B publishes events.
+  --
+  -- core.git.state:changed STAYS as a direct upstream subscription
+  -- through v0.2.x — Phase 5 swaps it for
+  -- `auto-finder.core.git:changed` once the git cache lands and
+  -- the snapshot delegate path proves stable.
+  --
+  -- worktree:switched STAYS as a direct upstream subscription for
+  -- the section-local re-anchor (drops the cached tree + re-mounts
+  -- against the new cwd). Phase 7's view mount contract will
+  -- consolidate this with the auto-finder.core.repos:changed
+  -- topic core already publishes.
+  -- Exposed as `section._arm_live_refresh_subs` so the lifecycle
+  -- wrap at the bottom of `build_section` can re-arm on every
+  -- focus per [[auto-core-events-subscription-lifecycle]]. The
+  -- internal `_fs_subscribed` flag is still one-shot (the
+  -- subscriptions are session-long and the auto-finder.core.*
+  -- bus reset survives via core.ensure_started's re-arm path).
+  function section._arm_live_refresh_subs()
     if section._fs_subscribed then return end
     section._fs_subscribed = true
-    core.events.subscribe("core.file:*", function(payload, _topic)
-      if type(payload) ~= "table" or type(payload.path) ~= "string" then
-        return
-      end
-      local root = section._fs_watch_root
-      if not root then return end
-      -- Only react when the path falls under our watched root.
-      if payload.path:sub(1, #root) ~= root
-          and payload.path ~= root then
+
+    -- auto-finder.core.files:changed — translated + debounced
+    -- + burst-detected by core's translator. One emit per
+    -- 100ms debounce window.
+    core.events.subscribe("auto-finder.core.files:changed", function(payload)
+      if type(payload) ~= "table" then return end
+      -- core publishes with the cwd at the time the event was
+      -- enqueued; only refresh when that matches our section's
+      -- current anchor. Worktree switches re-anchor via the
+      -- `worktree:switched` subscription below.
+      if payload.cwd and payload.cwd ~= vim.fn.getcwd() then
         return
       end
       schedule_refresh()
     end)
 
     -- Worktree switch → the panel is now showing the wrong tree.
-    -- Re-anchor to the new cwd AND re-establish the fs.watch at the
-    -- new root so subsequent live-refresh events fire correctly.
-    -- Scoped to `worktree:switched` only (deliberately NOT
-    -- `core.cwd:changed`): a plain `:cd` is too aggressive a trigger
-    -- — the user may be inspecting a side directory and doesn't
-    -- want the panel to re-anchor every time. The semantic
-    -- worktree-switch is the right boundary.
-    --
-    -- `_ensure_fs_watch` and `_stop_fs_watch` handle BOTH the
-    -- working-tree fs.watch and (when auto-core ≥ v0.1.19) the
-    -- `.git/`-plumbing git.watch — the switch handler doesn't need
-    -- to manage them separately.
+    -- Re-anchor to the new cwd. Core has already moved its
+    -- fs.watch + git.watch to the new cwd (its own
+    -- worktree:switched subscriber handles that side).
     core.events.subscribe("worktree:switched", function()
       vim.schedule(function()
-        if section._stop_fs_watch then section._stop_fs_watch() end
-        if section._ensure_fs_watch then section._ensure_fs_watch() end
         reanchor_to_cwd()
       end)
     end)
 
     -- ADR 0025 — `.git/`-plumbing mutations published by
-    -- `auto-core.git.watch`. The auto-core side ships from v0.1.19;
-    -- if a consumer pins an older auto-core, this topic is simply
-    -- never published and the callback is a no-op subscription.
-    -- Filter to events whose `repo_root` covers the section's
-    -- current cwd — the same git_dir can host multiple linked
-    -- worktrees and we only want to refresh when the event belongs
-    -- to the one this panel is rendering.
+    -- `auto-core.git.watch`. Still a direct upstream subscription
+    -- in Phase 4; Phase 5 migrates to `auto-finder.core.git:changed`
+    -- once the git cache lands. Filter by repo_root prefix on cwd
+    -- so sibling-worktree events don't over-trigger.
     core.events.subscribe("core.git.state:changed", function(payload, _topic)
       if type(payload) ~= "table" or type(payload.repo_root) ~= "string" then
         return
       end
-      local watched = section._git_watch_root
-      if not watched then return end
-      -- Exact match on the watched repo_root: git.watch is started
-      -- per-cwd, so the only payloads that reach us with our own
-      -- watched root are the ones for this section's worktree. A
-      -- prefix check would over-trigger when sibling worktrees
-      -- share a common_dir prefix.
-      if payload.repo_root ~= watched then return end
-      schedule_refresh()
-    end)
-  end
-
-  function section._ensure_fs_watch()
-    ensure_subscribed()
-    local cwd = vim.fn.getcwd()
-    if section._fs_watch_handle and section._fs_watch_root == cwd then
-      -- fs.watch is already current. If git.watch is also current
-      -- (or unavailable), we're done. If we're missing only the
-      -- git.watch (e.g. cwd was previously non-git, now is), fall
-      -- through to the start-from-scratch path below.
-      if not has_git_watch(core) then return end
-      if section._git_watch_root == cwd then return end
-    end
-    -- Stop any stale handles before starting fresh ones. Stopping
-    -- twice is harmless; stop is idempotent and pcall-guarded.
-    if section._fs_watch_handle then
-      pcall(core.fs.watch.stop, section._fs_watch_handle)
-      section._fs_watch_handle = nil
-      section._fs_watch_root   = nil
-    end
-    if section._git_watch_handle then
-      pcall(core.git.watch.stop, section._git_watch_handle)
-      section._git_watch_handle = nil
-      section._git_watch_root   = nil
-    end
-
-    -- Working-tree watcher (existing behavior, unchanged).
-    local h, err = core.fs.watch.start(cwd, { recursive = true })
-    if h then
-      section._fs_watch_handle = h
-      section._fs_watch_root   = cwd
-    else
-      require("auto-finder.log").debug("shared.neotree",
-        "fs.watch.start failed for '" .. cwd .. "': " .. tostring(err))
-    end
-
-    -- ADR 0025 — `.git/`-plumbing watcher. Soft-deps on
-    -- auto-core ≥ v0.1.19. If cwd isn't a git repo, the auto-core
-    -- side returns nil + err; we soft-fail and leave the git.watch
-    -- state nil so the subscription callback short-circuits.
-    if has_git_watch(core) then
-      local gh, gerr = core.git.watch.start(cwd)
-      if gh then
-        section._git_watch_handle = gh
-        section._git_watch_root   = gh.repo_root  -- normalized cwd
-      else
-        -- Most common reason: cwd isn't in a git repo. Debug-level
-        -- because that's a routine condition (e.g. opening
-        -- auto-finder in a non-repo directory), not an error.
-        require("auto-finder.log").debug("shared.neotree",
-          "git.watch.start failed for '" .. cwd .. "': " .. tostring(gerr))
+      local cwd = vim.fn.getcwd()
+      if payload.repo_root == cwd
+          or cwd:sub(1, #payload.repo_root + 1) == payload.repo_root .. "/" then
+        schedule_refresh()
       end
-    end
-  end
-
-  function section._stop_fs_watch()
-    if section._fs_watch_handle then
-      pcall(core.fs.watch.stop, section._fs_watch_handle)
-      section._fs_watch_handle = nil
-      section._fs_watch_root   = nil
-    end
-    if section._git_watch_handle then
-      pcall(core.git.watch.stop, section._git_watch_handle)
-      section._git_watch_handle = nil
-      section._git_watch_root   = nil
-    end
+    end)
   end
 end
 
@@ -553,27 +495,22 @@ function M.build_section(opts)
   end
 
   -- Wrap the lifecycle hooks for live-refresh-enabled sections.
-  -- The wrappers only fire when auto-core is loadable; otherwise the
-  -- _ensure_fs_watch / _stop_fs_watch methods aren't installed and
-  -- the calls below short-circuit.
+  -- ADR 0026 Phase 4: fs.watch + git.watch ownership moved into
+  -- `auto-finder.core.watchers` (started by core.ensure_started
+  -- and torn down by core.stop). All this wrapper does now is
+  -- arm the `auto-finder.core.files:changed` /
+  -- `core.git.state:changed` / `worktree:switched` subscriptions
+  -- via setup_live_refresh.ensure_subscribed on each focus, so
+  -- the schedule_refresh chain stays live across section
+  -- switches. The wrapper is still on_focus-gated rather than
+  -- module-load to honour [[auto-core-events-subscription-lifecycle]].
   if opts.live_refresh then
     setup_live_refresh(section, source)
-    if section._ensure_fs_watch then
-      local orig_get_buffer = section.get_buffer
-      section.get_buffer = function(panel_winid)
-        local b = orig_get_buffer(panel_winid)
-        section._ensure_fs_watch()
-        return b
-      end
-      local orig_on_focus = section.on_focus
-      section.on_focus = function(panel_winid, bufnr)
-        orig_on_focus(panel_winid, bufnr)
-        section._ensure_fs_watch()
-      end
-      local orig_on_close = section.on_close
-      section.on_close = function()
-        section._stop_fs_watch()
-        orig_on_close()
+    local orig_on_focus = section.on_focus
+    section.on_focus = function(panel_winid, bufnr)
+      if orig_on_focus then orig_on_focus(panel_winid, bufnr) end
+      if section._arm_live_refresh_subs then
+        section._arm_live_refresh_subs()
       end
     end
   end
