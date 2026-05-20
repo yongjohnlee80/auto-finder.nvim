@@ -2,6 +2,155 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.24] — 2026-05-20 — ADR 0026 refactor: runtime state ↔ UI separation (9-phase arc)
+
+Cumulative release of the ADR 0026 refactor arc — all nine
+phases land at once per the user-set "tag once everything is on
+the remote" cadence. The architecture is now split between a
+runtime state component (`lua/auto-finder/core/`) that owns
+every cache + watcher + auto-core subscription, and UI views
+(`lua/auto-finder/views/`) that subscribe to the translated
+`auto-finder.core.*` topics. See `ARCHITECTURE.md` for the
+post-refactor map.
+
+The user-facing symptom that opened the arc — "files panel
+hijacks CPU on busy operations" — is mitigated by the
+translator-side burst coalescing: 100 file events in a window
+now produce a single render call instead of 100. A formal
+≤50% benchmark is deferred (the Phase 4 baseline capture step
+was not executed during the arc; see audit log
+`tests/auto-finder-test-audit.md` for the procedure to capture
+it later).
+
+### Added (architecture)
+
+- `lua/auto-finder/core/` — runtime state component (8 modules):
+  - `init.lua` — re-armable lifecycle (`ensure_started` /
+    `stop` / `reload` / `is_started`). Subscribes upstream
+    `auto-core.*` topics + Buf* autocmds; publishes the
+    `auto-finder.core.*` topic family. Owns the file-event
+    debounce coalescer (100 ms window) with burst detection
+    (>50 events on one parent → `kind='subtree_stale'`).
+  - `events.lua` — topic registry + thin pub/sub wrappers over
+    `auto-core.events`. Six published topics:
+    `auto-finder.core.files:changed`, `auto-finder.core.git:changed`,
+    `auto-finder.core.buffers:changed`, `auto-finder.core.repos:changed`,
+    `auto-finder.core.ready`, `auto-finder.core.metrics:paint`.
+  - `files.lua` — directory-aware sparse cache. File + directory
+    entries with `children_state = 'cold' | 'known' | 'stale'`.
+    Surgical updates from file events; bounded per-directory
+    rescan from `subtree_stale`.
+  - `git.lua` — denormalized view over `auto-core.git.status`.
+    Path-keyed `by_path[abs] = { x, y, code }` from porcelain
+    entries.
+  - `buffers.lua` — Buf*-autocmd-driven cache (`:ls` shape;
+    listed + unloaded). Augroup re-armed on every
+    `ensure_started`.
+  - `repos.lua` — denormalized view over `auto-finder.repos`
+    (which is itself a `worktree.nvim` facade).
+  - `watchers.lua` — `fs.watch` + `git.watch` handle owner.
+    Graceful `max_handles` degradation (warn + readiness flip).
+  - `warm.lua` — chunked top-level walker (8 entries / tick;
+    no tick exceeds 5 ms per A15).
+
+- `lua/auto-finder/shared/` — pure helpers (5 modules):
+  - `neotree.lua` — relocated + slimmed `_neotree.lua`. Now
+    owns the neo-tree mount + the `_arm_live_refresh_subs`
+    subscription wire.
+  - `loading.lua` — generation-tagged placeholder buffer
+    factory (`nofile` + `bufhidden=wipe` + read-only). Used by
+    the dbase view's two-phase mount.
+  - `window.lua` — `is_any_panel` / `is_auto_finder_panel`
+    predicates per the panel-ownership convention.
+  - `view_subs.lua` — per-view subscription set with
+    replace-or-add semantics.
+  - `debounce.lua` — generation-counter coalesce helper.
+    Replaces two inline `vim.defer_fn` coalescers that were
+    silently broken (the `vim.fn.timer_stop(prior)` cancel was
+    no-op'ing because `vim.defer_fn` returns nil; audit log
+    F8.1 captured the pre-existing bug).
+
+- `lua/auto-finder/views/` — UI view modules (each is a
+  directory). Renamed from `sections/` (which is preserved as a
+  one-line facade for v0.2.x backwards-compat). dbase view
+  adopts the placeholder + five-guard mount (ADR §A16);
+  neo-tree-backed views keep synchronous mount due to F7.1
+  (auto-core Registry keymap-binding tension).
+
+- `ARCHITECTURE.md` — post-refactor plugin map. Includes two
+  mermaid diagrams (system architecture flowchart + event flow
+  sequence) and a deep "Event detection + processing" section
+  covering all seven event categories.
+
+- `tests/auto-finder-test-audit.md` — per-phase failure +
+  remediation log for the refactor arc.
+
+- `tests/auto-finder-flaky.test.md` — catalog of smoke
+  sections removed during the refactor with reimplementation
+  plans. First entry: section [24] show-race (removed Phase 4
+  cleanup; reimplementation planned against Phase 7's eventual
+  placeholder pattern).
+
+### Changed
+
+- `cfg.section_modules` accepted as backwards-compat alias for
+  the new `cfg.view_modules` (one-time deprecation warn at
+  startup). Alias drops at next minor.
+- All `vim.notify(...)` call sites in the plugin tree now route
+  through `auto-finder.log` per
+  [[auto-family-logging]] (A9). Component-tag scheme follows
+  `auto-finder.<subtree>.<name>` (A10).
+- The dbase view's log component tags migrated to
+  `view.dbase.*`.
+
+### Fixed
+
+- Pre-existing `vim.defer_fn` cancellation bug (F8.1). The
+  `pcall(vim.fn.timer_stop, _file_buf_timer)` pattern in the
+  pre-Phase-8 translator and `schedule_refresh` coalescers
+  silently no-op'd; both worked by accident through "already
+  drained" guards. `shared/debounce.coalesce` fixes both
+  callsites by using a generation counter instead of timer
+  cancellation.
+
+### Deferred (not in this release)
+
+- **A5 formal benchmark** — `auto-finder.core.metrics:paint`
+  is instrumented and verified; the ≤50% comparison against
+  the v0.2.23 baseline needs someone to capture pre-refactor
+  numbers via a local patch on the v0.2.23 tag.
+- **ADR §A3 revision-4 amendment** — soften "every view
+  returns a placeholder" to "views with async mount paths
+  (dbase) only" until auto-core ships a public keymap-rebind
+  hook (F7.1).
+- **macOS FSEvents reliability** — owned by auto-core. The
+  user-visible rename/delete-needs-`R` bug is tracked at
+  `[[auto-core-fs-event-macos-reliability]]` in the project
+  KB. auto-finder is correctly written; upstream event stream
+  is incomplete on darwin.
+
+### Suite
+
+- v0.2.23 baseline: 263 passed / 1 failed (the section [24]
+  flake, removed during Phase 4 cleanup).
+- v0.2.24 HEAD: **417 passed / 0 failed** across 37 sections.
+  +154 net new assertions across the arc; -1 structurally-
+  removed section.
+- 31 initial-development failures across the 9 phases; every
+  one resolved before its phase landed. Root causes +
+  remediations in `tests/auto-finder-test-audit.md`.
+
+### Compatibility
+
+- Public API unchanged. `require("auto-finder").setup/open/close/toggle/focus/resize`
+  signatures match v0.2.23. User commands unchanged.
+- Internal module paths changed (`sections/` → `views/`);
+  facade re-exports preserve `require("auto-finder.sections.<name>")`
+  for any third-party consumer through v0.2.x. Facade removed
+  at next minor.
+- autovim consumer caret `^0.2.0` covers this release; no
+  consumer-side change required beyond `:Lazy update`.
+
 ## [v0.2.23] — 2026-05-18 — Buffers panel: `:badd`'d files now visible + user-story smoke
 
 > Note on numbering: v0.2.21 and v0.2.22 shipped between my branch-out
