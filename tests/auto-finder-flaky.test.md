@@ -36,8 +36,9 @@ section, and queue the reimplementation note.
 - **Status:** removed (was flaky 1/263 since `v0.2.21`, commit
   `7bbb996`)
 - **Removed in:** ADR 0026 Phase 4 cleanup (this commit)
-- **Reimplementation milestone:** ADR 0026 Phase 7
-  (`loading-placeholder`)
+- **Reimplementation milestone:** ~~ADR 0026 Phase 7
+  (`loading-placeholder`)~~ — **deferred** to an auto-core API
+  change (see "Why this section is hard to fix in place" below).
 
 **User story / production invariant.** When the user (or
 auto-core's internal callers) invokes `command.execute({ action
@@ -96,14 +97,32 @@ contract lands — at that point the section can run against a
 real generation-guarded placeholder mount and prove the guard
 end-to-end without manually mutating sibling state.
 
-**Reimplementation plan (Phase 7 — `loading-placeholder`).**
-The new view mount contract introduces per-view generation
-tokens (ADR §2.3) and a placeholder buffer that mounts
-synchronously before the real render. The show-race coverage
-naturally extends the same A13 (placeholder race) smoke:
+**Reimplementation plan (deferred — pending auto-core change).**
 
-1. Mount the files view via `af.focus(1)`.
-2. Wait for the placeholder → real-buffer transition.
+The original plan was to re-add this against Phase 7's
+loading-placeholder mount contract. **Phase 7 narrowed scope
+to the dbase view only** (see
+[tests/auto-finder-test-audit.md F7.1](./auto-finder-test-audit.md))
+because of an auto-core Registry keymap-binding tension:
+`auto-core.ui.section.Registry:focus` binds `0..9` + `q`
+keymaps on whatever bufnr `section.get_buffer` returns; with a
+placeholder + later swap, those keymaps land on the
+placeholder and are wiped on swap, leaving the real buffer
+without auto-core keymaps. Files / buffers / repos views
+therefore keep synchronous mounts, and the show-race scenario
+has no clean re-introduction point against the views the
+production fix actually covers.
+
+The reimplementation is unblocked when **`auto-core.ui.section`
+exposes a public keymap-rebind hook** (e.g. a
+`Registry:rebind_keymaps(bufnr)` method). At that point:
+
+1. Mount the files view via `af.focus(1)`; the new mount
+   contract makes the section transition through the
+   placeholder generation guard.
+2. Wait for the placeholder → real-buffer transition (using
+   the same `vim.wait` polling against `_owned_bufs[bufnr]`
+   pattern the audit log F4-cascade fixes use).
 3. Stand up a victim window. Capture its winid as
    `current_win`.
 4. Stub `manager.navigate` to close the victim then fire the
@@ -114,9 +133,11 @@ naturally extends the same A13 (placeholder race) smoke:
 6. Assert: `pcall` returned true; victim window invalid; the
    stub was actually reached (`navigate_called = true`).
 
-This shape mirrors the A13 placeholder-race assertions Phase 7
-ships, just against `command.execute` rather than the focus
-path.
+Until that auto-core change lands, this test stays removed.
+The production fix (the `pcall` guard around
+`nvim_set_current_win` at `command/init.lua:45-46`) continues
+to protect the user-visible behavior; only the test coverage
+for that guard is on hold.
 
 **References:**
 

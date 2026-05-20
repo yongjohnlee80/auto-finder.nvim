@@ -542,18 +542,34 @@ the real data and the threshold has held since.
 path, stat?, git_status?, gitignored?, generation }`. Each
 directory entry: `{ kind='directory', path, children = {[name]
 = true, …}, children_state = 'cold'|'known'|'stale', generation }`.
-A directory marked `stale` is re-scanned on next render via
-`vim.uv.fs_scandir` — bounded to that one directory; no
-full-tree rewalk.
+A directory marked `stale` is **flagged for** a re-scan on
+next render; **the actual bounded `vim.uv.fs_scandir` rescan +
+delta-render from the cache is future work**. Today the
+translator coalesces events and publishes
+`auto-finder.core.files:changed`; the consumer in
+`shared/neotree.lua` still calls `manager.refresh(source)`
+which triggers a full neo-tree rewalk at the renderer layer.
+The cache surface exists so a future Phase (or follow-up to
+the ADR 0026 arc) can flip view consumers to delta-render
+directly from the cache without restructural work.
+
+**What the refactor actually buys today** is event-side
+coalescing: a 100-event burst becomes one refresh CALL instead
+of N. The cost of each individual refresh is unchanged (still
+a full neo-tree rewalk). The architectural payoff is the cache
+is now path-keyed + surgically updated, ready for the
+delta-render work whenever it lands.
 
 **Cold-start warming.** On `core.ensure_started(cfg)`,
 `core/warm.lua` opens `vim.uv.fs_scandir` on the cwd's top
 level and walks **8 entries per scheduled tick** (per ADR §2.3
 + A15 — no single tick may exceed 5 ms). The warmer publishes
 `auto-finder.core.ready { areas = { files = 'ready' } }` on
-completion. Subdirectories warm lazily on demand (when a view
-expands a node and asks `files.get(path)` against a `'cold'`
-or `'stale'` directory entry).
+completion. **Subdirectories do NOT warm lazily on demand
+yet** — `core.files.get(path)` returns whatever is cached
+without triggering a rescan when the cache is `cold` or
+`stale`. That on-demand path is future work; today the cache
+grows only via fs.watch events arriving for known paths.
 
 ### 2. Git plumbing mutations
 

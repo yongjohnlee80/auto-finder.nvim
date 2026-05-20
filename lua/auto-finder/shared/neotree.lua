@@ -184,18 +184,24 @@ local function setup_live_refresh(section, source)
   -- topic core already publishes.
   -- Exposed as `section._arm_live_refresh_subs` so the lifecycle
   -- wrap at the bottom of `build_section` can re-arm on every
-  -- focus per [[auto-core-events-subscription-lifecycle]]. The
-  -- internal `_fs_subscribed` flag is still one-shot (the
-  -- subscriptions are session-long and the auto-finder.core.*
-  -- bus reset survives via core.ensure_started's re-arm path).
+  -- focus per [[auto-core-events-subscription-lifecycle]].
+  --
+  -- v0.2.25 fix per Lector review B1: replaced the one-shot
+  -- `_fs_subscribed` boolean with a `shared.view_subs` captured-
+  -- handle set. `replace(slot, topic, cb)` unsubscribes the prior
+  -- handle (if any) before subscribing fresh — so re-running this
+  -- function on every focus is safe AND survives an auto-core bus
+  -- reset. The smoke section [38] (added with this fix) proves
+  -- the bus-reset survivability without manually clearing flags.
   function section._arm_live_refresh_subs()
-    if section._fs_subscribed then return end
-    section._fs_subscribed = true
+    section._live_subs = section._live_subs
+      or require("auto-finder.shared.view_subs").new()
+    local subs = section._live_subs
 
     -- auto-finder.core.files:changed — translated + debounced
     -- + burst-detected by core's translator. One emit per
     -- 100ms debounce window.
-    core.events.subscribe("auto-finder.core.files:changed", function(payload)
+    subs:replace("files", "auto-finder.core.files:changed", function(payload)
       if type(payload) ~= "table" then return end
       -- core publishes with the cwd at the time the event was
       -- enqueued; only refresh when that matches our section's
@@ -211,20 +217,18 @@ local function setup_live_refresh(section, source)
     -- Re-anchor to the new cwd. Core has already moved its
     -- fs.watch + git.watch to the new cwd (its own
     -- worktree:switched subscriber handles that side).
-    core.events.subscribe("worktree:switched", function()
+    subs:replace("worktree", "worktree:switched", function()
       vim.schedule(function()
         reanchor_to_cwd()
       end)
     end)
 
-    -- ADR 0026 Phase 5: git refresh now arrives via
+    -- ADR 0026 Phase 5: git refresh arrives via
     -- `auto-finder.core.git:changed` (translated by core's
     -- translator from upstream `core.git.state:changed`). Filter
     -- by repo_root prefix on cwd so sibling-worktree events don't
-    -- over-trigger. After this migration shared/ no longer
-    -- subscribes to ANY upstream auto-core topic — every view-side
-    -- refresh trigger goes through the auto-finder.core.* surface.
-    core.events.subscribe("auto-finder.core.git:changed", function(payload, _topic)
+    -- over-trigger.
+    subs:replace("git", "auto-finder.core.git:changed", function(payload, _topic)
       if type(payload) ~= "table" or type(payload.repo_root) ~= "string" then
         return
       end
@@ -618,28 +622,28 @@ function M.build_section(opts)
   if type(opts.core_refresh_topic) == "string" and opts.core_refresh_topic ~= "" then
     local topic = opts.core_refresh_topic
     section._core_refresh_topic = topic
-    section._core_refresh_subscribed = false
 
+    -- v0.2.25 fix per Lector review B1: same migration as the
+    -- live-refresh subs above. The arm path uses
+    -- `shared.view_subs:replace` so every focus call is safe
+    -- AND survives an auto-core bus reset (the prior handle is
+    -- unsubscribed before the new subscription is registered;
+    -- if the prior handle was already wiped by a reset, the
+    -- unsubscribe is a no-op and we just register fresh).
     function section._arm_core_refresh_sub()
-      if section._core_refresh_subscribed then return end
-      local core = require_core()
-      if not core then return end
-      core.events.subscribe(topic, function(_payload, _t)
-        -- schedule_refresh is the same coalescer used by
-        -- live_refresh; we share its 150ms debounce + metrics:paint
-        -- emit. No extra per-event filter — buffers/repos events
-        -- are already cwd-scoped at the publisher, so any fire is
-        -- relevant to this section.
+      section._core_subs = section._core_subs
+        or require("auto-finder.shared.view_subs").new()
+      section._core_subs:replace("refresh", topic, function(_payload, _t)
+        -- buffers/repos events are already cwd-scoped at the
+        -- publisher, so any fire is relevant. Drive the public
+        -- section.refresh that handles manager.refresh + the
+        -- metrics:paint emit.
         if section._bufnr and vim.api.nvim_buf_is_valid(section._bufnr) then
-          -- Reuse the closure declared in setup_live_refresh by
-          -- calling section.refresh (a public method we expose
-          -- below to drive the same path).
           if type(section.refresh) == "function" then
             section.refresh()
           end
         end
       end)
-      section._core_refresh_subscribed = true
     end
 
     -- Public refresh entry — drives manager.refresh + the

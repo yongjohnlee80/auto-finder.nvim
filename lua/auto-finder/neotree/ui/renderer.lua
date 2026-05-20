@@ -927,6 +927,25 @@ create_tree = function(state)
       return
     end
   end
+  -- auto-finder fork hardening (ADR 0026 review B2): bail if
+  -- state.bufnr is nil or no longer valid. This guards the
+  -- async-render-against-stale-state path that frequently
+  -- surfaces on macOS:
+  --   fs_scan completes after a scan kicked off pre-close →
+  --   render_context schedules → show_nodes → draw →
+  --   create_tree → NuiTree.init throws "missing bufnr"
+  -- because the panel buffer was wiped between scan start and
+  -- render. The original code's early-return guard only
+  -- handled the "tree+bufnr in sync" case; this branch
+  -- catches "no usable bufnr at all" and exits silently so
+  -- the deferred callback doesn't surface a stack trace in
+  -- the user's session.
+  if not state.bufnr
+      or not vim.api.nvim_buf_is_valid(state.bufnr) then
+    log.debug("create_tree: state.bufnr is nil or invalid; aborting render against stale state",
+      state.name, state.id, tostring(state.bufnr))
+    return
+  end
   state.tree = NuiTree({
     ns_id = highlights.ns_id,
     winid = state.winid,
@@ -1485,6 +1504,18 @@ draw = function(nodes, state, parent_id)
     create_tree(state)
   end
   ---@cast state neotree.StateWithTree
+
+  -- auto-finder fork hardening (ADR 0026 v0.2.25 B2): if
+  -- create_tree bailed because state.bufnr was nil (the
+  -- async-render-against-stale-state path on macOS), state.tree
+  -- is still nil here. Downstream code that indexes state.tree
+  -- would crash with "attempt to index field 'tree' (a nil
+  -- value)". Exit silently — the panel will re-render on the
+  -- next focus via a fresh mount.
+  if not state.tree then
+    log.debug("show_nodes: state.tree is nil (create_tree bailed on stale state); exiting")
+    return
+  end
 
   -- draw the given nodes
   local success, msg = pcall(state.tree.set_nodes, state.tree, nodes, parent_id)

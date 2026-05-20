@@ -2,6 +2,102 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.25] — 2026-05-20 — Post-Lector-review fixes (B1 + B2)
+
+Follow-up to v0.2.24. Lector's review of the ADR 0026 arc
+flagged two release blockers and three documentation gaps; this
+release ships the fixes.
+
+### Fixed
+
+- **B1 — View subscriptions now survive an auto-core bus reset.**
+  `shared/neotree.lua`'s `_arm_live_refresh_subs` and
+  `_arm_core_refresh_sub` previously used one-shot booleans
+  (`_fs_subscribed`, `_core_refresh_subscribed`) which masked
+  the production failure: after a bus reset wiped the
+  subscriber tables, the flags stayed `true` and re-focus
+  never re-armed. v0.2.25 migrates both arm paths to
+  `shared.view_subs:replace(slot, topic, cb)` which
+  unsubscribes the prior handle before subscribing fresh —
+  safe and idempotent. New smoke section [38] proves
+  bus-reset survival for files / buffers / repos views
+  WITHOUT the manual `_fs_subscribed = false` dance that
+  earlier smokes used to mask the issue.
+
+- **B2 — `vim.schedule callback: missing bufnr` stack trace
+  eliminated (frequently observed on macOS).** The vendored
+  neo-tree fork's `renderer.create_tree` calls
+  `NuiTree({ bufnr = state.bufnr, … })`; when `state.bufnr`
+  was nil (the async-render-against-stale-state path: fs_scan
+  completes after the panel was closed or section switched),
+  NuiTree.init threw "missing bufnr" and surfaced as a
+  scheduled-callback stack trace in the user's session.
+  v0.2.25 adds a guard in `create_tree` that bails when
+  `state.bufnr` is nil or invalid + a downstream guard in
+  `show_nodes` that exits silently if `state.tree` is still
+  nil. New smoke section [38] asserts no unhandled scheduled-
+  callback errors during a rapid open/close cycle.
+
+### Changed (documentation)
+
+- **`ARCHITECTURE.md` cache-rescan claim corrected.** The
+  doc previously said directories marked `stale` re-scan on
+  next render via `vim.uv.fs_scandir`. That is aspirational;
+  the actual translator coalesces events and publishes
+  `auto-finder.core.files:changed`, but the consumer in
+  `shared/neotree.lua` still calls `manager.refresh(source)`
+  (full neo-tree rewalk). The text now clearly distinguishes
+  implemented event coalescing from future delta-render work.
+  Subdirectory lazy-warm on `core.files.get(path)` is
+  similarly clarified as future work.
+
+- **`tests/auto-finder-flaky.test.md` reimplementation plan
+  updated** for the removed section [24]. The original plan
+  pegged it to Phase 7's loading-placeholder pattern; Phase
+  7 narrowed scope to dbase only (per F7.1), so the
+  reimplementation is now deferred until auto-core exposes a
+  public `Registry:rebind_keymaps(bufnr)` hook.
+
+### Performance claim correction
+
+The v0.2.24 entry was lightly overstated. Restated here:
+
+- The user-facing payoff is **event coalescing reduces refresh
+  call frequency** — a 100-event burst becomes one
+  `manager.refresh` call instead of N.
+- The cost of each individual refresh is **unchanged** — the
+  render path still triggers a full neo-tree rewalk at the
+  renderer layer. True delta-rendering from the cache is
+  future work; the architectural surface is now ready for it.
+- A5 instrumentation is in place; the formal ≤ 50% comparison
+  benchmark remains deferred.
+
+### Suite
+
+- v0.2.24: 417 passed / 0 failed (33 sections).
+- v0.2.25: **425 passed / 0 failed (34 sections).**
+- New: section [38] covers B1 (3 bus-reset survival asserts +
+  2 view_subs invariant asserts) and B2 (2 guard-presence
+  asserts + 1 async-error-capture assert).
+
+### Audit log update
+
+- New "Phase 10" entries: F10.1 (B1 fix), F10.2 (B2 fix),
+  F10.3 (smoke grep broadening after the view_subs migration).
+- New forward-policy rule per Lector's review: smoke sections
+  that tolerate stderr / scheduled-callback errors must
+  either capture and assert the exact tolerated warning, or
+  fail. The B2 async-error-capture assert is the reference
+  implementation.
+
+### Compatibility
+
+- Public API unchanged.
+- No new auto-core surface required (B1 fix uses the existing
+  `shared.view_subs` helper; B2 fix is internal to the
+  vendored neo-tree fork).
+- autovim consumer caret `^0.2.0` covers this release.
+
 ## [v0.2.24] — 2026-05-20 — ADR 0026 refactor: runtime state ↔ UI separation (9-phase arc)
 
 Cumulative release of the ADR 0026 refactor arc — all nine

@@ -42,6 +42,20 @@ moved), prefer documenting in `auto-finder-flaky.test.md` so the
 reimplementation plan is captured. The audit log is for "the
 test had to change shape to match the new architecture."
 
+**Async error capture rule (added in v0.2.25 per Lector review):**
+Any smoke section that tolerates stderr / scheduled-callback
+errors must either (a) capture the exact tolerated warning and
+assert against it, or (b) fail the suite. A green
+`<N>/0` pass count while stderr contains `vim.schedule
+callback: ... stack traceback` is **not** a clean signal — it
+means the suite can miss user-visible async failures of the
+same shape. Section [38]'s `B2: zero unhandled
+scheduled-callback errors during rapid open/close cycle`
+assertion is the reference implementation: hook `vim.schedule`
+with an xpcall-wrapped callback for the duration of the test,
+count captured errors, restore `vim.schedule` at block exit,
+assert the captured list is empty.
+
 ---
 
 ## Phase 3 — `core-lifecycle` (2026-05-19, commit `5061373`)
@@ -269,6 +283,170 @@ reimplementation plan.
 ### Post-remediation smoke delta: **356 passed / 1 failed**
 
 Then section [24] removed in `55c24ed`: **355 passed / 0 failed.**
+
+---
+
+## Post-Lector-review fixes — v0.2.25 (2026-05-20)
+
+Lector reviewed the v0.2.24 release (the ADR 0026 nine-phase
+arc) and returned `change_requested` with two release blockers
+and three documentation gaps. v0.2.25 ships the fixes. Audit
+entries below capture each finding + remediation per the
+forward policy.
+
+### F10.1 — view subscriptions still died after auto-core bus reset (B1, release blocker)
+
+**Root cause.** `shared/neotree.lua`'s `_arm_live_refresh_subs`
+and `_arm_core_refresh_sub` used one-shot booleans
+(`_fs_subscribed`, `_core_refresh_subscribed`) gated to prevent
+double-subscribe on every focus. After
+`auto-core.events._reset_for_tests()` (or `:Lazy reload`),
+the captured callbacks were wiped from the subscriber table
+but the booleans stayed `true`. Subsequent focus calls
+short-circuited at the flag check and never re-armed.
+
+Lector caught that:
+
+- Phase 3 (F3.4) and Phase 5 (F5.1) had both observed and
+  documented this limitation.
+- The Phase 5 smoke (section [33]) and Phase 9 smoke
+  (section [37]) had been "passing" by manually clearing
+  `_fs_subscribed = false` before each assertion — masking
+  the production failure rather than testing the real
+  re-arm path.
+- The production behavior: on macOS or any environment where
+  auto-core's event bus gets reset mid-session, the user's
+  files / buffers / repos views silently stop refreshing.
+  The pattern was hiding behind the smoke's manual flag
+  clears for two phases.
+
+**Remediation.** Migrated both `_arm_live_refresh_subs` and
+`_arm_core_refresh_sub` from one-shot booleans to
+`shared.view_subs.new():replace(slot, topic, cb)`. The
+`replace` operation unsubscribes the prior handle (if any —
+the unsubscribe is a no-op when the handle was already wiped
+by a reset) before registering the new subscription. Each
+arm call is now safe AND idempotent without a guard flag.
+
+**Smoke.** New section [38] (`v0.2.25 — view subscriptions
+survive auto-core bus reset`) runs the full protocol for
+each of files / buffers / repos:
+
+1. Focus the view (mount + arm via view_subs).
+2. Force `auto-core.events._reset_for_tests()`.
+3. Re-focus the view (re-arm via `view_subs:replace`).
+4. Publish the relevant `auto-finder.core.*` topic.
+5. Assert `manager.refresh` fires — **without** touching
+   `_fs_subscribed`.
+
+3 view-coverage asserts + 2 view_subs internal-invariant
+asserts (slot counts).
+
+### F10.2 — `vim.schedule callback: missing bufnr` stack trace (B2, release blocker)
+
+**Root cause — confirmed mac-frequent per user observation.**
+The vendored neo-tree fork's `renderer.create_tree` at
+`lua/auto-finder/neotree/ui/renderer.lua:922` calls
+`NuiTree({ bufnr = state.bufnr, … })`. When `state.bufnr` was
+nil (the async-render-against-stale-state path: `fs_scan`
+completes after the panel was closed or the view switched),
+NuiTree's `init` at `nui/tree/init.lua:188` threw "missing
+bufnr" and surfaced as a `vim.schedule callback: ... stack
+traceback` in the user's session.
+
+The original guard at line 923 only covered the early-return
+path (`if state.tree and state.tree.bufnr == state.bufnr then
+return`). The actual `NuiTree(...)` call branch had no
+bufnr-validity check.
+
+Per the user: this is **frequently observed on macOS** —
+matches the F4-cluster ADR-0026 §2.4 macOS FSEvents
+reliability gap; fs_scan completion runs against state that
+moved on.
+
+**Remediation.** Two-part guard in
+`lua/auto-finder/neotree/ui/renderer.lua`:
+
+1. `create_tree` adds a `not state.bufnr or not
+   nvim_buf_is_valid(state.bufnr)` bail-out before the
+   `NuiTree(...)` call. Logs debug + exits silently — the
+   panel will re-render on next focus via a fresh mount.
+2. `show_nodes` adds a sibling `if not state.tree` guard
+   downstream of the `create_tree` call site (line 1509). If
+   create_tree bailed because of #1, `state.tree` is still
+   nil and the unguarded `state.tree:set_nodes(...)` would
+   crash with "attempt to index field 'tree' (a nil value)".
+
+Both guards log via the existing `log.debug` channel under
+the section name / id so the diagnostic surface is intact —
+just not as a user-visible stack trace.
+
+**Smoke.** Section [38] adds:
+
+- 2 grep-style asserts that the v0.2.25 guard text is present
+  in `renderer.lua` (sentinel substrings: `not state%.bufnr`
+  + `aborting render against stale state` + `create_tree
+  bailed on stale state`).
+- 1 dynamic assert per the new "async error capture" policy:
+  hooks `vim.schedule` with an xpcall-wrapped callback,
+  drives a rapid open/close cycle, asserts no captured
+  errors.
+
+### F10.3 — smoke grep broadening for the view_subs migration (caught by Phase 5 assertion)
+
+**Root cause.** The Phase 5 smoke (section [33]) asserts that
+`shared/neotree.lua` "subscribes to auto-finder.core.git:changed"
+via the grep pattern `'events%.subscribe%("auto%-finder%.core%.git:changed"'`.
+The F10.1 fix replaced the direct `core.events.subscribe(...)`
+call with `subs:replace("git", "auto-finder.core.git:changed", ...)`,
+so the grep no longer matched.
+
+**Remediation.** Broadened the grep to match the topic STRING
+in the file (excluding comment-only references via the
+sentinel-substring shape). The intent of the assertion — "uses
+the translated topic, not the upstream one" — survives intact.
+Same pattern applied to the negative grep (`does NOT reference
+core.git.state:changed`).
+
+### Documentation corrections (D1, D2 — non-blockers, shipped with the B-fixes)
+
+- **`ARCHITECTURE.md`** previously claimed directories marked
+  `stale` re-scan on next render via `vim.uv.fs_scandir`
+  (bounded per-directory). That is aspirational — the
+  translator coalesces events and publishes
+  `auto-finder.core.files:changed`, but the consumer in
+  `shared/neotree.lua` still calls `manager.refresh(source)`
+  (full neo-tree rewalk). Text now distinguishes implemented
+  event coalescing from future delta-render work.
+  Subdirectory lazy-warm on `core.files.get(path)` similarly
+  clarified as future work.
+
+- **`tests/auto-finder-flaky.test.md`** entry for the removed
+  section [24] previously pegged reimplementation to Phase
+  7's loading-placeholder pattern. Phase 7 narrowed scope to
+  dbase only per F7.1, so the reimplementation milestone is
+  now `auto-core` shipping a public
+  `Registry:rebind_keymaps(bufnr)` hook. Updated accordingly.
+
+- **`CHANGELOG.md`** v0.2.24 entry was lightly overstated.
+  v0.2.25 entry restates honestly: event coalescing reduces
+  refresh CALL frequency; the cost of each render is unchanged
+  (still a full neo-tree rewalk at the renderer layer); A5
+  instrumentation only, not a formal ≤ 50% comparison.
+
+### Post-v0.2.25 smoke delta: **425 passed / 0 failed**
+
+(v0.2.24 was 417/0; v0.2.25 adds section [38] with 8 new
+asserts — 3 B1 bus-reset survival + 2 view_subs invariant +
+2 B2 guard-presence grep + 1 B2 async-error capture.)
+
+### Forward policy addition (added at the top of this doc)
+
+Per Lector's review: smoke sections that tolerate stderr /
+scheduled-callback errors must either capture and assert the
+exact tolerated warning, or fail. The B2 async-error-capture
+assert is the reference implementation. Added to the
+forward-policy block above.
 
 ---
 

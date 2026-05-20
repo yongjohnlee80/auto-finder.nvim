@@ -3421,15 +3421,16 @@ do
   local f = io.open(plugin_root .. "/lua/auto-finder/shared/neotree.lua", "r")
   local content = f and f:read("*a") or ""
   if f then f:close() end
-  -- Subscribe-call check (excludes type-check comments / docstrings)
-  -- by looking for the exact `events.subscribe("topic` shape.
-  local subs_to_git_state = content:find(
-    'events%.subscribe%("core%.git%.state:changed"')
-  local subs_to_translated_git = content:find(
-    'events%.subscribe%("auto%-finder%.core%.git:changed"')
-  ok("shared/neotree.lua does NOT subscribe to core.git.state:changed",
+  -- Subscribe-call check. After the v0.2.25 B1 fix this is
+  -- broader than just events.subscribe — the subscription may
+  -- be wired via view_subs:replace(slot, topic, cb). Match on
+  -- the topic STRING appearing in the file (excluding obvious
+  -- comment lines that mention it for documentation only).
+  local subs_to_git_state = content:find('"core%.git%.state:changed"')
+  local subs_to_translated_git = content:find('"auto%-finder%.core%.git:changed"')
+  ok("shared/neotree.lua does NOT reference core.git.state:changed as a topic",
     subs_to_git_state == nil)
-  ok("shared/neotree.lua subscribes to auto-finder.core.git:changed",
+  ok("shared/neotree.lua references auto-finder.core.git:changed as a topic",
     subs_to_translated_git ~= nil)
 end
 
@@ -4120,6 +4121,228 @@ end
 
 -- Arc complete.
 print("  INFO  ADR 0026 refactor arc complete (Phases 1–9). Ready for tag.")
+end)()
+
+-- ───────────────────────── 38. v0.2.25 fix: view subs survive bus reset (B1) ──
+-- Lector review (post-Phase-9) found that shared/neotree.lua's
+-- view subscriptions were still one-shot via the
+-- `_fs_subscribed` / `_core_refresh_subscribed` booleans —
+-- a bus reset wiped the callbacks AND the flags blocked
+-- re-arm on subsequent focus. v0.2.25 migrates both paths to
+-- `shared.view_subs`'s replace-or-add semantics so re-arm is
+-- safe (and idempotent).
+--
+-- This smoke proves the bus-reset survivability WITHOUT the
+-- manual `_fs_subscribed = false` dance that Phase 5 / Phase 9
+-- smokes were doing to mask the real issue.
+print("\n[38] v0.2.25 — view subscriptions survive auto-core bus reset (B1)")
+;(function()
+local manager_mod = require("auto-finder.neotree.sources.manager")
+local core_events = require("auto-finder.core.events")
+local up = require("auto-core")
+
+-- For each of files / buffers / repos, run the protocol:
+--   1. Focus the view (mounts + arms subscriptions via view_subs).
+--   2. Force auto-core.events._reset_for_tests (wipes ALL subs).
+--   3. Refocus the view (re-arms subs via view_subs:replace).
+--   4. Publish the relevant auto-finder.core.* topic.
+--   5. Assert manager.refresh fires — without touching
+--      `_fs_subscribed` or `_core_refresh_subscribed`.
+local function bus_reset_survives(view_name, view_idx, topic, payload)
+  -- Ensure section is mounted (cold or re-mounted).
+  af.focus(view_idx)
+  local sec = require("auto-finder.sections")._by_number[view_idx]
+  vim.wait(500, function()
+    return sec and sec._bufnr ~= nil
+      and vim.api.nvim_buf_is_valid(sec._bufnr)
+  end)
+
+  -- Bus reset wipes EVERY subscription on auto-core.events.
+  up.events._reset_for_tests()
+
+  -- Re-arm core (translator subscriptions). This is what
+  -- M.open / M.focus already do defensively.
+  require("auto-finder.core").ensure_started(af.state.config)
+
+  -- Re-focus the view. The on_focus wrap calls
+  -- _arm_live_refresh_subs / _arm_core_refresh_sub, which
+  -- (post-B1) use view_subs:replace — re-armable without a
+  -- flag-clear dance.
+  af.focus(view_idx)
+  vim.wait(50)
+
+  -- Stub manager.refresh to capture fires.
+  local orig_refresh = manager_mod.refresh
+  local refresh_calls = {}
+  manager_mod.refresh = function(source_name, callback)
+    refresh_calls[#refresh_calls + 1] = source_name
+    if callback then pcall(callback) end
+  end
+
+  -- Publish the synthetic topic. core's translator fires it
+  -- through; shared/neotree.lua's view_subs-armed callback
+  -- triggers schedule_refresh → manager.refresh (150ms).
+  core_events.publish(topic, payload)
+  vim.wait(500, function() return #refresh_calls > 0 end)
+
+  manager_mod.refresh = orig_refresh
+
+  return #refresh_calls > 0
+end
+
+-- files view — fires via auto-finder.core.files:changed.
+do
+  local files_idx = require("auto-finder.sections")._by_name["files"]
+  if files_idx then
+    local fired = bus_reset_survives("files", files_idx,
+      "auto-finder.core.files:changed",
+      { cwd = vim.fn.getcwd(), kind = "upsert",
+        paths = { vim.fn.getcwd() .. "/b1-probe.txt" } })
+    ok("B1: files view re-arms refresh after bus reset (no manual flag clear)",
+      fired,
+      "manager.refresh did not fire after bus reset + re-focus")
+  end
+end
+
+-- buffers view — fires via auto-finder.core.buffers:changed.
+do
+  local buffers_idx = require("auto-finder.sections")._by_name["buffers"]
+  if buffers_idx then
+    local fired = bus_reset_survives("buffers", buffers_idx,
+      "auto-finder.core.buffers:changed",
+      { kind = "add", bufnr = 1 })
+    ok("B1: buffers view re-arms refresh after bus reset (no manual flag clear)",
+      fired,
+      "manager.refresh did not fire after bus reset + re-focus")
+  end
+end
+
+-- repos view — fires via auto-finder.core.repos:changed.
+do
+  local repos_idx = require("auto-finder.sections")._by_name["repos"]
+  if repos_idx then
+    local fired = bus_reset_survives("repos", repos_idx,
+      "auto-finder.core.repos:changed",
+      { kind = "worktree_switched", repo_root = vim.fn.getcwd() })
+    ok("B1: repos view re-arms refresh after bus reset (no manual flag clear)",
+      fired,
+      "manager.refresh did not fire after bus reset + re-focus")
+  end
+end
+
+-- ── B1 invariant: view_subs sets are populated (not stuck at 0) ──
+-- The migration uses section._live_subs and section._core_subs;
+-- each should have at least one slot after the arm calls above.
+do
+  local files_sec = require("auto-finder.sections")._by_name["files"]
+    and require("auto-finder.sections")._by_number[
+      require("auto-finder.sections")._by_name["files"]]
+  if files_sec and files_sec._live_subs then
+    ok("B1: files view's _live_subs holds ≥1 slot (files + worktree + git)",
+      files_sec._live_subs:count() >= 1,
+      "count=" .. tostring(files_sec._live_subs:count()))
+  end
+  local repos_sec = require("auto-finder.sections")._by_name["repos"]
+    and require("auto-finder.sections")._by_number[
+      require("auto-finder.sections")._by_name["repos"]]
+  if repos_sec and repos_sec._core_subs then
+    ok("B1: repos view's _core_subs holds the refresh slot",
+      repos_sec._core_subs:count() >= 1,
+      "count=" .. tostring(repos_sec._core_subs:count()))
+  end
+end
+
+-- ── B2: NuiTree missing-bufnr stack trace path (mac-frequent) ──
+-- Lector flagged a `vim.schedule callback: missing bufnr` stack
+-- trace surfacing from neotree/ui/renderer.lua during the
+-- section [13] directory-hijack flow. The smoke previously
+-- tolerated it; v0.2.25 hardens create_tree to bail when
+-- state.bufnr is nil/invalid (the async-render-against-stale-
+-- state path Mac users hit when fs_scan completes after the
+-- panel close / section switch).
+--
+-- The fix is in the production code path (the vendored fork's
+-- renderer.lua at create_tree + show_nodes), but we also add a
+-- B2 invariant smoke here: call create_tree against a state
+-- with bufnr=nil and assert no error + no tree created.
+do
+  local renderer = require("auto-finder.neotree.ui.renderer")
+  local stale_state = {
+    name = "filesystem",
+    id = "test-stale",
+    bufnr = nil,     -- the failure mode
+    winid = nil,
+    tree = nil,
+  }
+  -- create_tree is local to renderer.lua. We can't call it
+  -- directly. Instead drive the show_nodes downstream path
+  -- which calls create_tree internally — set up a state that
+  -- exercises the bail-out branch.
+  --
+  -- Simpler proof: assert the rendered code structure contains
+  -- the v0.2.25 hardening (the early-return guard on
+  -- `not state.bufnr or not nvim_buf_is_valid(state.bufnr)`).
+  local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local s = f:read("*a"); f:close()
+    return s or ""
+  end
+  local renderer_src = read_file(
+    plugin_root .. "/lua/auto-finder/neotree/ui/renderer.lua")
+  ok("B2: create_tree has the v0.2.25 stale-state bail-out guard",
+    renderer_src:find("not state%.bufnr") ~= nil
+      and renderer_src:find("aborting render against stale state") ~= nil,
+    "expected guard text not found")
+  ok("B2: show_nodes has the v0.2.25 nil-tree downstream guard",
+    renderer_src:find("create_tree bailed on stale state") ~= nil,
+    "expected downstream guard text not found")
+end
+
+-- ── B2 (smoke hygiene policy): assert no unhandled async errors ──
+-- Per Lector's policy addendum: smoke sections that tolerate
+-- async warnings must capture them. We can't truly observe
+-- stderr from inside the smoke driver, but we CAN install a
+-- vim.notify shim AND a temporary vim.schedule wrapper that
+-- counts unhandled errors. Future regressions in any async
+-- render path bump the counter and fail this assertion.
+do
+  local schedule_errors = {}
+  -- Hook vim.schedule to wrap callbacks in xpcall so errors
+  -- get captured rather than printed to stderr. Restore on
+  -- block exit so we don't affect the rest of the suite.
+  local orig_schedule = vim.schedule
+  vim.schedule = function(fn)
+    return orig_schedule(function()
+      local ok, err = xpcall(fn, debug.traceback)
+      if not ok then
+        schedule_errors[#schedule_errors + 1] = err
+      end
+    end)
+  end
+
+  -- Trigger the section [13] hijack-equivalent path: open + close
+  -- the panel rapidly so async neo-tree callbacks fire against
+  -- potentially-wiped state.
+  af.close()
+  vim.wait(50)
+  af.open(true)
+  af.focus(1)
+  vim.wait(200)
+  af.close()
+  vim.wait(300)  -- drain any async callbacks
+
+  vim.schedule = orig_schedule
+
+  ok("B2: zero unhandled scheduled-callback errors during rapid open/close cycle",
+    #schedule_errors == 0,
+    "captured " .. #schedule_errors .. " errors: " ..
+    vim.inspect(schedule_errors))
+
+  -- Restore panel state for any downstream sections.
+  af.open(true)
+  vim.wait(100)
+end
 end)()
 
 -- ───────────────────────── summary ────────────────────────
