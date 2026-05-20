@@ -2447,6 +2447,166 @@ ok("user-story: repos panel shows ≥1 node for the current workspace",
   "expected ≥1 node, got " .. _repos_nodes)
 end)()
 
+-- ───────────────────────── 29. ADR 0026 Phase 1: core skeleton ────
+-- ADR 0026 — runtime state component (auto-finder.core). Phase 1
+-- ships a loadable skeleton with no-op lifecycle + placeholder
+-- submodules. This section asserts (a) the public surface
+-- resolves, (b) ensure_started/stop/reload are safe to call, and
+-- (c) the topic registry lists every topic the ADR §2.2 table
+-- declares. Phase 3+ will replace these no-op assertions with
+-- behavior-based ones (A7/A8 per ADR §4).
+print("\n[29] core skeleton (ADR 0026 Phase 1)")
+;(function()
+local core = require("auto-finder.core")
+
+-- (a) module surface.
+ok("auto-finder.core loads",
+  type(core) == "table"
+    and type(core.ensure_started) == "function"
+    and type(core.stop) == "function"
+    and type(core.reload) == "function"
+    and type(core.is_started) == "function")
+
+-- (b) lifecycle no-ops are safe and flip the is_started flag.
+core._reset_for_tests()
+ok("is_started() is false before ensure_started",
+  core.is_started() == false)
+
+local ok_start, err_start = pcall(core.ensure_started, nil)
+ok("ensure_started(nil) is safe", ok_start, tostring(err_start))
+ok("is_started() flips true after ensure_started",
+  core.is_started() == true)
+
+-- Idempotent: second call must not error.
+local ok_start2 = pcall(core.ensure_started, nil)
+ok("ensure_started is idempotent", ok_start2)
+
+local ok_stop = pcall(core.stop)
+ok("stop() is safe", ok_stop)
+ok("is_started() flips false after stop",
+  core.is_started() == false)
+
+local ok_reload = pcall(core.reload, nil)
+ok("reload(nil) is safe (stop + ensure_started)", ok_reload)
+ok("is_started() ends true after reload",
+  core.is_started() == true)
+
+-- (c) submodule lazy loading via __index. Each submodule must
+-- resolve and expose the Phase 1 minimum surface.
+ok("core.files loads with snapshot_now/snapshot_async/get",
+  type(core.files) == "table"
+    and type(core.files.snapshot_now) == "function"
+    and type(core.files.snapshot_async) == "function"
+    and type(core.files.get) == "function")
+
+local files_snap = core.files.snapshot_now()
+ok("core.files.snapshot_now returns { tree, readiness }",
+  type(files_snap) == "table"
+    and type(files_snap.tree) == "table"
+    and type(files_snap.readiness) == "string",
+  "got " .. vim.inspect(files_snap))
+
+ok("core.files.snapshot_now starts in cold readiness",
+  files_snap.readiness == "cold")
+
+ok("core.git loads with snapshot_now/snapshot_async",
+  type(core.git) == "table"
+    and type(core.git.snapshot_now) == "function"
+    and type(core.git.snapshot_async) == "function")
+
+local git_snap = core.git.snapshot_now()
+ok("core.git.snapshot_now returns expected shape",
+  type(git_snap) == "table"
+    and type(git_snap.by_path) == "table"
+    and type(git_snap.readiness) == "string")
+
+ok("core.buffers loads with snapshot surface",
+  type(core.buffers) == "table"
+    and type(core.buffers.snapshot_now) == "function")
+
+ok("core.repos loads with snapshot surface",
+  type(core.repos) == "table"
+    and type(core.repos.snapshot_now) == "function")
+
+ok("core.watchers loads with open/close/list surface",
+  type(core.watchers) == "table"
+    and type(core.watchers.open_for) == "function"
+    and type(core.watchers.close_for) == "function"
+    and type(core.watchers.close_all) == "function"
+    and type(core.watchers.list) == "function")
+
+ok("core.watchers.list() returns empty array on cold start",
+  type(core.watchers.list()) == "table"
+    and #core.watchers.list() == 0)
+
+ok("core.warm loads with start/stop/status surface",
+  type(core.warm) == "table"
+    and type(core.warm.start) == "function"
+    and type(core.warm.stop) == "function"
+    and type(core.warm.status) == "function")
+
+ok("core.warm.status() returns 'cold' on Phase 1 skeleton",
+  core.warm.status() == "cold")
+
+-- (d) topic registry — ADR §2.2 lists six topics. Assert each
+-- one is registered so a Phase 4+ implementer can't accidentally
+-- typo a topic name without the smoke catching it.
+ok("core.events loads with TOPICS/publish/subscribe/unsubscribe",
+  type(core.events) == "table"
+    and type(core.events.TOPICS) == "table"
+    and type(core.events.publish) == "function"
+    and type(core.events.subscribe) == "function"
+    and type(core.events.unsubscribe) == "function")
+
+local expected_topics = {
+  "auto-finder.core.files:changed",
+  "auto-finder.core.git:changed",
+  "auto-finder.core.buffers:changed",
+  "auto-finder.core.repos:changed",
+  "auto-finder.core.ready",
+  "auto-finder.core.metrics:paint",
+}
+for _, t in ipairs(expected_topics) do
+  ok("topic registered: " .. t,
+    type(core.events.TOPICS[t]) == "table"
+      and type(core.events.TOPICS[t].payload) == "string",
+    "missing or malformed TOPICS entry for " .. t)
+end
+
+-- (e) publish/subscribe/unsubscribe are wired to auto-core when
+-- present. The smoke prelude prepends auto-core's main worktree
+-- to the rtp, so auto-core IS available — assert the round-trip.
+local got_payload
+local handle = core.events.subscribe(
+  "auto-finder.core.metrics:paint",
+  function(payload) got_payload = payload end)
+ok("subscribe returns a handle when auto-core is present",
+  handle ~= nil,
+  "auto-core may be missing; check rtp prelude")
+
+core.events.publish("auto-finder.core.metrics:paint",
+  { view = "smoke", dur_ms = 0, generation = 1 })
+vim.wait(10)
+ok("publish → subscriber callback fires with the payload",
+  type(got_payload) == "table"
+    and got_payload.view == "smoke",
+  "got " .. vim.inspect(got_payload))
+
+core.events.unsubscribe(handle)
+got_payload = nil
+core.events.publish("auto-finder.core.metrics:paint",
+  { view = "smoke-after-unsub", dur_ms = 0, generation = 2 })
+vim.wait(10)
+ok("unsubscribe stops the callback",
+  got_payload == nil,
+  "callback fired after unsubscribe: " .. tostring(got_payload))
+
+-- Cleanup: leave core in the same state Phase 1 callers should
+-- assume (not started). Later phases that depend on core being
+-- live will call ensure_started themselves.
+core._reset_for_tests()
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
