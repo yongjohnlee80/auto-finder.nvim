@@ -385,7 +385,7 @@ function M._reload_dbee()
   if not ok_api or type(api) ~= "table" or type(api.core) ~= "table" then return end
   local ok, err = pcall(api.core.source_reload, ACTIVE_BASENAME)
   if not ok then
-    logger.warn("dbase.files", "source_reload failed: " .. tostring(err))
+    logger.warn("view.dbase.files", "source_reload failed: " .. tostring(err))
   end
 end
 

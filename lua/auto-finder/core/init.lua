@@ -113,10 +113,8 @@ end
 local FILES_DEBOUNCE_MS = 100
 local BURST_THRESHOLD   = 50  -- events per parent within window
 local _file_buf = {}            -- { { path, kind } }
-local _file_buf_timer = nil
 
 local function _flush_file_events()
-  _file_buf_timer = nil
   if #_file_buf == 0 then return end
 
   local buf = _file_buf
@@ -185,6 +183,14 @@ local function _flush_file_events()
   end
 end
 
+-- ADR 0026 Phase 8: file-event coalescer uses shared.debounce
+-- instead of an inline vim.defer_fn + timer-id pattern. The
+-- coalescer's `cancel` companion is wired into the test-only
+-- flush helper below.
+local _file_buf_trigger, _file_buf_cancel =
+  require("auto-finder.shared.debounce").coalesce(
+    _flush_file_events, FILES_DEBOUNCE_MS)
+
 local function _enqueue_file_event(path, kind)
   -- Mutate the cache immediately so `get` reflects reality even
   -- mid-debounce. Only the emit is debounced.
@@ -195,23 +201,14 @@ local function _enqueue_file_event(path, kind)
     files_mod.upsert(path)
   end
   _file_buf[#_file_buf + 1] = { path = path, kind = kind }
-  -- (Re)arm the flush timer. vim.defer_fn returns a timer that
-  -- vim.fn.timer_stop can cancel; stopping + re-firing each event
-  -- keeps the window sliding.
-  if _file_buf_timer then
-    pcall(vim.fn.timer_stop, _file_buf_timer)
-  end
-  _file_buf_timer = vim.defer_fn(_flush_file_events, FILES_DEBOUNCE_MS)
+  _file_buf_trigger()
 end
 
 ---Test-only: flush the file-event buffer immediately and clear
----the timer. Used by Phase 4 smoke to assert on debounced output
----without waiting on real time.
+---the pending fire. Used by Phase 4 smoke to assert on debounced
+---output without waiting on real time.
 function M._flush_file_events_for_tests()
-  if _file_buf_timer then
-    pcall(vim.fn.timer_stop, _file_buf_timer)
-    _file_buf_timer = nil
-  end
+  _file_buf_cancel()
   _flush_file_events()
 end
 
@@ -420,10 +417,7 @@ function M.stop()
   M._dispose_handles()
   -- Cancel any pending file-event flush + drop the buffer so the
   -- next ensure_started starts from a clean slate.
-  if _file_buf_timer then
-    pcall(vim.fn.timer_stop, _file_buf_timer)
-    _file_buf_timer = nil
-  end
+  _file_buf_cancel()
   _file_buf = {}
   local ok_warm, warm = pcall(require, "auto-finder.core.warm")
   if ok_warm and type(warm.stop) == "function" then

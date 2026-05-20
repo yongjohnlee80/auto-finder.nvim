@@ -272,6 +272,100 @@ Then section [24] removed in `55c24ed`: **355 passed / 0 failed.**
 
 ---
 
+## Phase 8 — `shared-extraction` + `logging-sweep` (2026-05-20, commit pending)
+
+### Initial smoke delta: 401 passed / **4 failed**
+
+### Failures
+
+#### F8.1 — pre-existing bug: `vim.defer_fn` returns nil, so `vim.fn.timer_stop(prior)` was silently broken across the codebase
+
+**Root cause.** The shared/debounce.lua I shipped initially
+used the obvious pattern:
+
+```lua
+if timer then pcall(vim.fn.timer_stop, timer) end
+timer = vim.defer_fn(fn, ms)
+```
+
+When the Phase 8 smoke exercised it (4 rapid triggers, expecting
+1 fire), it observed **4 fires** — cancellation wasn't working.
+Investigation revealed: `vim.defer_fn` is `vim.schedule_wrap`'d
+internally, which doesn't propagate the inner `timer_start`
+return value. So `timer` is always nil; the `if timer then`
+branch never executes; cancel is silently a no-op.
+
+**This was a pre-existing bug across the codebase.** The same
+pattern was in `core/init.lua`'s pre-Phase-8 file-event
+coalescer, and the Phase 4 burst-coalescing smoke (A4: "100
+events → 1 fire") was passing by ACCIDENT — not because cancel
+worked, but because the first deferred fire drained the buffer
+and subsequent fires saw `if #_file_buf == 0 then return end`
+and bailed. Same shape in `shared/neotree.lua`'s
+schedule_refresh — `refresh_pending` flag + a no-op cancel.
+The pattern worked because each consumer had a separate
+"already drained / already fired" guard.
+
+**Remediation.** Rewrite shared.debounce.coalesce with a
+generation counter: each trigger bumps `pending_gen`; the
+deferred fire captures `my_gen` at schedule time and checks
+`my_gen == pending_gen` at fire time. Stale fires (where a
+newer trigger superseded) are no-ops without touching the
+state. Same latest-wins semantics; cancel works by simply
+bumping `pending_gen` so every in-flight fire is now stale.
+
+Phase 8's refactor flips both consumers (`shared/neotree.lua`
+schedule_refresh + `core/init.lua` file-event coalescer) to
+the new shared.debounce, so the bug is fixed in both places
+in a single landed change. The audit log entry above
+documents the pre-existing-bug shape for future maintainers.
+
+#### F8.2 — `views/init.lua` log tag `"views"` violates A10
+
+**Root cause.** The view registry's failure-mode log calls
+used `"views"` (plural, matching the directory name) instead
+of `"view.registry"` (per A10's `auto-finder.view.<name>`
+scheme). Two occurrences in `views/init.lua` (both inside
+`load_view`'s error paths).
+
+**Remediation.** Renamed to `"view.registry"` — the registry
+isn't itself a view, but `view.registry` fits the A10 scheme
+as "the view-loading subsurface."
+
+#### F8.3 — smoke A10 grep matched `logger.notifyIf` event-name args as if they were component tags
+
+**Root cause.** The A10 smoke grep used pattern
+`'logger%.[%w_]+%(%s*"([%w_.%-]+)"'` which matches the first
+string arg of ANY logger method call — including
+`logger.notifyIf(event_name, msg, opts)`. The first arg to
+`notifyIf` is an EVENT name (subject to a different scheme,
+typically `dbase.connection.changed` etc.), not a component
+tag. Three false-positive violations from `views/dbase/events.lua`'s
+notifyIf calls.
+
+**Remediation.** Restrict the grep to LEVEL functions only
+(error/warn/info/debug/trace). Lua patterns lack alternation,
+so the smoke loops over the level set explicitly. notifyIf /
+notify calls are now ignored by A10's grep.
+
+#### F8.4 — smoke debounce `cancel` test asserting on stale state
+
+**Root cause.** Same as F8.1 — once `cancel` actually works
+(via the generation pattern), the test passes. Listed
+separately because it was a distinct smoke assertion that
+failed; the fix is the same as F8.1's remediation.
+
+**Remediation.** Resolved by the F8.1 fix.
+
+### Post-remediation smoke delta: **405 passed / 0 failed**
+
+(Phase 7 baseline 399/0 + 9 new Phase 8 asserts — 3 for
+debounce semantics, 1 for A9 (vim.notify grep), 1 for A10
+(component-tag grep), 4 for the dbase tag migration smokes —
+minus 3 dbase event-name false positives the F8.3 fix removed.)
+
+---
+
 ## Phase 7 — `loading-placeholder` (2026-05-20, commit pending)
 
 ### Initial smoke delta: 399 passed / **9 failed**

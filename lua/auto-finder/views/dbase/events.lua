@@ -87,7 +87,7 @@ function M.attach()
   if not events then
     -- Soft-dep: auto-core not installed. Section keeps working as a
     -- UI-only surface; no bridge available.
-    logger.info("dbase.events", "auto-core.events not available; event bridge inactive")
+    logger.info("view.dbase.events", "auto-core.events not available; event bridge inactive")
     return true, nil
   end
 
@@ -211,7 +211,7 @@ function M.attach()
       -- forward opts straight through. (Worth surfacing as a wrapper
       -- consistency follow-up — auto-prefixing on level functions
       -- would let callers stay namespace-aware everywhere.)
-      logger.error("dbase.events",
+      logger.error("view.dbase.events",
         ("dbase: query failed — %s"):format(truncate(tostring(err), 80)),
         { event  = "auto-finder.dbase.call.failed",
           fields = { call_id = call_id, conn_id = conn_id, err = err } })

@@ -104,7 +104,7 @@ local function mount_drawer(panel_winid)
     return dbee.api.ui.drawer_show(panel_winid)
   end)
   if not exec_ok then
-    logger.error("dbase", "drawer_show failed: " .. tostring(err))
+    logger.error("view.dbase", "drawer_show failed: " .. tostring(err))
     return nil
   end
 
@@ -209,7 +209,7 @@ function M.on_focus(panel_winid, bufnr)
   local gen = M._generation
   vim.schedule(function()
     if not _still_current(gen, panel_winid, bufnr) then
-      logger.debug("dbase",
+      logger.debug("view.dbase",
         "stale on_focus callback dropped (gen=" .. tostring(gen) .. ")")
       return
     end
@@ -229,7 +229,7 @@ function M.on_focus(panel_winid, bufnr)
     -- Event bridge — idempotent across re-mounts.
     local ev_ok, ev_err = events_mod.attach()
     if not ev_ok then
-      logger.warn("dbase",
+      logger.warn("view.dbase",
         "event bridge attach failed: " .. tostring(ev_err))
     end
 
@@ -237,7 +237,7 @@ function M.on_focus(panel_winid, bufnr)
     -- setup + bridge calls above can run for a few ms each
     -- (first-time only); the user might have focused away by now.
     if not _still_current(gen, panel_winid, bufnr) then
-      logger.debug("dbase",
+      logger.debug("view.dbase",
         "post-setup stale: aborting drawer swap (gen=" ..
         tostring(gen) .. ")")
       return

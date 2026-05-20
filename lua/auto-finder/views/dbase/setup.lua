@@ -117,7 +117,7 @@ function M.ensure_setup(opts)
     -- logger.error would do per auto-family-logging) would be noise.
     -- Mirrors the soft-dep shape used in _dbase_events.lua for the
     -- auto-core.events probe.
-    logger.info("dbase.setup", M._err)
+    logger.info("view.dbase.setup", M._err)
     return false, M._err
   end
 
@@ -160,7 +160,7 @@ function M.ensure_setup(opts)
     -- carry the raw err in `fields` for triage.
     -- Fully-qualified event name because the wrapper's level
     -- functions don't auto-prefix opts.event (only notifyIf does).
-    logger.error("dbase.setup", M._err,
+    logger.error("view.dbase.setup", M._err,
       { event  = "auto-finder.dbase.setup.failed",
         fields = { err = tostring(err) } })
     return false, M._err

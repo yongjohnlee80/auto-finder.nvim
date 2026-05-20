@@ -153,7 +153,7 @@ local function create_editor_window()
     -- Restore unconditionally — runs even if xpcall caught an error.
     vim.o.eventignore = saved_eventignore
     if not ok then
-      logger.error("dbase.layout",
+      logger.error("view.dbase.layout",
         "create_editor_window xpcall body errored: " .. tostring(err))
       return nil
     end
@@ -179,13 +179,13 @@ function M.ensure_editor()
 
   local winid = find_editor_window() or create_editor_window()
   if not winid or not vim.api.nvim_win_is_valid(winid) then
-    logger.error("dbase.layout", "could not resolve editor window")
+    logger.error("view.dbase.layout", "could not resolve editor window")
     return nil
   end
 
   local show_ok, err = pcall(dbee.api.ui.editor_show, winid)
   if not show_ok then
-    logger.error("dbase.layout", "editor_show failed: " .. tostring(err))
+    logger.error("view.dbase.layout", "editor_show failed: " .. tostring(err))
     return nil
   end
   M._editor_winid = winid
@@ -207,7 +207,7 @@ local function ensure_below_split(current_winid, parent_winid, show_fn, label)
     -- Parent gone; auto-recover by mounting the editor first.
     parent_winid = M.ensure_editor()
     if not parent_winid then
-      logger.error("dbase.layout",
+      logger.error("view.dbase.layout",
         label .. ": no parent winid (editor mount failed)")
       return nil
     end
@@ -230,12 +230,12 @@ local function ensure_below_split(current_winid, parent_winid, show_fn, label)
   -- the window. A subsequent legitimate refresh will recover.
   local ok, err = pcall(show_fn, newwin)
   if not ok then
-    logger.warn("dbase.layout",
+    logger.warn("view.dbase.layout",
       label .. "_show errored mid-init (probably a refresh failure): "
         .. tostring(err))
   end
   if not vim.api.nvim_win_is_valid(newwin) then
-    logger.error("dbase.layout",
+    logger.error("view.dbase.layout",
       label .. "_show closed the window before we could capture it")
     return nil
   end

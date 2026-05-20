@@ -75,39 +75,35 @@ local function setup_live_refresh(section, source)
   local core = require_core()
   if not core then return end
 
-  local refresh_pending = false
-  local function schedule_refresh()
-    if refresh_pending then return end
-    refresh_pending = true
-    -- Mark the event-arrival timestamp so the metrics:paint emit
-    -- below can report a meaningful dur_ms ("event arrival to view
-    -- paint complete"). ADR 0026 §3.12 + Phase 3 instrumentation:
-    -- this is the same emit point pre- and post-refactor so A5's
-    -- "≤ 50% baseline" assertion compares like-for-like.
-    local enqueued_ms = (vim.uv or vim.loop).hrtime() / 1e6
-    vim.defer_fn(function()
-      refresh_pending = false
+  -- ADR 0026 Phase 8: schedule_refresh now uses shared.debounce
+  -- instead of an inline `vim.defer_fn` + `refresh_pending` flag.
+  -- The wrapped fn captures the enqueue timestamp on each trigger
+  -- so the metrics:paint emit's `dur_ms` reports "first event in
+  -- the window → render complete" — same shape as the inline
+  -- implementation, just without the duplicate coalescer pattern.
+  local hrtime_ms = function() return (vim.uv or vim.loop).hrtime() / 1e6 end
+  local enqueued_ms = nil
+  local schedule_refresh = require("auto-finder.shared.debounce").coalesce(
+    function()
       if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
+        enqueued_ms = nil
         return
       end
       -- Drive neo-tree's source manager directly. cmd.execute has no
       -- "refresh" action — it only handles "show", "focus", "close",
       -- and falls through to a show/focus pass for anything else,
       -- which doesn't trigger an fs rescan. The R keymap is bound to
-      -- this same `manager.refresh` (per
-      -- `sources/filesystem/init.lua` `handler = wrap(manager.refresh)`).
+      -- this same `manager.refresh`.
       pcall(function()
         require("auto-finder.neotree.sources.manager").refresh(source)
       end)
-      -- ADR 0026 Phase 3: emit the metrics:paint event so smokes
-      -- can measure refresh latency. Currently the v0.2.x render
-      -- path; Phase 7 will fire the same topic from the new view
-      -- mount contract so pre/post-refactor measurements compare
-      -- against the same baseline emit shape. `generation` stays
-      -- at 0 in Phase 3 (the per-view generation counter is added
-      -- in Phase 7 with the loading-placeholder contract); views
-      -- that bump generations will override.
-      local dur_ms = (vim.uv or vim.loop).hrtime() / 1e6 - enqueued_ms
+      -- ADR 0026 Phase 3 metrics:paint emit. `dur_ms` is measured
+      -- from the FIRST trigger in this debounce window — subsequent
+      -- triggers don't reset `enqueued_ms` (set below the wrapped
+      -- fn), so the metric reflects total latency including the
+      -- coalesce hold time.
+      local dur_ms = (enqueued_ms and (hrtime_ms() - enqueued_ms)) or 0
+      enqueued_ms = nil
       pcall(function()
         require("auto-finder.core.events").publish(
           "auto-finder.core.metrics:paint", {
@@ -116,7 +112,18 @@ local function setup_live_refresh(section, source)
             generation = 0,
           })
       end)
-    end, LIVE_REFRESH_DEBOUNCE_MS)
+    end,
+    LIVE_REFRESH_DEBOUNCE_MS
+  )
+
+  -- Wrap the debouncer so the FIRST trigger in each window also
+  -- captures `enqueued_ms`. Subsequent triggers within the window
+  -- update the deferred fire (per shared.debounce.coalesce
+  -- contract) but don't overwrite enqueued_ms.
+  local schedule_refresh_outer = schedule_refresh
+  schedule_refresh = function()
+    if enqueued_ms == nil then enqueued_ms = hrtime_ms() end
+    schedule_refresh_outer()
   end
 
   -- Re-anchor the section's neo-tree state to the current cwd

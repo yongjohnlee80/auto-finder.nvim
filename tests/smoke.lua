@@ -3826,6 +3826,186 @@ if config_idx then af.focus(config_idx) end
 vim.wait(50)
 end)()
 
+-- ───────────────────────── 36. ADR 0026 Phase 8: shared/logging sweep ──
+-- ADR 0026 Phase 8:
+--   - shared/debounce.lua extracted; shared/neotree.lua and
+--     core/init.lua refactored to use it
+--   - dbase log component tags migrated to view.dbase.* (A10)
+--   - vim.notify audit: zero live calls in the plugin tree
+--     (excluding the vendored neo-tree fork)
+print("\n[36] ADR 0026 Phase 8 — shared extraction + logging sweep (A9/A10)")
+;(function()
+-- ── shared.debounce: coalesce semantics ──
+local debounce = require("auto-finder.shared.debounce")
+ok("shared.debounce.coalesce is callable",
+  type(debounce.coalesce) == "function")
+
+-- A coalescer with 80ms window. Rapid back-to-back triggers
+-- should fire fn exactly once (not 4 times).
+local fires = 0
+local last_args
+local trigger, cancel = debounce.coalesce(function(a, b)
+  fires = fires + 1
+  last_args = { a, b }
+end, 80)
+
+for i = 1, 4 do trigger("call-" .. i, i) end
+vim.wait(150, function() return fires > 0 end)
+ok("4 rapid triggers within 80ms window → exactly 1 fire",
+  fires == 1, "fires=" .. fires)
+ok("debounce fires fn with the LAST call's args (latest-wins)",
+  last_args and last_args[1] == "call-4" and last_args[2] == 4,
+  "got " .. vim.inspect(last_args))
+
+-- cancel() drops the pending fire.
+fires = 0
+trigger("dropped")
+cancel()
+vim.wait(150)
+ok("cancel() drops the pending fire (no callback)",
+  fires == 0, "fires=" .. fires)
+
+-- ── A9: zero live vim.notify calls in plugin tree (excl neo-tree fork) ──
+do
+  local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local s = f:read("*a"); f:close()
+    return s or ""
+  end
+  local function walk(dir, fn)
+    local h = vim.uv.fs_scandir(dir)
+    if not h then return end
+    while true do
+      local name, t = vim.uv.fs_scandir_next(h)
+      if not name then break end
+      if name ~= "neotree" then
+        local p = dir .. "/" .. name
+        if t == "directory" then walk(p, fn)
+        elseif t == "file" and name:match("%.lua$") then fn(p)
+        end
+      end
+    end
+  end
+  local plugin_root_lua = plugin_root .. "/lua/auto-finder"
+  local violations = {}
+  walk(plugin_root_lua, function(path)
+    local content = read_file(path)
+    -- Match `vim.notify(` calls that are NOT inside a comment.
+    -- Cheap check: scan each line; ignore lines whose first
+    -- non-whitespace chars are `--` (comment) or `---` (docstring).
+    for line in content:gmatch("[^\n]+") do
+      local trimmed = line:match("^%s*(.*)$") or ""
+      if not trimmed:match("^%-%-") then
+        if trimmed:find("vim%.notify%s*%(") then
+          violations[#violations + 1] = path .. ": " .. trimmed
+        end
+      end
+    end
+  end)
+  ok("A9: zero live vim.notify calls in plugin tree (excl neo-tree fork)",
+    #violations == 0,
+    "violations: " .. vim.inspect(violations))
+end
+
+-- ── A10: component tags follow convention ──
+-- core/*.lua             → auto-finder.core.<area>
+-- views/<name>/*.lua     → auto-finder.view.<name>[.<sub>]
+-- shared/*.lua           → auto-finder.shared.<helper>
+-- panel/*.lua            → auto-finder.panel.<helper>
+do
+  local function read_file(path)
+    local f = io.open(path, "r")
+    if not f then return "" end
+    local s = f:read("*a"); f:close()
+    return s or ""
+  end
+  local function walk(dir, fn)
+    local h = vim.uv.fs_scandir(dir)
+    if not h then return end
+    while true do
+      local name, t = vim.uv.fs_scandir_next(h)
+      if not name then break end
+      if name ~= "neotree" then
+        local p = dir .. "/" .. name
+        if t == "directory" then walk(p, fn)
+        elseif t == "file" and name:match("%.lua$") then fn(p)
+        end
+      end
+    end
+  end
+  local violations = {}
+  walk(plugin_root .. "/lua/auto-finder", function(path)
+    local content = read_file(path)
+    local subtree = path:match("/lua/auto%-finder/([^/]+)/")
+    -- Find every log.<level>("<tag>" / logger.<level>("<tag>" call
+    -- with its tag string; verify the tag is consistent with the
+    -- file's subtree per the A10 scheme.
+    for tag in content:gmatch("[%w_]+%.([%w_]+)%s*[%w_]*%.?[%w_]*%s*%(") do
+      -- This grabs too much; do a tighter match below.
+    end
+    for level in content:gmatch('log[%w_.]*%.([%w_]+)%("([%w_.%-]+)') do
+      local _ = level  -- not used
+    end
+    -- Tighter: explicitly match logger.<level>("<tag>" or
+    -- require("auto-finder.log").<level>("<tag>".
+    -- Match level-functions only (error/warn/info/debug/trace).
+    -- notifyIf/notify take event names as the first arg, not
+    -- component tags — they're tracked by a different convention
+    -- and aren't subject to A10's scheme.
+    -- Lua patterns lack alternation; loop the level set.
+    local levels = { "error", "warn", "info", "debug", "trace" }
+    local function check_tag(tag)
+      local ok_tag
+      if subtree == "core" then
+        ok_tag = (tag == "core" or tag:match("^core%."))
+      elseif subtree == "views" then
+        ok_tag = tag:match("^view%.")
+      elseif subtree == "shared" then
+        ok_tag = tag:match("^shared%.")
+      elseif subtree == "panel" then
+        ok_tag = tag:match("^panel%.")
+      else
+        ok_tag = true  -- top-level files (init.lua, state.lua, ...) are unconstrained
+      end
+      if not ok_tag then
+        violations[#violations + 1] = path .. " tag '" .. tag .. "'"
+      end
+    end
+    for _, level in ipairs(levels) do
+      local pat = 'logger%.' .. level .. '%(%s*"([%w_.%-]+)"'
+      for tag in content:gmatch(pat) do check_tag(tag) end
+      local pat2 = 'require%("auto%-finder%.log"%)%.' .. level
+        .. '%(%s*"([%w_.%-]+)"'
+      for tag in content:gmatch(pat2) do check_tag(tag) end
+    end
+    -- Drop the legacy stray-match loop below — replaced by the
+    -- per-level loop above. (Original grep block deleted with the
+    -- closing `end` from the outer iterator.)
+    for tag in content:gmatch('SHARED_NEVER_MATCH_THIS_TOKEN_FOR_LEGACY_LOOP_FALLBACK') do
+      local ok_tag
+      if subtree == "core" then
+        ok_tag = (tag == "core" or tag:match("^core%."))
+      elseif subtree == "views" then
+        ok_tag = tag:match("^view%.")
+      elseif subtree == "shared" then
+        ok_tag = tag:match("^shared%.")
+      elseif subtree == "panel" then
+        ok_tag = tag:match("^panel%.")
+      else
+        ok_tag = true
+      end
+      if not ok_tag then
+        violations[#violations + 1] = path .. " tag '" .. tag .. "'"
+      end
+    end
+  end)
+  ok("A10: component tags follow auto-finder.<subtree>.<name> convention",
+    #violations == 0,
+    "violations: " .. vim.inspect(violations))
+end
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

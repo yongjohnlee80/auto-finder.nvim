@@ -73,13 +73,13 @@ local function load_view(name, number, view_modules)
     end
   end
   if not ok then
-    require("auto-finder.log").error("views",
+    require("auto-finder.log").error("view.registry",
       "failed to load view '" .. name .. "' from '" .. module_path
         .. "': " .. tostring(mod))
     return nil
   end
   if type(mod) ~= "table" or type(mod.get_buffer) ~= "function" then
-    require("auto-finder.log").error("views",
+    require("auto-finder.log").error("view.registry",
       "view '" .. name .. "' missing get_buffer()")
     return nil
   end
