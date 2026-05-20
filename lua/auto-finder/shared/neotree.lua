@@ -36,18 +36,22 @@ local M = {}
 -- view is rendered. This module now only sets up subscriptions
 -- and arms them on each focus via `section._arm_live_refresh_subs`.
 --
--- The subscriptions that drive schedule_refresh are:
+-- The subscriptions that drive schedule_refresh (all wired
+-- through `shared.view_subs:replace` per ADR 0026 v0.2.25 fix
+-- B1 — safely idempotent across focus calls + bus-reset
+-- survivable):
 --   - `auto-finder.core.files:changed` (translated + debounced
 --     by core's translator per ADR §2.5)
 --   - `worktree:switched` (re-anchor cached state to the new cwd)
---   - `core.git.state:changed` (still a direct upstream sub through
---     v0.2.x; Phase 5 swaps for `auto-finder.core.git:changed`)
+--   - `auto-finder.core.git:changed` (translated by core's
+--     translator from upstream `core.git.state:changed`;
+--     Phase 5 migration)
 --
 -- Per-section state:
---   section._fs_subscribed       events subscription wired? (one-shot
---                                 per build_section's lifetime; survives
---                                 panel close/reopen because the view
---                                 module is cached)
+--   section._live_subs   view_subs set: { "files", "worktree", "git" }
+--                        (populated by `_arm_live_refresh_subs`)
+--   section._core_subs   view_subs set: { "refresh" } when the section
+--                        passes `core_refresh_topic` (buffers + repos)
 local LIVE_REFRESH_DEBOUNCE_MS = 150  -- collapse refresh storms
 
 local function require_core()
@@ -62,8 +66,9 @@ local function require_core()
 end
 
 ---Wire refresh hooks onto `section`. Mutates `section`: adds the
----`_arm_live_refresh_subs` method and a one-shot `_fs_subscribed`
----flag. No-op if auto-core isn't loadable.
+---`_arm_live_refresh_subs` method which uses `shared.view_subs`
+---for bus-reset-survivable subscription management (per
+---v0.2.25 fix B1). No-op if auto-core isn't loadable.
 ---
 ---ADR 0026 Phase 4: fs.watch + git.watch ownership lives in
 ---`auto-finder.core.watchers` (started by core.ensure_started).

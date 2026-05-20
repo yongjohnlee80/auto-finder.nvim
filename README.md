@@ -44,12 +44,18 @@ Five views in the box:
 | 3 | **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. Tracked via Buf* autocmds through the core's buffer cache. |
 | 4 | **dbase** | [`nvim-dbee`](https://github.com/kndndrj/nvim-dbee) drawer mounted inside the panel. Soft dep — renders a placeholder buffer if dbee isn't installed. Connection files managed from the config REPL. |
 
-Plus the foundations the views render against, all centralized
-in `lua/auto-finder/core/`:
+Plus the foundations behind the views, all centralized in
+`lua/auto-finder/core/`:
 
-- **Single-source-of-truth caches** for the file tree, git
-  status, buffer list, and repos registry. Views subscribe to
-  translated events rather than driving each refresh themselves.
+- **Centralized caches** for the file tree, git status, buffer
+  list, and repos registry. Today views still render through
+  neo-tree's `manager.refresh` path on receiving a translated
+  event; the cache surface exists so a future phase can flip
+  views to delta-rendering directly from `core.<area>.snapshot_now()`
+  (see [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the
+  implemented-vs-future-work breakdown). What changes today:
+  views subscribe to translated `auto-finder.core.*` topics
+  rather than driving each refresh themselves.
 - **Re-armable lifecycle** — every subscription survives an
   `auto-core.events` bus reset (e.g. `:Lazy reload`) via
   unconditional dispose-first-then-resubscribe on

@@ -3439,21 +3439,13 @@ end
 -- This proves the migration didn't break the user-observable
 -- behavior — only the topic path changed.
 do
-  -- The shared/neotree.lua live-refresh subscription is one-shot
-  -- (`_fs_subscribed` flag) per Phase 4 / pre-Phase-7 reality.
-  -- Section [31] above force-reset auto-core.events, which wiped
-  -- the section's subscription, and the flag prevents re-arm on
-  -- focus. Reset the flag here so the smoke can verify the
-  -- translated-topic behavior end-to-end. Phase 7's mount
-  -- contract removes this dance.
-  local files_section = require("auto-finder.sections").resolve(1)
-  if files_section then
-    files_section._fs_subscribed = false
-    if type(files_section._arm_live_refresh_subs) == "function" then
-      files_section._arm_live_refresh_subs()
-    end
-  end
+  -- v0.2.25 B1 fix migrated this from a one-shot flag dance to
+  -- `shared.view_subs:replace` — re-arm is idempotent and
+  -- survives the section [31] bus-reset earlier in the run. The
+  -- assertion below just re-focuses to confirm the translated-
+  -- topic refresh path works end-to-end.
   af.focus(1)  -- files
+  local files_section = require("auto-finder.sections").resolve(1)
   -- ADR 0026 Phase 7: poll until the deferred mount completes so
   -- the schedule_refresh guard (`if not section._bufnr`) doesn't
   -- early-return when our synthetic publish lands.
@@ -4049,17 +4041,11 @@ local probe = core_events.subscribe(
   "auto-finder.core.metrics:paint",
   function(p) if p and p.view == "files" then seen = p end end)
 
--- Reset the files section's one-shot subscription flag in case
--- an earlier section's bus reset wiped it (same dance Phase 5
--- documented). Then focus + publish.
-local files_section = require("auto-finder.sections").resolve(1)
-if files_section then
-  files_section._fs_subscribed = false
-  if type(files_section._arm_live_refresh_subs) == "function" then
-    files_section._arm_live_refresh_subs()
-  end
-end
+-- v0.2.25 B1 fix: re-arm is now idempotent via shared.view_subs.
+-- Just re-focus and the file-event subscription is replaced
+-- in place.
 af.focus(1)  -- files
+local files_section = require("auto-finder.sections").resolve(1)
 vim.wait(500, function()
   return files_section and files_section._bufnr ~= nil
     and vim.api.nvim_buf_is_valid(files_section._bufnr)

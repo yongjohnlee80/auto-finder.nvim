@@ -1575,6 +1575,21 @@ M.show_nodes = function(sourceItems, state, parentId, callback)
   if not sourceItems then
     return
   end
+  -- auto-finder fork hardening (ADR 0026 v0.2.26 follow-up to
+  -- Lector's review): if a lazy-load callback arrives with
+  -- parentId set but state.tree was never created (the async-
+  -- render-against-stale-state class — fs_scan completes after
+  -- panel close or section switch), `state.tree.get_node` below
+  -- would throw "attempt to index field 'tree' (a nil value)"
+  -- before the existing nil-tree guard further down can catch
+  -- it. Exit silently here so the deferred callback doesn't
+  -- surface a stack trace.
+  if parentId ~= nil and not state.tree then
+    log.debug("show_nodes: parentId set but state.tree is nil; "
+      .. "aborting lazy-load against stale state",
+      state.name, state.id, tostring(parentId))
+    return
+  end
   events.fire_event(events.BEFORE_RENDER, state)
   state.longest_width_exact = 0
   local parent

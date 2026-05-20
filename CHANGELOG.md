@@ -2,6 +2,65 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.26] — 2026-05-20 — Post-v0.2.25-approval cleanup (Lector follow-ups)
+
+Lector approved v0.2.25's B1 + B2 fixes (`approved_with_amendments`,
+0 blockers, verified smoke 425/0 against `ae453d3`) and called out
+three non-blocking follow-ups. v0.2.26 ships those. v0.2.25's
+release SHA stays at `ae453d3` so Lector's review record stays
+anchored; v0.2.26 lands on top.
+
+### Cleaned
+
+- **Stale `_fs_subscribed` references** removed from
+  `shared/neotree.lua` (file-header comments at lines 39-50 +
+  the docstring at line 65) and `tests/smoke.lua` (sections
+  [31] and [37] no longer carry the manual
+  `_fs_subscribed = false` workaround). The field stopped
+  existing in v0.2.25's B1 fix; the references existed only
+  because the smoke had been using them as workarounds.
+- Updated comments to describe the actual implementation:
+  `section._live_subs` + `section._core_subs` via
+  `shared.view_subs:replace`.
+
+### Hardened
+
+- **`renderer.show_nodes` parentId entry guard.** Lector's
+  residual-stale-state class: if a lazy-load callback arrives
+  with `parentId` set but `state.tree` is still nil (e.g.
+  fs_scan completes after panel close in a path that doesn't
+  call `create_tree` first), the inner
+  `pcall(state.tree.get_node, …)` would throw before the
+  existing post-`create_tree` nil-tree guard runs. v0.2.26
+  adds an entry guard that exits silently when
+  `parentId ~= nil and not state.tree`. This is a defensive
+  hardening against a class of failures Lector noted is
+  possible but he didn't observe in production; the explicit
+  guard closes it.
+
+### Documentation
+
+- **README.md** softened the "single source of truth" framing
+  so it doesn't imply view-level delta-rendering already
+  works. ARCHITECTURE.md and CHANGELOG were correct already;
+  README now matches. View modules still render through
+  neo-tree's `manager.refresh` path on receiving translated
+  events; the cache surface exists so a future phase can
+  flip to delta-rendering.
+
+### Suite
+
+- v0.2.25: 425 passed / 0 failed (34 sections).
+- v0.2.26: **same — 425/0**. Cleanup commit; no new asserts.
+  Existing smokes continue to prove behavior; the stale
+  workarounds are gone.
+
+### Compatibility
+
+- Public API unchanged.
+- No new auto-core surface required.
+- autovim caret `^0.2.0` auto-picks-up.
+
 ## [v0.2.25] — 2026-05-20 — Post-Lector-review fixes (B1 + B2)
 
 Follow-up to v0.2.24. Lector's review of the ADR 0026 arc
