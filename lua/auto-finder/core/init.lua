@@ -264,8 +264,15 @@ function M.ensure_started(cfg)
   end)
 
   -- core.git.state:changed → auto-finder.core.git:changed
+  -- ADR 0026 Phase 5: also flip core.git's readiness to 'cold' so
+  -- the next snapshot_now / get triggers a fresh query. (The
+  -- underlying auto-core.git.status cache invalidates itself on
+  -- this same upstream topic — per `auto-core/git/status.lua:105`
+  -- — so the actual shell-out happens lazily on the next read,
+  -- not eagerly here.)
   _sub("upstream_git", "core.git.state:changed", function(payload)
     if type(payload) ~= "table" then return end
+    require("auto-finder.core.git")._set_readiness("cold")
     require("auto-finder.core.events").publish(
       "auto-finder.core.git:changed", {
         repo_root = payload.repo_root,

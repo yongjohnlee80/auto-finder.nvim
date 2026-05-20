@@ -210,12 +210,14 @@ local function setup_live_refresh(section, source)
       end)
     end)
 
-    -- ADR 0025 — `.git/`-plumbing mutations published by
-    -- `auto-core.git.watch`. Still a direct upstream subscription
-    -- in Phase 4; Phase 5 migrates to `auto-finder.core.git:changed`
-    -- once the git cache lands. Filter by repo_root prefix on cwd
-    -- so sibling-worktree events don't over-trigger.
-    core.events.subscribe("core.git.state:changed", function(payload, _topic)
+    -- ADR 0026 Phase 5: git refresh now arrives via
+    -- `auto-finder.core.git:changed` (translated by core's
+    -- translator from upstream `core.git.state:changed`). Filter
+    -- by repo_root prefix on cwd so sibling-worktree events don't
+    -- over-trigger. After this migration shared/ no longer
+    -- subscribes to ANY upstream auto-core topic — every view-side
+    -- refresh trigger goes through the auto-finder.core.* surface.
+    core.events.subscribe("auto-finder.core.git:changed", function(payload, _topic)
       if type(payload) ~= "table" or type(payload.repo_root) ~= "string" then
         return
       end

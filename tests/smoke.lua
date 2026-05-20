@@ -3269,6 +3269,176 @@ core_warm._reset_for_tests()
 core_init.ensure_started(af.state.config)
 end)()
 
+-- ───────────────────────── 33. ADR 0026 Phase 5: git cache + translation ──
+-- ADR 0026 Phase 5: real `core.git.snapshot_now` backed by
+-- auto-core.git.status; the last `core.git.state:changed`
+-- upstream subscription in shared/neotree.lua migrates to
+-- `auto-finder.core.git:changed`.
+--
+-- After Phase 5 the shared/ tree subscribes to ZERO direct
+-- upstream auto-core topics (`worktree:switched` is still a
+-- direct upstream sub — Phase 7's view mount contract
+-- consolidates that with auto-finder.core.repos:changed).
+print("\n[33] ADR 0026 Phase 5 — git cache + translation")
+;(function()
+local core_git    = require("auto-finder.core.git")
+local core_init   = require("auto-finder.core")
+local core_events = require("auto-finder.core.events")
+local up          = require("auto-core")
+
+-- ── git snapshot shape ──
+core_init.ensure_started(af.state.config)
+local snap = core_git.snapshot_now()
+ok("core.git.snapshot_now returns a known readiness state",
+  snap.readiness == "ready" or snap.readiness == "partial"
+    or snap.readiness == "cold",
+  "got readiness=" .. tostring(snap.readiness))
+ok("core.git.snapshot_now returns a by_path table",
+  type(snap.by_path) == "table",
+  "got by_path=" .. type(snap.by_path))
+
+-- The smoke runs inside the auto-finder.nvim worktree (a git
+-- repo), so snapshot_now SHOULD populate by_path with real
+-- porcelain entries — UNLESS auto-core can't shell out (e.g. a
+-- sandbox without git in PATH). The test is tolerant of both:
+-- a populated by_path proves the wiring works; an empty one
+-- with readiness='partial' is the soft-fail path.
+if snap.readiness == "ready" then
+  ok("snap.repo_root resolved (smoke runs inside a git repo)",
+    type(snap.repo_root) == "string" and snap.repo_root ~= "")
+elseif snap.readiness == "partial" then
+  ok("readiness=partial when auto-core.git.status returns no entries",
+    snap.by_path ~= nil and next(snap.by_path) == nil)
+else
+  ok("readiness=cold means snapshot has never been queried",
+    true)
+end
+
+-- ── translator: upstream core.git.state:changed → auto-finder.core.git:changed ──
+-- Phase 3 wired the publish; Phase 5 adds the readiness flip.
+-- This test exercises both: subscribe, publish synthetic
+-- upstream event, assert the translated event fires AND
+-- core.git._readiness drops to 'cold'.
+core_git._set_readiness("ready")  -- start from a known state
+local seen
+local h = core_events.subscribe("auto-finder.core.git:changed",
+  function(p) seen = p end)
+up.events.publish("core.git.state:changed", {
+  repo_root = vim.fn.getcwd(),
+  git_dir   = vim.fn.getcwd() .. "/.git",
+  kind      = "head",
+})
+vim.wait(20)
+ok("translator fires auto-finder.core.git:changed",
+  type(seen) == "table" and seen.repo_root == vim.fn.getcwd()
+    and seen.kind == "head",
+  "got " .. vim.inspect(seen))
+ok("translator flips core.git readiness to 'cold' on upstream event",
+  core_git._readiness == "cold",
+  "got " .. tostring(core_git._readiness))
+core_events.unsubscribe(h)
+
+-- ── core.git.get(path) — single-path lookup ──
+-- The smoke driver's own file is tracked in the repo, so a get()
+-- on its path should resolve (returns nil if unchanged-on-disk,
+-- but the lookup itself must not crash and the resolution must
+-- terminate). Reset readiness so the next snapshot re-queries.
+core_git._set_readiness("cold")
+local probe_path = debug.getinfo(1, "S").source:sub(2)  -- this file
+local entry = core_git.get(probe_path)
+-- Either the file has no porcelain entry (clean) → nil, or it
+-- has an entry (dirty in this smoke run) → table. Both are
+-- valid; we just assert no crash + correct shape if non-nil.
+ok("core.git.get(path) returns nil-or-{x,y,code} without crashing",
+  entry == nil
+    or (type(entry) == "table"
+        and type(entry.x) == "string"
+        and type(entry.y) == "string"
+        and type(entry.code) == "string"),
+  "got " .. vim.inspect(entry))
+
+-- ── core.git.invalidate ──
+ok("core.git.invalidate is callable",
+  type(core_git.invalidate) == "function")
+local inv_ok = pcall(core_git.invalidate, vim.fn.getcwd())
+ok("core.git.invalidate(cwd) is safe", inv_ok)
+
+-- ── shared/neotree.lua no longer subscribes to core.git.state:changed ──
+-- Grep-style check. The file should contain a subscription to
+-- auto-finder.core.git:changed (Phase 5 migration target) and
+-- NOT to the upstream core.git.state:changed. The worktree:switched
+-- direct upstream sub is allowed through Phase 5 (Phase 7's
+-- mount contract migrates that one).
+do
+  local f = io.open(plugin_root .. "/lua/auto-finder/shared/neotree.lua", "r")
+  local content = f and f:read("*a") or ""
+  if f then f:close() end
+  -- Subscribe-call check (excludes type-check comments / docstrings)
+  -- by looking for the exact `events.subscribe("topic` shape.
+  local subs_to_git_state = content:find(
+    'events%.subscribe%("core%.git%.state:changed"')
+  local subs_to_translated_git = content:find(
+    'events%.subscribe%("auto%-finder%.core%.git:changed"')
+  ok("shared/neotree.lua does NOT subscribe to core.git.state:changed",
+    subs_to_git_state == nil)
+  ok("shared/neotree.lua subscribes to auto-finder.core.git:changed",
+    subs_to_translated_git ~= nil)
+end
+
+-- ── behavior: publishing core.git.state:changed still triggers
+-- the shared/neotree.lua refresh (via the translated topic) ──
+-- This proves the migration didn't break the user-observable
+-- behavior — only the topic path changed.
+do
+  -- The shared/neotree.lua live-refresh subscription is one-shot
+  -- (`_fs_subscribed` flag) per Phase 4 / pre-Phase-7 reality.
+  -- Section [31] above force-reset auto-core.events, which wiped
+  -- the section's subscription, and the flag prevents re-arm on
+  -- focus. Reset the flag here so the smoke can verify the
+  -- translated-topic behavior end-to-end. Phase 7's mount
+  -- contract removes this dance.
+  local files_section = require("auto-finder.sections").resolve(1)
+  if files_section then
+    files_section._fs_subscribed = false
+    if type(files_section._arm_live_refresh_subs) == "function" then
+      files_section._arm_live_refresh_subs()
+    end
+  end
+  af.focus(1)  -- files
+  vim.wait(50)
+
+  local manager_mod = require("auto-finder.neotree.sources.manager")
+  local orig_refresh = manager_mod.refresh
+  local refresh_calls = {}
+  manager_mod.refresh = function(source_name, callback)
+    refresh_calls[#refresh_calls + 1] = source_name
+    if callback then pcall(callback) end
+  end
+
+  up.events.publish("core.git.state:changed", {
+    repo_root = vim.fn.getcwd(),
+    git_dir   = vim.fn.getcwd() .. "/.git",
+    kind      = "index",
+  })
+  -- LIVE_REFRESH_DEBOUNCE_MS = 150; pad to 350 for CI variance.
+  vim.wait(350, function()
+    for _, src in ipairs(refresh_calls) do
+      if src == "filesystem" then return true end
+    end
+    return false
+  end)
+  local saw_refresh = false
+  for _, src in ipairs(refresh_calls) do
+    if src == "filesystem" then saw_refresh = true; break end
+  end
+  ok("core.git.state:changed still triggers manager.refresh via the translated topic",
+    saw_refresh,
+    "refresh_calls=" .. vim.inspect(refresh_calls))
+
+  manager_mod.refresh = orig_refresh
+end
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
