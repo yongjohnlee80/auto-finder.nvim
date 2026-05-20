@@ -446,9 +446,78 @@ function M.build_section(opts)
   local section = {
     name = opts.name,
     description = opts.description,
-    _bufnr = nil,
+    _bufnr = nil,          -- real (mounted) buffer; legacy field
+    _generation = 0,       -- bumped on every fresh get_buffer
+    _owned_bufs = {},      -- [bufnr] = generation; guard #5 lookup
   }
 
+  -- ADR 0026 Phase 7: five-guard `_still_current` predicate.
+  -- Every deferred callback in on_focus must call this before
+  -- swapping the panel buffer. Returns false if the panel state
+  -- has moved on since the callback was scheduled — a stale
+  -- callback exits silently without touching the panel window.
+  local function still_current(gen, panel_winid, placeholder_bufnr)
+    ---@diagnostic disable-next-line: unused-local
+    local _ = placeholder_bufnr  -- preserved on the signature for
+    -- future guard refinement; today guard #5 inspects the live
+    -- panel buf via `loading.matches` + `_owned_bufs`, not the
+    -- placeholder bufnr captured at on_focus dispatch time
+    -- Guard 1: generation match. A new get_buffer call has
+    -- bumped `_generation`; we're outdated.
+    if gen ~= section._generation then return false end
+    -- Guard 2: panel window valid.
+    if not vim.api.nvim_win_is_valid(panel_winid) then return false end
+    -- Guard 3: panel still belongs to auto-finder. Defends
+    -- against a sibling plugin replacing the window between
+    -- placeholder mount and our callback.
+    local window_mod = require("auto-finder.shared.window")
+    if not window_mod.is_auto_finder_panel(panel_winid) then return false end
+    -- Guard 4: this view is still the active one. If the user
+    -- focused another view between get_buffer and our callback,
+    -- swapping our buffer in would clobber the new active view.
+    local views_mod = require("auto-finder.views")
+    if type(views_mod.active) == "function" then
+      local active = views_mod.active()
+      if active and active ~= section.name then return false end
+    end
+    -- Guard 5: panel currently holds either OUR placeholder
+    -- (the typical first-mount case) OR a real buffer this
+    -- view+generation already produced (the rare case where
+    -- on_focus runs twice for the same generation, e.g. a
+    -- buffer-event triggered re-focus). v2's `or gen == M._gen`
+    -- shape was tautological with guard 1; v3 uses a concrete
+    -- _owned_bufs check (ADR §9 r3 #2).
+    local current_buf = vim.api.nvim_win_get_buf(panel_winid)
+    local loading = require("auto-finder.shared.loading")
+    if loading.matches(current_buf, section.name, gen) then return true end
+    if section._owned_bufs[current_buf] == gen then return true end
+    return false
+  end
+
+  -- ADR 0026 Phase 7 — synchronous mount (DESIGN TENSION, see
+  -- tests/auto-finder-test-audit.md F7.1).
+  --
+  -- The ADR §2.3 vision was that every view's `get_buffer`
+  -- returns a placeholder synchronously and the real mount
+  -- defers via `vim.schedule`. That works in the abstract but
+  -- conflicts with `auto-core.ui.section.Registry:focus`'s
+  -- keymap-binding model: the registry calls `apply_keymap`
+  -- against the bufnr `get_buffer` returns, AND the bufnr is
+  -- cached in `Registry._bufs[section.number]`. If we return a
+  -- placeholder and later swap to a real buffer in `on_focus`,
+  -- the keymaps (0..9, q) land on the placeholder, which is
+  -- wiped on swap, and the real buffer has no auto-core
+  -- keymaps. There's no public auto-core API for re-binding,
+  -- so for neo-tree-backed views (files / buffers / repos)
+  -- Phase 7 keeps the synchronous mount and only uses the
+  -- placeholder pattern in `views/dbase` (where A16 requires
+  -- it because `dbee.setup` is genuinely slow on first run
+  -- and dbase doesn't go through auto-core's Registry).
+  --
+  -- The `_generation` + `_owned_bufs` + `_still_current`
+  -- machinery stays in place so a future auto-core API change
+  -- (or a Phase 7 follow-up) can flip build_section to the
+  -- placeholder pattern without further refactoring here.
   local function buf_valid()
     return section._bufnr and vim.api.nvim_buf_is_valid(section._bufnr)
   end
@@ -460,6 +529,8 @@ function M.build_section(opts)
     local b = mount(panel_winid, source, label)
     if b then
       section._bufnr = b
+      section._generation = section._generation + 1
+      section._owned_bufs[b] = section._generation
       install_help_keymap(label, b)
     end
     return b
@@ -474,6 +545,8 @@ function M.build_section(opts)
       local b = mount(panel_winid, source, label)
       if b then
         section._bufnr = b
+        section._generation = section._generation + 1
+        section._owned_bufs[b] = section._generation
         vim.api.nvim_win_set_buf(panel_winid, b)
         install_help_keymap(label, b)
       end
@@ -482,18 +555,27 @@ function M.build_section(opts)
       -- case neo-tree's setup wiped buffer-local maps on re-render.
       install_help_keymap(label, bufnr)
     end
+    if section._arm_live_refresh_subs then
+      section._arm_live_refresh_subs()
+    end
+    if section._arm_core_refresh_sub then
+      section._arm_core_refresh_sub()
+    end
   end
 
   ---Called by host.close() when the panel window is going away.
   ---Delete the cached neo-tree buffer so a subsequent reopen
   ---re-mounts fresh — without this, neo-tree's win_enter redirect
   ---would fire with a stale `old_state.tree = nil` and crash on
-  ---`attempt to index local 'tree' (a nil value)`.
+  ---`attempt to index local 'tree' (a nil value)`. Also clears
+  ---the owned-bufs table so future generations can't accidentally
+  ---collide.
   function section.on_close()
     if section._bufnr and vim.api.nvim_buf_is_valid(section._bufnr) then
       pcall(vim.api.nvim_buf_delete, section._bufnr, { force = true })
     end
     section._bufnr = nil
+    section._owned_bufs = {}
   end
 
   -- Wrap the lifecycle hooks for live-refresh-enabled sections.

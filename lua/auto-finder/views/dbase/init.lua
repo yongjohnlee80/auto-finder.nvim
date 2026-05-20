@@ -29,7 +29,32 @@ local M = {
   name = "dbase",
   description = "nvim-dbee drawer",
   _bufnr = nil,
+  -- ADR 0026 Phase 7 placeholder mount state.
+  _generation  = 0,
+  _owned_bufs  = {},
 }
+
+---ADR 0026 Phase 7: five-guard `_still_current` predicate. Same
+---contract as shared/neotree.lua's: returns false if the panel
+---state has moved on since the deferred dbee mount was scheduled.
+---Local to dbase because the view doesn't go through
+---`build_section`'s generic wrapper.
+local function _still_current(gen, panel_winid, placeholder_bufnr)
+  if gen ~= M._generation then return false end
+  if not vim.api.nvim_win_is_valid(panel_winid) then return false end
+  local window_mod = require("auto-finder.shared.window")
+  if not window_mod.is_auto_finder_panel(panel_winid) then return false end
+  local views_mod = require("auto-finder.views")
+  if type(views_mod.active) == "function" then
+    local active = views_mod.active()
+    if active and active ~= M.name then return false end
+  end
+  local current_buf = vim.api.nvim_win_get_buf(panel_winid)
+  local loading = require("auto-finder.shared.loading")
+  if loading.matches(current_buf, M.name, gen) then return true end
+  if M._owned_bufs[current_buf] == gen then return true end
+  return false
+end
 
 ---Render a small placeholder buffer in the panel when dbee is not
 ---available. Keeps the section selectable so the user can see *why*
@@ -127,30 +152,108 @@ local function mount_drawer(panel_winid)
   return bufnr
 end
 
+---ADR 0026 Phase 7: two-phase mount per ADR §2.3 + §A16.
+---
+---Phase A (get_buffer): if a previous mount already produced a
+---valid dbee drawer buffer, reuse it (re-focus stays
+---instantaneous). Otherwise bump the generation and return a
+---shared.loading placeholder so the user sees
+---"Loading dbase…" while dbee.setup + drawer_show run.
+---
+---Phase B (on_focus): deferred via vim.schedule. Five-guard
+---`_still_current` check before each side-effect; if the user
+---focused another view between phase A and the callback, exit
+---without touching the panel. Otherwise run the dbase mount in
+---this order:
+---
+---  1. dbee.setup (idempotent — first-run sets up sources;
+---     subsequent calls short-circuit on the cached singleton)
+---  2. event bridge attach (idempotent)
+---  3. drawer_show — the load-bearing call that swaps the
+---     buffer in the panel window; wrapped in
+---     `host.with_unfixed_buf` because dbee internally calls
+---     nvim_win_set_buf which would otherwise be blocked by
+---     winfixbuf=true on the panel.
+---  4. Companion windows (editor / result / call_log) are NOT
+---     opened here — they mount on demand via the `<CR>`
+---     keymap dbee's drawer carries; the A16 acceptance is
+---     that we don't ACCIDENTALLY duplicate them via the
+---     mount path.
 ---@param panel_winid integer
 ---@return integer|nil bufnr
 function M.get_buffer(panel_winid)
+  ---@diagnostic disable-next-line: unused-local
+  local _ = panel_winid  -- consumed in on_focus's deferred mount
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     return M._bufnr
   end
-  local ok, err = setup_mod.ensure_setup(M._setup_opts)
-  if not ok then
-    M._bufnr = placeholder_buffer(panel_winid, err or "dbee.setup failed")
-    return M._bufnr
-  end
-  -- Event bridge attaches after setup so the dbee handler exists; it's
-  -- idempotent and a no-op when auto-core.events is unavailable.
-  local ev_ok, ev_err = events_mod.attach()
-  if not ev_ok then
-    logger.warn("dbase", "event bridge attach failed: " .. tostring(ev_err))
-  end
-  local b = mount_drawer(panel_winid)
-  if b then
-    M._bufnr = b
-  else
-    M._bufnr = placeholder_buffer(panel_winid, "drawer_show returned nil")
-  end
-  return M._bufnr
+  M._generation = M._generation + 1
+  return require("auto-finder.shared.loading").buffer({
+    view = M.name,
+    generation = M._generation,
+    message = "Loading " .. M.name .. "…",
+  })
+end
+
+---ADR 0026 Phase 7 (§A16): the actual dbase mount happens here,
+---deferred behind vim.schedule + the five-guard `_still_current`
+---check. On stale state the callback exits silently — the panel
+---keeps showing the placeholder (or whatever the new active view
+---swapped in) and we don't waste a dbee.setup call.
+---@param panel_winid integer
+---@param bufnr integer  -- placeholder bufnr created by get_buffer
+function M.on_focus(panel_winid, bufnr)
+  -- Re-focus on an already-mounted drawer? No setup needed.
+  if bufnr and M._owned_bufs[bufnr] then return end
+
+  local gen = M._generation
+  vim.schedule(function()
+    if not _still_current(gen, panel_winid, bufnr) then
+      logger.debug("dbase",
+        "stale on_focus callback dropped (gen=" .. tostring(gen) .. ")")
+      return
+    end
+
+    -- dbee setup. Singleton; cached error path returns the
+    -- placeholder permanently so the user can see WHY the view
+    -- didn't mount.
+    local ok, err = setup_mod.ensure_setup(M._setup_opts)
+    if not ok then
+      local pb = placeholder_buffer(panel_winid,
+        err or "dbee.setup failed")
+      M._bufnr = pb
+      M._owned_bufs[pb] = gen
+      return
+    end
+
+    -- Event bridge — idempotent across re-mounts.
+    local ev_ok, ev_err = events_mod.attach()
+    if not ev_ok then
+      logger.warn("dbase",
+        "event bridge attach failed: " .. tostring(ev_err))
+    end
+
+    -- Re-check still_current right before the drawer swap. The
+    -- setup + bridge calls above can run for a few ms each
+    -- (first-time only); the user might have focused away by now.
+    if not _still_current(gen, panel_winid, bufnr) then
+      logger.debug("dbase",
+        "post-setup stale: aborting drawer swap (gen=" ..
+        tostring(gen) .. ")")
+      return
+    end
+
+    local b = mount_drawer(panel_winid)
+    if b then
+      M._bufnr = b
+      M._owned_bufs[b] = gen
+    else
+      local pb = placeholder_buffer(panel_winid,
+        "drawer_show returned nil")
+      M._bufnr = pb
+      M._owned_bufs[pb] = gen
+    end
+  end)
 end
 
 ---Allow auto-finder.setup() to pass section-scoped opts through to
@@ -174,6 +277,7 @@ end
 ---producing UX rough edges.
 function M.on_close()
   M._bufnr = nil
+  M._owned_bufs = {}
   pcall(layout_mod.close_all)
 end
 

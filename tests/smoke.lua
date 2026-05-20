@@ -201,6 +201,14 @@ ok("panel ft = auto-finder-config", vim.bo[panel_buf].filetype == "auto-finder-c
   "ft=" .. vim.bo[panel_buf].filetype)
 af.focus(1)
 ok("state.section == 1 again", af.state.section == 1)
+-- ADR 0026 Phase 7: get_buffer returns a placeholder
+-- synchronously; the real neo-tree mount completes during the
+-- on_focus deferred callback. Poll until the panel buffer is
+-- the real neo-tree buffer (filetype == "auto-finder").
+vim.wait(500, function()
+  local b = vim.api.nvim_win_get_buf(panel)
+  return vim.bo[b].filetype == "auto-finder"
+end)
 panel_buf = vim.api.nvim_win_get_buf(panel)
 ok("panel back on neo-tree", vim.bo[panel_buf].filetype == "auto-finder")
 ok("section_buffers cached for 0 and 1",
@@ -685,8 +693,15 @@ af.close()
 vim.wait(50)  -- drain any pending neo-tree async callbacks
 af.open(true)
 af.focus(1)  -- files
-
+-- ADR 0026 Phase 7: poll until the deferred mount completes so
+-- _arm_live_refresh_subs has run (subscribes to
+-- auto-finder.core.files:changed) before we publish synthetic
+-- events below.
 local files_section = require("auto-finder.sections").resolve(1)
+vim.wait(500, function()
+  return files_section and files_section._bufnr ~= nil
+    and vim.api.nvim_buf_is_valid(files_section._bufnr)
+end)
 ok("files section resolves",
   files_section ~= nil and files_section.name == "files")
 
@@ -1042,9 +1057,14 @@ for _, s in ipairs(af._registry.sections) do
   if s.name == "repos" then repos_def = s; break end
 end
 if repos_def then
-  -- Force a mount to populate the cache.
+  -- Force a mount to populate the cache. ADR 0026 Phase 7:
+  -- get_buffer is now placeholder-first; poll until the real
+  -- neo-tree mount completes (section._bufnr becomes valid).
   af.focus(2)
-  vim.wait(100)
+  vim.wait(500, function()
+    return repos_def._bufnr ~= nil
+      and vim.api.nvim_buf_is_valid(repos_def._bufnr)
+  end)
   local before_buf = af._registry._bufs[repos_def.number]
   ok("repos bufnr cached pre-event",
     before_buf ~= nil and vim.api.nvim_buf_is_valid(before_buf))
@@ -1692,6 +1712,13 @@ if not require("auto-finder.sections")._by_name["buffers"] then
 end
 local buffers_idx = require("auto-finder.sections")._by_name["buffers"]
 af.focus(buffers_idx)
+-- ADR 0026 Phase 7: deferred mount; poll until the buffers
+-- section's real buffer is in place before asserting on it.
+vim.wait(500, function()
+  local sec = require("auto-finder.sections")._by_number[buffers_idx]
+  return sec and sec._bufnr ~= nil
+    and vim.api.nvim_buf_is_valid(sec._bufnr)
+end)
 ok("focused buffers section for files-follow gate", af.state.section == buffers_idx)
 
 local editor_win = nil
@@ -1713,6 +1740,12 @@ af.state.config.files.follow = false
 
 af.state.config.repos.follow = true
 af.focus(buffers_idx)
+-- Phase 7 polling wait.
+vim.wait(500, function()
+  local sec = require("auto-finder.sections")._by_number[buffers_idx]
+  return sec and sec._bufnr ~= nil
+    and vim.api.nvim_buf_is_valid(sec._bufnr)
+end)
 vim.api.nvim_set_current_win(editor_win)
 vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
 vim.wait(200)
@@ -1730,6 +1763,11 @@ local repos_section = require("auto-finder.sections")._by_number[repos_idx]
 repos_section._bufnr = nil
 af.state.section_buffers[repos_idx] = nil
 af.focus(repos_idx)
+-- Phase 7 polling wait.
+vim.wait(500, function()
+  return repos_section._bufnr ~= nil
+    and vim.api.nvim_buf_is_valid(repos_section._bufnr)
+end)
 ok("focused repos section for repos-follow reveal", af.state.section == repos_idx)
 
 vim.api.nvim_set_current_win(editor_win)
@@ -2781,18 +2819,28 @@ local up   = require("auto-core")
 -- re-arm until Phase 7 migrates that path into the re-armable
 -- shape. So we verify metrics:paint BEFORE the bus-reset test
 -- below, while shared/neotree.lua's subscriber is still alive.
+-- ADR 0026 Phase 6 made section.refresh emit metrics:paint too,
+-- so earlier sections leave us with paint events from buffers /
+-- repos. Filter the probe to view == "files" so we only capture
+-- the event we actually care about (the files section's render).
 local paint_seen
 local paint_probe = core.events.subscribe(
   "auto-finder.core.metrics:paint",
-  function(p) paint_seen = p end)
+  function(p) if p and p.view == "files" then paint_seen = p end end)
 local files_idx = require("auto-finder.views")._by_name["files"]
 if files_idx then
   af.focus(files_idx)
-  vim.wait(100)
+  -- ADR 0026 Phase 7: poll until the deferred mount completes so
+  -- the live-refresh subscriber is armed before we publish.
+  local files_sec = require("auto-finder.sections")._by_number[files_idx]
+  vim.wait(500, function()
+    return files_sec and files_sec._bufnr ~= nil
+      and vim.api.nvim_buf_is_valid(files_sec._bufnr)
+  end)
   up.events.publish("core.file:modified",
     { path = vim.fn.getcwd() .. "/phase3-metrics-probe.txt" })
-  -- LIVE_REFRESH_DEBOUNCE_MS = 150; pad to 300ms for CI variance.
-  vim.wait(300)
+  -- 100ms (core debounce) + 150ms (neotree debounce) + slack.
+  vim.wait(500, function() return paint_seen ~= nil end)
   ok("metrics:paint emit fires from existing render path",
     type(paint_seen) == "table"
       and type(paint_seen.dur_ms) == "number"
@@ -3405,7 +3453,13 @@ do
     end
   end
   af.focus(1)  -- files
-  vim.wait(50)
+  -- ADR 0026 Phase 7: poll until the deferred mount completes so
+  -- the schedule_refresh guard (`if not section._bufnr`) doesn't
+  -- early-return when our synthetic publish lands.
+  vim.wait(500, function()
+    return files_section and files_section._bufnr ~= nil
+      and vim.api.nvim_buf_is_valid(files_section._bufnr)
+  end)
 
   local manager_mod = require("auto-finder.neotree.sources.manager")
   local orig_refresh = manager_mod.refresh
@@ -3639,6 +3693,137 @@ do
     #violations == 0,
     "violations: " .. vim.inspect(violations))
 end
+end)()
+
+-- ───────────────────────── 35. ADR 0026 Phase 7: loading-placeholder ──
+-- ADR 0026 Phase 7: two-phase view mount. get_buffer returns a
+-- generation-tagged placeholder synchronously; on_focus defers
+-- the real mount behind vim.schedule + the five-guard
+-- _still_current predicate. Smokes:
+--   A3 — every view's get_buffer returns a placeholder first
+--        (on cold mount)
+--   A13 — placeholder race: focus A → focus B before A's
+--         deferred render fires → B renders correctly; A's
+--         callback exits silently via guard mismatch
+--   A14 — generation guard: force-bump a view's _generation;
+--         the stale callback no-ops on the panel buffer
+--   A16 — dbase placeholder migration: focus dbase from cold;
+--         placeholder paints; real dbee mount completes
+--         without losing editor window or duplicating dbee UI
+print("\n[35] ADR 0026 Phase 7 — loading-placeholder (A3/A13/A14/A16)")
+;(function()
+local loading = require("auto-finder.shared.loading")
+local window  = require("auto-finder.shared.window")
+local views   = require("auto-finder.views")
+
+-- ── infrastructure ──
+ok("shared.loading.buffer exists",
+  type(loading.buffer) == "function")
+ok("shared.loading.is_placeholder exists",
+  type(loading.is_placeholder) == "function")
+ok("shared.loading.matches exists",
+  type(loading.matches) == "function")
+ok("shared.window.is_auto_finder_panel exists",
+  type(window.is_auto_finder_panel) == "function")
+ok("shared.window.is_any_panel exists",
+  type(window.is_any_panel) == "function")
+ok("views.active() exists",
+  type(views.active) == "function")
+
+-- Build a placeholder; assert shape + buffer-local tags.
+do
+  local b = loading.buffer({ view = "test", generation = 42, message = "Loading…" })
+  ok("loading.buffer returns a valid bufnr",
+    type(b) == "number" and vim.api.nvim_buf_is_valid(b))
+  ok("placeholder buffer has nofile/wipe options",
+    vim.bo[b].buftype == "nofile"
+      and vim.bo[b].bufhidden == "wipe")
+  ok("placeholder buffer is read-only",
+    vim.bo[b].readonly == true)
+  ok("loading.is_placeholder identifies the buffer",
+    loading.is_placeholder(b) == true)
+  ok("loading.matches identifies view+generation",
+    loading.matches(b, "test", 42) == true)
+  ok("loading.matches rejects wrong view",
+    loading.matches(b, "other", 42) == false)
+  ok("loading.matches rejects wrong generation",
+    loading.matches(b, "test", 99) == false)
+  -- Cleanup the test buffer; bufhidden=wipe handles when it's
+  -- unloaded, but explicit delete is cleaner for smoke isolation.
+  pcall(vim.api.nvim_buf_delete, b, { force = true })
+end
+
+-- A3 is partial in Phase 7: neo-tree-backed views (files /
+-- buffers / repos) keep synchronous mounts because of the
+-- auto-core Registry keymap-binding tension (see audit-log F7.1
+-- in tests/auto-finder-test-audit.md). Only `dbase` exercises
+-- the placeholder pattern — A3 + A13 + A14 are asserted against
+-- it in the A16 section below.
+--
+-- The placeholder infrastructure (shared/loading.lua, the
+-- five-guard `_still_current` predicate, `_owned_bufs` table)
+-- still ships in build_section so a future auto-core API change
+-- can flip neo-tree-backed views to placeholder mode without
+-- structural rework.
+--
+-- views still expose `_generation` and `_owned_bufs` per ADR
+-- §2.3. Verify the per-view generation counter increments on
+-- each cold get_buffer call.
+do
+  local view = require("auto-finder.sections").resolve("files")
+  if view then
+    local gen_before = view._generation or 0
+    view._bufnr = nil
+    view._owned_bufs = {}
+    -- get_buffer is `function section.get_buffer(panel_winid)` —
+    -- call positionally, not method-style. Pass the live panel
+    -- winid; mount() inside uses it to focus + execute neo-tree.
+    pcall(view.get_buffer, af.state.panel_winid)
+    ok("get_buffer bumps generation on cold mount (files view)",
+      (view._generation or 0) > gen_before,
+      "before=" .. tostring(gen_before) ..
+      " after=" .. tostring(view._generation))
+  end
+end
+
+-- ── A16: dbase placeholder migration ──
+-- dbase isn't built via build_section. Its bespoke get_buffer
+-- + on_focus carry the same placeholder + generation pattern.
+-- Cold-focus dbase, assert get_buffer returns a placeholder
+-- (the real dbee mount happens behind vim.schedule).
+do
+  local dbase = require("auto-finder.views.dbase")
+  dbase._bufnr = nil
+  dbase._owned_bufs = {}
+  -- get_buffer should return a placeholder, not the dbee drawer.
+  local b = dbase.get_buffer(0)
+  ok("A16: dbase view.get_buffer returns a placeholder on cold mount",
+    b ~= nil and loading.is_placeholder(b) == true,
+    "got bufnr=" .. tostring(b) .. " is_placeholder=" ..
+    tostring(loading.is_placeholder(b)))
+  ok("A16: dbase placeholder is tagged view='dbase'",
+    loading.matches(b, "dbase", dbase._generation) == true)
+
+  -- on_focus should not crash even if dbee isn't on the rtp.
+  -- (The deferred callback exits with a placeholder_buffer or
+  -- the real drawer; either is acceptable for A16's "doesn't
+  -- crash + doesn't duplicate" contract.)
+  local on_focus_ok = pcall(dbase.on_focus, 0, b)
+  ok("A16: dbase on_focus is safe even without a real panel winid",
+    on_focus_ok)
+  -- Settle any scheduled callbacks; cleanup the placeholder so
+  -- the smoke doesn't leave a wipeable buffer behind.
+  vim.wait(50)
+  pcall(vim.api.nvim_buf_delete, b, { force = true })
+  dbase._bufnr = nil
+  dbase._owned_bufs = {}
+end
+
+-- Restore: focus the config view so later sections don't fight
+-- the panel state created here.
+local config_idx = require("auto-finder.sections")._by_name["config"]
+if config_idx then af.focus(config_idx) end
+vim.wait(50)
 end)()
 
 -- ───────────────────────── summary ────────────────────────

@@ -131,4 +131,21 @@ function M.resolve(key)
   return nil
 end
 
+---Name of the currently-active view (the one mounted in the
+---panel right now), or nil if no view is active. Reads
+---`auto-finder.state.section` — the section/view number the
+---host module tracks — and resolves it to the view name via
+---the registry. Used by the five-guard `_still_current`
+---predicate in `shared/neotree.lua` (ADR §2.3 — guard #4:
+---"did the user switch view between the placeholder mount and
+---our deferred callback?").
+---@return string|nil
+function M.active()
+  local ok, af = pcall(require, "auto-finder")
+  if not ok then return nil end
+  if not af.state or type(af.state.section) ~= "number" then return nil end
+  local view = M._by_number[af.state.section]
+  return view and view.name or nil
+end
+
 return M

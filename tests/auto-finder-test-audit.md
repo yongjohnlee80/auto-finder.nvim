@@ -272,6 +272,137 @@ Then section [24] removed in `55c24ed`: **355 passed / 0 failed.**
 
 ---
 
+## Phase 7 — `loading-placeholder` (2026-05-20, commit pending)
+
+### Initial smoke delta: 399 passed / **9 failed**
+
+Phase 7 set out to implement ADR §2.3's "every view's
+`get_buffer` returns a placeholder; on_focus defers the real
+mount" pattern. Initial wave of failures revealed timing
+issues, then a deeper design tension surfaced (F7.1 below).
+
+### Failures
+
+#### F7.1 — auto-core Registry keymap binding incompatible with placeholder mount
+
+**Root cause.** `auto-core.ui.section.Registry:focus` binds
+`q`-close-panel and `0..9`-focus-section keymaps on the bufnr
+returned by `section.get_buffer`. With the Phase 7 placeholder
+pattern, those keymaps land on the placeholder buffer
+(`bufhidden = wipe`); my deferred on_focus then swaps the panel
+to the real neo-tree buffer, **wiping the placeholder**. The
+real buffer never receives the keymaps. The smoke catches this
+as "`q` bound on the panel buffer (overrides neo-tree
+close_window)" — false.
+
+`auto-core/ui/section.lua:51-71` (the local `apply_keymap`) is
+not part of auto-core's public surface, so the deferred swap
+has no clean hook to re-bind. Working around it inside
+`shared/neotree.lua` would either:
+- Duplicate `apply_keymap`'s logic (reaching into the
+  Registry's `self.sections` for the 0..9 numbers + `self.panel`
+  for the close action) — leaky abstraction.
+- Force a second `Registry:focus(self.active)` to re-trigger
+  binding — risks infinite re-entry through `section.on_focus`.
+- Require auto-core to expose a public `apply_keymap` /
+  `rebind` API — out of scope for this Phase 7 commit.
+
+**Remediation.** Phase 7 scope narrowed to **`dbase` only**.
+`shared/neotree.lua`'s `build_section` reverts to the
+synchronous-mount get_buffer (status quo from Phase 6 — auto-core
+binds keymaps on the real buffer, no swap). The Phase 7
+infrastructure (`shared/loading.lua`, `shared/window.lua`, the
+`_generation` + `_owned_bufs` + `_still_current` predicate in
+build_section) all SHIP — they're just unused by neo-tree-backed
+views for now. `views/dbase` uses the placeholder pattern fully
+(A16); the deferred mount happens inside `M.on_focus` and never
+touches the auto-core Registry's keymap-bound bufnr because
+dbase already manages its own buffer lifecycle.
+
+**A3 scope.** v3 of the smoke section [35] DROPS the "every
+view returns a placeholder" assertion for files / buffers /
+repos. The infrastructure exists; a future Phase 7 follow-up
+can flip neo-tree-backed views to placeholder mode once
+auto-core ships a public keymap-rebind hook. The dbase
+placeholder (A16) is asserted in place.
+
+**ADR amendment recommended.** §A3 should be softened from
+"Every view's `get_buffer` returns a `shared.loading.buffer`
+first" to "Views with async mount paths (dbase) return a
+placeholder first; views with synchronous mount paths
+(neo-tree-backed) may opt into the placeholder pattern when
+auto-core provides a keymap-rebind hook." File for revision 4.
+
+#### F7.2 — timing cascade (8 follow-on failures from F7.1's placeholder approach)
+
+While the placeholder pattern was active in build_section, 8
+existing smoke assertions failed because they assumed
+`section._bufnr` was valid synchronously after `af.focus(N)`:
+
+- `[6] panel back on neo-tree` — checked panel buffer's
+  filetype was `auto-finder` immediately; placeholder filetype
+  was empty.
+- `[7] live width back to default (38)` — auto_expand_width
+  side effects fired at a different time relative to
+  reset_width.
+- `[14] file-event under cwd triggers neo-tree manager.refresh`
+  — schedule_refresh's guard `if not section._bufnr` returned
+  early because mount hadn't completed.
+- `[14b] core.git.state:changed for cwd triggers manager.refresh`
+  — same guard.
+- `[19] repos bufnr cached pre-event` — checked
+  `_registry._bufs[repos.number]` was valid; cache still held
+  the wipeable placeholder.
+- `[22] panel window still displays buffers buffer` x2 — checked
+  `nvim_win_get_buf(panel) == section._bufnr` immediately.
+- `[22] panel window still displays repos buffer` — same.
+- `[31] metrics:paint emit fires` — schedule_refresh guarded out.
+- `[33] core.git.state:changed still triggers manager.refresh`
+  — same.
+
+**Root cause.** All eight cascade from F7.1's placeholder
+approach making `section._bufnr` nil until the deferred mount
+completes. Reverting build_section to synchronous mount
+(F7.1's remediation) resolves all of these in one stroke.
+
+**Remediation.** No per-assertion fix needed once F7.1's revert
+landed. The polling waits added during initial debugging
+(`vim.wait(500, function() return section._bufnr ~= nil end)`)
+remain in place — harmless under sync mount (they return
+immediately) AND useful as forward-defense if the placeholder
+pattern ever turns back on for neo-tree-backed views.
+
+#### F7.3 — Phase 6's `section.refresh()` metrics:paint emit polluting Phase 3 assertion
+
+**Root cause.** Phase 6's `core_refresh_topic` opt added a
+`section.refresh()` method that emits
+`auto-finder.core.metrics:paint`. When buffers / repos views
+refreshed earlier in the smoke run, their emits left
+`paint_seen` holding `{ view = "buffers", … }` by the time
+section [31]'s Phase 3 paint assertion checked.
+
+**Remediation.** Filter the section [31] probe to
+`p.view == "files"` so only the assertion's intended emit
+counts. (Earlier section emits from buffers / repos are ignored
+by the filtered probe.) The metrics:paint topic itself remains
+unfiltered at publication — consumers filter at subscription
+time.
+
+### Post-remediation smoke delta: **399 passed / 0 failed**
+
+### Carry-over: post-Phase-7 follow-ups
+
+- Open Question for the ADR: when (if ever) should
+  neo-tree-backed views adopt the placeholder pattern? The
+  keymap-binding tension blocks it today; resolution requires
+  an auto-core change. Filed as an ADR revision-4 candidate.
+- The `_still_current` predicate + `_owned_bufs` table in
+  build_section are dead code today. Keep them — they're the
+  scaffolding the eventual flip will use. Logged at the top
+  of `build_section` to discourage premature removal.
+
+---
+
 ## Phase 6 — `core-buffers-repos` (2026-05-20, commit pending at audit-doc edit time)
 
 ### Initial smoke delta: smoke crashed during section [34]
