@@ -776,9 +776,11 @@ do
   marks_bufnr = af._registry._bufs[2]
   local lines = vim.api.nvim_buf_get_lines(marks_bufnr, 0, -1, false)
   local txt = table.concat(lines, "\n")
-  ok("rendered BOOKMARKS title at top",
-    txt:find("BOOKMARKS", 1, true) ~= nil
-      and (lines[1] or ""):find("BOOKMARKS", 1, true) ~= nil,
+  -- v0.2.32: dropped the "BOOKMARKS\n\n" header prefix (the slot
+  -- title duplicated the winbar). The first content line is now
+  -- the GLOBAL section header.
+  ok("no BOOKMARKS title prefix (v0.2.32 dropped it)",
+    not txt:find("BOOKMARKS", 1, true),
     "first line=" .. tostring(lines[1]))
   ok("rendered GLOBAL section header",
     txt:find("GLOBAL", 1, true) ~= nil)
@@ -791,6 +793,29 @@ do
   ok("global X row references the test file basename",
     txt:find("marks%-x%.txt:2") ~= nil,
     "txt=\n" .. txt)
+
+  -- v0.2.32: per-line highlight spans via extmarks in the
+  -- `auto-finder.marks.hl` namespace. Verify at least one
+  -- extmark landed on the rendered buffer so a future refactor
+  -- that drops the styling pass would be caught.
+  local marks_ns = vim.api.nvim_create_namespace("auto-finder.marks.hl")
+  local extmarks = vim.api.nvim_buf_get_extmarks(
+    marks_bufnr, marks_ns, 0, -1, { details = true })
+  ok("marks panel paints highlight extmarks via the marks.hl namespace",
+    #extmarks > 0,
+    "got " .. #extmarks .. " extmarks")
+  -- Spot-check the bracketed key gets the AutoFinderMarksKey
+  -- group. Loop because the X row's line index drifts with the
+  -- panel layout (header row + per-mark two-line block).
+  local key_hl_seen = false
+  for _, em in ipairs(extmarks) do
+    local d = em[4] or {}
+    if d.hl_group == "AutoFinderMarksKey" then
+      key_hl_seen = true; break
+    end
+  end
+  ok("AutoFinderMarksKey extmark present on the mark letter",
+    key_hl_seen)
 
   -- _rows lookup: with the two-line-per-mark layout, each record
   -- maps to 2 line entries (path line + preview line) so <CR>/d
@@ -852,6 +877,52 @@ do
   local txt3 = table.concat(lines3, "\n")
   ok("empty state renders the (no marks set) placeholder",
     txt3:find("no marks set", 1, true) ~= nil)
+  -- v0.2.32: the help line was split in two so it fits the
+  -- default 38-col panel. Both halves should be present, on
+  -- separate rows, with the m<...> snippet on each.
+  ok("empty-state help line 1 — `m<A-Z>` for global",
+    txt3:find("m<A-Z>", 1, true) ~= nil
+      and txt3:find("global", 1, true) ~= nil,
+    "txt=\n" .. txt3)
+  ok("empty-state help line 2 — `m<a-z>` for local",
+    txt3:find("m<a-z>", 1, true) ~= nil
+      and txt3:find("local", 1, true) ~= nil,
+    "txt=\n" .. txt3)
+  -- Help text should occupy two distinct rows, not one.
+  local m_az_row, m_AZ_row
+  for i, l in ipairs(lines3) do
+    if l:find("m<A-Z>", 1, true) then m_AZ_row = i end
+    if l:find("m<a-z>", 1, true) then m_az_row = i end
+  end
+  ok("help text spans two rows",
+    m_AZ_row ~= nil and m_az_row ~= nil
+      and m_AZ_row ~= m_az_row,
+    "m<A-Z> row=" .. tostring(m_AZ_row)
+      .. " m<a-z> row=" .. tostring(m_az_row))
+
+  -- v0.2.32: empty-state line "(no marks set)" gets
+  -- AutoFinderMarksEmpty highlight via extmark.
+  local empty_extmarks = vim.api.nvim_buf_get_extmarks(
+    marks_bufnr,
+    vim.api.nvim_create_namespace("auto-finder.marks.hl"),
+    0, -1, { details = true })
+  local empty_hl_seen = false
+  for _, em in ipairs(empty_extmarks) do
+    local d = em[4] or {}
+    if d.hl_group == "AutoFinderMarksEmpty" then
+      empty_hl_seen = true; break
+    end
+  end
+  ok("AutoFinderMarksEmpty extmark paints the (no marks set) row",
+    empty_hl_seen)
+
+  -- v0.2.32: highlight groups are defined with `default = true`
+  -- links so the empty-state row picks up the colorscheme.
+  local empty_hl = vim.api.nvim_get_hl(0,
+    { name = "AutoFinderMarksEmpty", link = true })
+  ok("AutoFinderMarksEmpty default link is set",
+    empty_hl and (empty_hl.link or empty_hl.fg) ~= nil,
+    vim.inspect(empty_hl))
 
   -- Buffer-local keymaps installed (the d / <CR> / R contract).
   local function _has_keymap(buf, lhs)
@@ -885,6 +956,28 @@ do
   end
   ok("AutoFinderMarksRefresh autocmd carries our descriptor",
     refresh_desc_seen)
+
+  -- v0.2.32 regression: focusing marks then a neo-tree-backed slot
+  -- (buffers / files / repos) used to crash inside
+  -- `neotree/command/init.lua` because the marks buffer carries
+  -- filetype=auto-finder but no `b:neo_tree_position`, and the bare
+  -- `nvim_buf_get_var(0, "neo_tree_position")` threw "Key not found".
+  -- Drive marks → buffers and assert the panel survives.
+  af.setup({
+    width = { default = 38, min = 25, max = 100 },
+    default_section = 1,
+    sections = { "config", "files", "marks", "buffers" },
+  })
+  af.open(true)
+  af.focus(2)  -- marks
+  ok("focused marks before transition", af.state.section == 2,
+    "section=" .. tostring(af.state.section))
+  local trans_ok, trans_err = pcall(af.focus, 3)  -- buffers
+  ok("marks → buffers transition does not raise",
+    trans_ok,
+    "err=" .. tostring(trans_err))
+  ok("buffers slot is now active", af.state.section == 3,
+    "section=" .. tostring(af.state.section))
 
   -- Cleanup: drop the staged buffers + tempfiles, restore the
   -- default slot list (downstream sections depend on `repos`

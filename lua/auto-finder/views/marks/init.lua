@@ -52,6 +52,62 @@ local M = {
 -- (set to "marks") for any logic that needs to distinguish slots.
 local FILETYPE = "auto-finder"
 
+-- Highlight groups. Linked to default groups every colorscheme is
+-- expected to ship — so the marks panel picks up the active palette
+-- automatically. `default = true` means a user `:hi AutoFinderMarksKey
+-- ...` always wins. Re-applied on `ColorScheme` (one-shot augroup
+-- in `_ensure_highlights`) so links survive theme swaps.
+local HL = {
+  empty       = "AutoFinderMarksEmpty",      -- "(no marks set)"
+  help        = "AutoFinderMarksHelp",       -- "Try `m<...>` ..." rows
+  help_key    = "AutoFinderMarksHelpKey",    -- the `m<A-Z>` / `m<a-z>` snippets
+  header      = "AutoFinderMarksHeader",     -- GLOBAL / LOCAL
+  header_path = "AutoFinderMarksHeaderPath", -- the path part after "LOCAL — "
+  key         = "AutoFinderMarksKey",        -- [X] mark letter (inside the brackets)
+  bracket     = "AutoFinderMarksBracket",    -- the [ ] surrounding the key
+  path        = "AutoFinderMarksPath",       -- file path on global rows
+  lnum        = "AutoFinderMarksLineNr",     -- :42 line number
+  preview     = "AutoFinderMarksPreview",    -- preview text under each mark
+}
+
+local NS = vim.api.nvim_create_namespace("auto-finder.marks.hl")
+
+-- Apply default links. Idempotent — `default = true` lets user
+-- overrides win. Picks links that are almost universally themed:
+-- DiagnosticWarn (warn-amber), Title/Function (section header
+-- accent), Constant/Identifier (the bracketed key), Directory
+-- (path), LineNr (line number), Comment (preview + help).
+local function _apply_default_highlights()
+  local set = function(name, link)
+    vim.api.nvim_set_hl(0, name, { default = true, link = link })
+  end
+  set(HL.empty,       "DiagnosticWarn")
+  set(HL.help,        "Comment")
+  set(HL.help_key,    "Special")
+  set(HL.header,      "Title")
+  set(HL.header_path, "Directory")
+  set(HL.key,         "Constant")
+  set(HL.bracket,     "Delimiter")
+  set(HL.path,        "Directory")
+  set(HL.lnum,        "LineNr")
+  set(HL.preview,     "Comment")
+end
+
+local _highlights_armed = false
+local function _ensure_highlights()
+  if _highlights_armed then return end
+  _highlights_armed = true
+  _apply_default_highlights()
+  local group = vim.api.nvim_create_augroup(
+    "AutoFinderMarksHighlights", { clear = true })
+  vim.api.nvim_create_autocmd("ColorScheme", {
+    group = group,
+    callback = _apply_default_highlights,
+    desc = "auto-finder.marks: reapply default highlight links "
+      .. "on colorscheme change",
+  })
+end
+
 -- Cached scratch bufnr — survives view-switch like the other views.
 M._bufnr = nil
 
@@ -183,7 +239,7 @@ local function _collect()
     end
   end
   table.sort(locals_by_buf, function(a, b)
-    return _shorten_path(a.file) < _shorten_path(b.file)
+    return _parent_and_basename(a.file) < _parent_and_basename(b.file)
   end)
 
   return globals, locals_by_buf
@@ -191,51 +247,128 @@ end
 
 local function _render(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  _ensure_highlights()
   local globals, locals = _collect()
   local lines, lookup = {}, {}
+  -- Per-line highlight spans: hls[i] = { { hl, col_start, col_end }, ... }
+  -- col_end = -1 means "to end of line".
+  local hls = {}
 
-  local function emit(text, rec)
+  local function emit(text, rec, spans)
     lines[#lines + 1] = text
     lookup[#lines] = rec
+    hls[#lines] = spans
   end
 
-  -- Always prefix with the slot title + a blank row, so the
-  -- panel reads as "BOOKMARKS" → contents, regardless of
-  -- whether globals or locals are present.
-  emit("BOOKMARKS", nil)
-  emit("", nil)
+  -- v0.2.32: drop the leading "BOOKMARKS\n\n" prefix — the slot
+  -- title duplicated the winbar and ate two rows of vertical
+  -- budget on a short panel. Section identity now lives entirely
+  -- in the winbar / `b:auto_finder_view` tag.
 
   if #globals == 0 and #locals == 0 then
-    emit("(no marks set)", nil)
-    emit("", nil)
-    emit("  Try `m<A-Z>` for a global mark or `m<a-z>` for a local one.", nil)
+    emit("(no marks set)", nil,
+      { { HL.empty, 0, -1 } })
+    emit("", nil, nil)
+    -- Two lines so they fit the default 38-col panel without
+    -- horizontal scrolling. The `m<A-Z>` / `m<a-z>` snippets get a
+    -- separate accent (HL.help_key) on top of the line-wide
+    -- HL.help base, so the keys read at a glance.
+    local help1 = "  Try `m<A-Z>` for a global mark,"
+    local help2 = "  or  `m<a-z>` for a local one."
+    emit(help1, nil, {
+      { HL.help,     0, -1 },
+      { HL.help_key, 6, 14 },  -- `m<A-Z>`
+    })
+    emit(help2, nil, {
+      { HL.help,     0, -1 },
+      { HL.help_key, 6, 14 },  -- `m<a-z>`
+    })
   else
     -- Each mark renders as TWO lines: bracket+path+line on the
     -- first, preview indented under the bracket on the second.
     -- Both lines map to the same record so <CR>/d work from
     -- either. Header lines stay nil-keyed (no action there).
     if #globals > 0 then
-      emit("GLOBAL", nil)
+      emit("GLOBAL", nil, { { HL.header, 0, -1 } })
       for _, r in ipairs(globals) do
-        emit(string.format("  [%s] %s:%d",
-          r.mark, _parent_and_basename(r.file), r.line), r)
-        emit("      " .. (r.preview or ""), r)
+        local path = _parent_and_basename(r.file)
+        local line_text = string.format("  [%s] %s:%d",
+          r.mark, path, r.line)
+        -- Spans (byte offsets):
+        --   "  [X] foo/bar.lua:42"
+        --    0 23 4 6        len-2..len
+        local key_col   = 3                  -- char after "  ["
+        local path_col0 = 6                  -- after "] "
+        local path_col1 = path_col0 + #path  -- end of path (exclusive)
+        local lnum_col0 = path_col1          -- the ":"
+        emit(line_text, r, {
+          { HL.bracket, 2, 3 },                  -- "["
+          { HL.key,     key_col, key_col + 1 },  -- "X"
+          { HL.bracket, key_col + 1, key_col + 2 }, -- "]"
+          { HL.path,    path_col0, path_col1 },
+          { HL.lnum,    lnum_col0, -1 },         -- ":42"
+        })
+        emit("      " .. (r.preview or ""), r,
+          { { HL.preview, 0, -1 } })
       end
-      emit("", nil)
+      emit("", nil, nil)
     end
     for _, grp in ipairs(locals) do
-      emit("LOCAL — " .. _parent_and_basename(grp.file), nil)
+      local hpath = _parent_and_basename(grp.file)
+      local header = "LOCAL — " .. hpath
+      -- "LOCAL — " is 8 bytes in ASCII … but "—" is U+2014, 3
+      -- bytes in UTF-8. The literal above is "LOCAL " (6) + "— "
+      -- (4) = 10 bytes before hpath.
+      local header_path_col = #("LOCAL — ")
+      emit(header, nil, {
+        { HL.header,      0, header_path_col },
+        { HL.header_path, header_path_col, -1 },
+      })
       for _, r in ipairs(grp.entries) do
-        emit(string.format("  [%s] :%d", r.mark, r.line), r)
-        emit("      " .. (r.preview or ""), r)
+        local line_text = string.format("  [%s] :%d", r.mark, r.line)
+        local key_col = 3
+        local lnum_col0 = 6  -- the ":" right after "] "
+        emit(line_text, r, {
+          { HL.bracket, 2, 3 },
+          { HL.key,     key_col, key_col + 1 },
+          { HL.bracket, key_col + 1, key_col + 2 },
+          { HL.lnum,    lnum_col0, -1 },
+        })
+        emit("      " .. (r.preview or ""), r,
+          { { HL.preview, 0, -1 } })
       end
-      emit("", nil)
+      emit("", nil, nil)
     end
   end
 
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   vim.bo[bufnr].modifiable = false
+
+  -- Repaint highlights. Clear the prior pass first so resized /
+  -- truncated lines don't leak extmarks from the previous frame.
+  -- `c1 == -1` is the per-span sentinel for "to end of line"; we
+  -- resolve it to the actual byte length so extmark ranges are
+  -- always concrete (avoids subtle differences between hl_eol /
+  -- end_row stacking).
+  vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
+  for i, spans in pairs(hls) do
+    if spans then
+      local linelen = #(lines[i] or "")
+      for _, s in ipairs(spans) do
+        local hl, c0, c1 = s[1], s[2], s[3]
+        if c1 == -1 then c1 = linelen end
+        if c1 > c0 then
+          pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, i - 1, c0, {
+            end_col  = c1,
+            hl_group = hl,
+            priority = 100,
+          })
+        end
+      end
+    end
+  end
+
   M._rows = lookup
 end
 

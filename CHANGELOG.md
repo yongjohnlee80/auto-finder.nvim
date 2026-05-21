@@ -2,6 +2,101 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.32] — 2026-05-21 — `marks` slot polish: drop `BOOKMARKS`, wrap help, accent palette + fix marks → buffers crash
+
+User-visible cleanup pass on the marks panel plus a regression fix
+for the panel-to-panel transition that crashed when leaving marks.
+
+### Fixed
+
+- **`lua/auto-finder/neotree/command/init.lua`** — `nvim_buf_get_var(0,
+  "neo_tree_position")` is now pcall-wrapped to match the read pattern
+  used elsewhere in the bundled fork. The marks slot shares the
+  canonical `auto-finder` filetype (v0.2.31) but, being a scratch
+  view, never sets the `b:neo_tree_position` buf-local var that
+  neo-tree-backed sources set on every render. Pre-v0.2.32 the bare
+  `nvim_buf_get_var` threw `Key not found: neo_tree_position` whenever
+  the user focused marks and then switched to `buffers` (or any other
+  neo-tree-backed slot), forcing a detour through a neo-tree-backed
+  slot first to "rearm" the var. Reported by the user with the exact
+  log line:
+
+  ```
+  [AutoCore] [auto-finder.shared.neotree] [ERROR] neo-tree.execute
+  failed for source 'buffers': .../command/init.lua:161: Key not
+  found: neo_tree_position
+  ```
+
+  Regression covered by smoke `[12c]`: `marks → buffers transition
+  does not raise`.
+
+- **`lua/auto-finder/views/marks/init.lua`** — local-buffer sort key
+  referenced an undefined `_shorten_path` (orphan from a pre-v0.2.30
+  rename); replaced with `_parent_and_basename`, the function actually
+  defined in the module. Pre-v0.2.32 a workspace with two or more
+  local-mark-carrying buffers would `attempt to call nil`.
+
+### Changed
+
+- **Dropped the `BOOKMARKS` slot title + its blank separator row** at
+  the top of the marks panel. The title duplicated the winbar slot
+  label and ate two rows of vertical budget on short panels. Slot
+  identity now lives entirely in the winbar / `b:auto_finder_view`
+  tag.
+
+- **Empty-state help line wrapped onto two rows** so it fits the
+  default 38-col panel without horizontal scroll. Was:
+
+  ```
+    Try `m<A-Z>` for a global mark or `m<a-z>` for a local one.
+  ```
+
+  Is:
+
+  ```
+    Try `m<A-Z>` for a global mark,
+    or  `m<a-z>` for a local one.
+  ```
+
+### Added
+
+- **Per-line highlight extmarks** in the marks panel, painted in a
+  dedicated `auto-finder.marks.hl` namespace on every `_render`:
+
+  | Line / segment        | Highlight group              | Default link    |
+  |-----------------------|-------------------------------|-----------------|
+  | `(no marks set)`      | `AutoFinderMarksEmpty`        | `DiagnosticWarn`|
+  | `Try \`m<...>\`` help | `AutoFinderMarksHelp`         | `Comment`       |
+  | `\`m<...>\` snippet`  | `AutoFinderMarksHelpKey`      | `Special`       |
+  | `GLOBAL` / `LOCAL`    | `AutoFinderMarksHeader`       | `Title`         |
+  | header path part      | `AutoFinderMarksHeaderPath`   | `Directory`     |
+  | mark letter `X`/`a`   | `AutoFinderMarksKey`          | `Constant`      |
+  | bracket `[` `]`       | `AutoFinderMarksBracket`      | `Delimiter`     |
+  | file path             | `AutoFinderMarksPath`         | `Directory`     |
+  | `:42` line number     | `AutoFinderMarksLineNr`       | `LineNr`        |
+  | preview text          | `AutoFinderMarksPreview`      | `Comment`       |
+
+  All groups are set with `default = true` so a user
+  `:highlight AutoFinderMarksKey ...` always wins. Links are
+  reapplied on `ColorScheme` so a theme swap mid-session picks up
+  the new palette on the next render.
+
+### Verified
+
+- Smoke `[12c]` adjusted: drops the `BOOKMARKS title at top`
+  assertion, adds three new ones for (a) the wrapped help text,
+  (b) the marks → buffers transition no longer raising, and (c)
+  the extmark/highlight namespace painting `AutoFinderMarksKey` /
+  `AutoFinderMarksEmpty` and `default = true` link resolving.
+
+### Consumer impact
+
+Strictly additive (no setup-config changes). Users on `^0.2.0`
+pick up the marks-panel polish + the crash fix on next sync. Users
+who customized the (pre-v0.2.32) marks slot in their colorscheme
+should rebind their personal highlights to the new
+`AutoFinderMarks*` group names listed above.
+
 ## [v0.2.31] — 2026-05-20 — `marks` slot: panel-class filetype + `BOOKMARKS` title
 
 Fixes the "buffer filenames move above the auto-finder when the

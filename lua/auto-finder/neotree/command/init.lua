@@ -157,9 +157,16 @@ M.execute = function(args, state_config_override)
 
   -- If position=current was requested, but we are currently in a neo-tree window,
   -- then we need to override that.
+  --
+  -- The `auto-finder` filetype is shared with scratch panel views
+  -- (e.g. `views/marks`) that aren't neo-tree-backed and never set
+  -- `b:neo_tree_position`. Bare `nvim_buf_get_var` throws "Key not
+  -- found" for those — pcall so the buffers/files/repos transition
+  -- from a non-neo-tree slot doesn't crash. Matches the pcall
+  -- pattern used at the other read sites for this buf-local var.
   if args.position == "current" and vim.bo.filetype == "auto-finder" then
-    local position = vim.api.nvim_buf_get_var(0, "neo_tree_position")
-    if position then
+    local ok_pos, position = pcall(vim.api.nvim_buf_get_var, 0, "neo_tree_position")
+    if ok_pos and position then
       args.position = position
     end
   end
