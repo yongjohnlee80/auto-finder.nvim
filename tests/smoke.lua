@@ -783,14 +783,29 @@ do
     txt:find("marks%-x%.txt:2") ~= nil,
     "txt=\n" .. txt)
 
-  -- _rows lookup: should have at least 2 mark records.
-  local mark_records = 0
+  -- _rows lookup: with the two-line-per-mark layout, each record
+  -- maps to 2 line entries (path line + preview line) so <CR>/d
+  -- work from either. Count UNIQUE records by identity.
+  local unique_records = {}
   for _, rec in pairs(marks_view._rows or {}) do
-    if rec then mark_records = mark_records + 1 end
+    if rec then unique_records[rec] = true end
   end
-  ok("_rows lookup has 2 mark records (X global + a local)",
+  local mark_records = 0
+  for _ in pairs(unique_records) do mark_records = mark_records + 1 end
+  ok("_rows lookup has 2 unique mark records (X global + a local)",
     mark_records == 2,
     "got " .. mark_records)
+  -- Each record should have exactly 2 line entries (path +
+  -- preview). Confirms the dual-mapping for keymap parity from
+  -- either visual line.
+  local x_line_count = 0
+  for _, rec in pairs(marks_view._rows or {}) do
+    if rec and rec.mark == "X" then
+      x_line_count = x_line_count + 1
+    end
+  end
+  ok("X record is reachable from both its lines (path + preview)",
+    x_line_count == 2, "got " .. x_line_count)
 
   -- Find the X-mark line index and validate the record shape.
   local x_line, x_rec
@@ -840,6 +855,8 @@ do
     _has_keymap(marks_bufnr, "<CR>"))
   ok("buffer-local d keymap installed",
     _has_keymap(marks_bufnr, "d"))
+  ok("buffer-local i keymap installed",
+    _has_keymap(marks_bufnr, "i"))
   ok("buffer-local R keymap installed",
     _has_keymap(marks_bufnr, "R"))
 

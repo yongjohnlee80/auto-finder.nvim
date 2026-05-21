@@ -2,6 +2,65 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.30] — 2026-05-20 — `marks` slot: path crop, two-line layout, `i` info popup
+
+Display polish + a new info keymap on the v0.2.29 marks slot.
+Long paths now collapse to `parent/basename` (with a leading
+`.../` when the source path was deeper); previews drop to an
+indented continuation line so long content doesn't get truncated
+by the panel width. New `i` keymap opens a small bordered float
+with the mark's full details — same role as neo-tree's
+`show_file_details_popup`.
+
+### Changed
+
+- **`lua/auto-finder/views/marks/init.lua`** path shortening
+  switched from cwd/home-relative to `<parent_dir>/<basename>` —
+  much shorter for global marks pointing outside the current
+  project tree. When the source path is DEEPER than
+  `parent/basename`, a leading `.../` signals the crop. Edge
+  cases handled: a root-level file returns its basename only.
+
+  ```
+  /foo.lua                 → foo.lua
+  /foo/bar.lua             → foo/bar.lua
+  /foo/bar/baz.lua         → .../bar/baz.lua
+  /a/b/c/d/e.lua           → .../d/e.lua
+  ```
+
+- **Two-line render layout per mark.** Bracket + path + line on
+  the first line, preview indented under the bracket on the
+  second. Removes the previous "preview gets eaten by the panel
+  width" problem without depending on window-level wrap. The
+  `_rows` lookup maps BOTH lines to the same record so `<CR>` /
+  `d` / `i` work from either visual line.
+
+### Added
+
+- **`i` keymap** opens an info popup for the mark under the
+  cursor: bordered float (rounded), wraps long fields, shows
+  `Mark`, `File` (full path, not cropped), `Line`/`Col`,
+  `Buffer` (loaded state + bufnr), `Size`, `Mtime`, and the full
+  `Preview`. Dismissable with `q` / `<Esc>`. `nowait = true`
+  intercepts before nvim's insert-mode trigger (the buffer is
+  `nomodifiable` either way).
+
+### Verified
+
+- Smoke section `[12c]` updated for the new layout: assertions
+  now count UNIQUE records (each maps to 2 line entries), confirm
+  the X record is reachable from both its lines, and check that
+  the `i` keymap is installed alongside `<CR>` / `d` / `R`.
+  Suite green at **458 passed / 0 failed** (was 456/0).
+
+### Consumer impact
+
+Strictly additive. No setup-config changes. The new `i` keymap
+is buffer-local on the marks slot only — does not collide with
+existing nvim insert-mode usage outside the panel. Users picking
+up v0.2.30 from `^0.2.0` get the polish automatically; no
+`slot remove marks; slot add marks` cycle needed.
+
 ## [v0.2.29] — 2026-05-20 — `marks` slot (nvim native marks panel)
 
 New top-level view rendering nvim's native marks as a flat list:

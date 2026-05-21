@@ -15,6 +15,12 @@
 ---        mapping fire immediately; the buffer is `nomodifiable`
 ---        anyway so nvim's `d`-operator would no-op even without
 ---        the nowait short-circuit.
+---  i     show full info for the mark under the cursor in a small
+---        bordered floating window (full path, line/col, buffer
+---        load state, file size + mtime, full preview). Same role
+---        as neo-tree's `i` show-file-details popup. `q` / `<Esc>`
+---        dismiss. `nowait` intercepts before nvim's insert-mode
+---        trigger (the buffer is `nomodifiable` either way).
 ---  R     manual refresh (re-collect + re-render).
 ---
 ---Auto-refresh surfaces (nvim has no native MarkChanged event, so
@@ -52,17 +58,29 @@ M._rows = nil
 -- the idempotent "rebind without leaking" case.
 M._augroup = nil
 
-local function _shorten_path(path)
+-- Collapse a path to `<parent_dir>/<basename>` — just enough
+-- context to tell two same-named files apart, much shorter than
+-- the cwd- or home-relative path for marks pointing outside the
+-- current project tree (global marks across projects, etc.). When
+-- the source path is DEEPER than `parent/basename`, prefix with
+-- `.../` to signal the crop.
+--
+-- Examples:
+--   "/foo.lua"               → "foo.lua"            (no parent)
+--   "/foo/bar.lua"           → "foo/bar.lua"        (no crop)
+--   "/foo/bar/baz.lua"       → ".../bar/baz.lua"    (cropped)
+--   "/a/b/c/d/e.lua"         → ".../d/e.lua"        (cropped)
+local function _parent_and_basename(path)
   if type(path) ~= "string" or path == "" then return "" end
-  local cwd = vim.fn.getcwd()
-  if cwd ~= "" and path:sub(1, #cwd + 1) == cwd .. "/" then
-    return path:sub(#cwd + 2)
+  local basename = path:match("([^/]+)$") or path
+  local parent   = path:match("([^/]+)/[^/]+$")
+  if not parent then return basename end
+  -- More than just `parent/basename` ahead of these two trailing
+  -- segments → we're cropping; signal with the leading ellipsis.
+  if path:match("^.+/[^/]+/[^/]+$") and path:match("/.-/.-/.+") then
+    return ".../" .. parent .. "/" .. basename
   end
-  local home = vim.fn.expand("~")
-  if home ~= "" and path:sub(1, #home + 1) == home .. "/" then
-    return "~/" .. path:sub(#home + 2)
-  end
-  return path
+  return parent .. "/" .. basename
 end
 
 -- Read line `line` (1-indexed) from `bufnr_or_file`. Prefers the
@@ -178,19 +196,24 @@ local function _render(bufnr)
     emit("", nil)
     emit("  Try `m<A-Z>` for a global mark or `m<a-z>` for a local one.", nil)
   else
+    -- Each mark renders as TWO lines: bracket+path+line on the
+    -- first, preview indented under the bracket on the second.
+    -- Both lines map to the same record so <CR>/d work from
+    -- either. Header lines stay nil-keyed (no action there).
     if #globals > 0 then
       emit("GLOBAL", nil)
       for _, r in ipairs(globals) do
-        emit(string.format("  [%s] %s:%d   %s",
-          r.mark, _shorten_path(r.file), r.line, r.preview or ""), r)
+        emit(string.format("  [%s] %s:%d",
+          r.mark, _parent_and_basename(r.file), r.line), r)
+        emit("      " .. (r.preview or ""), r)
       end
       emit("", nil)
     end
     for _, grp in ipairs(locals) do
-      emit("LOCAL — " .. _shorten_path(grp.file), nil)
+      emit("LOCAL — " .. _parent_and_basename(grp.file), nil)
       for _, r in ipairs(grp.entries) do
-        emit(string.format("  [%s] :%d   %s",
-          r.mark, r.line, r.preview or ""), r)
+        emit(string.format("  [%s] :%d", r.mark, r.line), r)
+        emit("      " .. (r.preview or ""), r)
       end
       emit("", nil)
     end
@@ -231,6 +254,92 @@ local function _jump(rec)
     pcall(vim.api.nvim_win_set_cursor, target,
       { rec.line, math.max(0, (rec.col or 1) - 1) })
   end
+end
+
+-- Open a small bordered float showing the mark's full details —
+-- mirrors neo-tree's `show_file_details_popup` keymap (`i`). The
+-- popup is its own buffer + window so `q`/`<Esc>` close just the
+-- popup without affecting the marks panel underneath.
+local function _show_info(rec)
+  if not rec then return end
+
+  local lines = {}
+  lines[#lines + 1] = "  Mark    [" .. rec.mark .. "] (" .. rec.kind .. ")"
+  lines[#lines + 1] = "  File    " .. (rec.file ~= "" and rec.file or "(none)")
+  lines[#lines + 1] = "  Line    " .. tostring(rec.line)
+    .. "    Col    " .. tostring(rec.col)
+
+  if rec.bufnr and vim.api.nvim_buf_is_valid(rec.bufnr) then
+    local loaded = vim.api.nvim_buf_is_loaded(rec.bufnr)
+    lines[#lines + 1] = "  Buffer  #" .. rec.bufnr
+      .. (loaded and " (loaded)" or " (unloaded)")
+  else
+    lines[#lines + 1] = "  Buffer  (not loaded)"
+  end
+
+  -- File stat: only meaningful when the path points at a real file
+  -- on disk. Scratch / nofile buffers won't fs_stat.
+  if rec.file and rec.file ~= "" then
+    local stat = vim.uv.fs_stat(rec.file)
+    if stat then
+      lines[#lines + 1] = "  Size    " .. tostring(stat.size) .. " bytes"
+      local mtime = stat.mtime and stat.mtime.sec
+      if mtime then
+        lines[#lines + 1] = "  Mtime   "
+          .. os.date("%Y-%m-%d %H:%M:%S", mtime)
+      end
+    end
+  end
+
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "  Preview"
+  lines[#lines + 1] = "    " .. (rec.preview or "")
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = "  (q / <Esc> to close)"
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].buftype   = "nofile"
+  vim.bo[buf].swapfile  = false
+  vim.bo[buf].filetype  = "auto-finder-marks-info"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+
+  local max_w = 0
+  for _, l in ipairs(lines) do
+    if #l > max_w then max_w = #l end
+  end
+  local width  = math.min(max_w + 2, math.max(60, vim.o.columns - 8))
+  local height = math.min(#lines, math.max(8, vim.o.lines - 6))
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative  = "cursor",
+    row       = 1,
+    col       = 0,
+    width     = width,
+    height    = height,
+    style     = "minimal",
+    border    = "rounded",
+    title     = " mark info ",
+    title_pos = "left",
+  })
+  vim.wo[win].wrap = true
+  vim.wo[win].winhighlight =
+    "Normal:NormalFloat,FloatBorder:FloatBorder"
+
+  local function close()
+    if vim.api.nvim_win_is_valid(win) then
+      pcall(vim.api.nvim_win_close, win, true)
+    end
+  end
+  pcall(vim.keymap.set, "n", "q", close, {
+    buffer = buf, silent = true, nowait = true,
+    desc = "auto-finder.marks.info: close",
+  })
+  pcall(vim.keymap.set, "n", "<Esc>", close, {
+    buffer = buf, silent = true, nowait = true,
+    desc = "auto-finder.marks.info: close (Esc)",
+  })
 end
 
 local function _delete(rec, panel_winid)
@@ -297,6 +406,8 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.marks: jump to mark")
   set("d", function() _delete(_row_under_cursor(panel_winid), panel_winid) end,
     "auto-finder.marks: delete mark (delmarks)")
+  set("i", function() _show_info(_row_under_cursor(panel_winid)) end,
+    "auto-finder.marks: show mark info (popup)")
   set("R", function() _render(bufnr) end,
     "auto-finder.marks: refresh")
 end
