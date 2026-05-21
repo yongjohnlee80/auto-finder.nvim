@@ -624,6 +624,83 @@ ok("setup restored last_section into state.section",
   af.state.section == 0,
   "state.section=" .. tostring(af.state.section))
 
+-- ───────────────────────── 12b. per-workspace last_section + focus clamp (v0.2.28) ─────────────────────────
+-- v0.2.28 fix: `last_section` was a global namespace key, so a
+-- user on slot 4 (dbase) in project1 (4 slots) who switched to
+-- project2 (2 slots) saw an empty panel — M.open read 4 from
+-- the global key, M.focus(4) failed with "no such section", and
+-- the panel was already open with no buffer swapped in. Two
+-- pieces: (a) per-workspace `last_section_by_workspace` map so
+-- the stale value doesn't bleed in the first place; (b) clamp
+-- in M.focus so any other stale path (legacy global on first
+-- launch after upgrade, programmatic miscalls) lands on
+-- default_section instead of an empty panel.
+print("\n[12b] per-workspace last_section + focus clamp (v0.2.28)")
+do
+  local state_mod = require("auto-finder.state")
+
+  -- (a) Per-workspace round-trip + isolation.
+  local wskey_a = "aaaaaaaaaaaaaaaa"
+  local wskey_b = "bbbbbbbbbbbbbbbb"
+  state_mod.set_last_section_for(wskey_a, 3)
+  state_mod.set_last_section_for(wskey_b, 1)
+  ok("per-workspace last_section round-trip (A)",
+    state_mod.get_last_section_for(wskey_a) == 3)
+  ok("per-workspace last_section round-trip (B)",
+    state_mod.get_last_section_for(wskey_b) == 1)
+  ok("per-workspace last_section isolation (A ≠ B)",
+    state_mod.get_last_section_for(wskey_a)
+      ~= state_mod.get_last_section_for(wskey_b))
+
+  -- Setting nil clears the per-workspace record.
+  state_mod.set_last_section_for(wskey_a, nil)
+  ok("per-workspace last_section clear via nil",
+    state_mod.get_last_section_for(wskey_a) == nil)
+  -- B is untouched by clearing A.
+  ok("clearing A doesn't affect B",
+    state_mod.get_last_section_for(wskey_b) == 1)
+
+  -- Invalid wskey returns nil (typed-guard).
+  ok("get_last_section_for(nil) returns nil",
+    state_mod.get_last_section_for(nil) == nil)
+  ok("get_last_section_for('') returns nil",
+    state_mod.get_last_section_for("") == nil)
+
+  -- set_last_section_for rejects bad wskey / bad n.
+  local ok1, _ = state_mod.set_last_section_for("", 1)
+  ok("set_last_section_for('', N) refused", ok1 == false)
+  local ok2, _ = state_mod.set_last_section_for(wskey_b, "string")
+  ok("set_last_section_for(wskey, 'string') refused", ok2 == false)
+
+  state_mod.set_last_section_for(wskey_b, nil)  -- cleanup
+
+  -- (b) Clamp: M.focus with an out-of-range key falls back to
+  -- default_section. Simulates the cross-project bug — the
+  -- current registry has 3 sections (config=0, files=1, repos=2)
+  -- but a stale call tries to focus section 5.
+  af.setup({
+    width = { default = 38, min = 25, max = 100 },
+    default_section = 1,
+    sections = { "config", "files", "repos" },
+  })
+  af.open(true)
+  local pre_active = af.state.section
+  local focus_ok, _ = af.focus(5)  -- out of range
+  ok("focus(out-of-range) returned ok (clamp succeeded)",
+    focus_ok == true,
+    "ok=" .. tostring(focus_ok) .. " pre_active=" .. tostring(pre_active))
+  ok("clamped focus landed on default_section",
+    af.state.section == 1,
+    "got section=" .. tostring(af.state.section))
+
+  -- Sanity: a valid focus still works after clamping.
+  af.focus(2)  -- repos
+  ok("valid focus after clamp still works",
+    af.state.section == 2)
+
+  af.close()
+end
+
 -- ───────────────────────── 13. directory-hijack defers M.open ─────────────────────────
 -- Regression: E242 "Can't split a window while closing another" on
 -- `nvim .` when the hijack called M.open synchronously. nvim_buf_delete

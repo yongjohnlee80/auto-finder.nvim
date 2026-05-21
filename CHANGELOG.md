@@ -2,6 +2,101 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.28] — 2026-05-20 — per-workspace `last_section` + clamp on focus
+
+Fixes a cross-project staleness bug where the last-focused section
+bled from project1 into project2 and produced an empty panel. Two
+complementary fixes: (a) `last_section` becomes per-workspace so the
+stale value never leaks in the first place; (b) `M.focus` clamps
+unresolvable section keys to `default_section` so any other stale
+path (legacy global on first launch after upgrade, programmatic
+miscalls, future per-workspace records written before a slot list
+shrank) also lands safely.
+
+### The bug
+
+Concrete repro: project1 has 4 slots (`config`, `files`, `repos`,
+`buffers`, `dbase`). User focuses dbase (slot 4) and closes nvim.
+Opens nvim in project2 which only has 2 slots (`config`, `files`,
+`repos`). The panel opens — empty. No buffer visible, winbar
+incomplete.
+
+Why: pre-v0.2.28 `last_section` was a single global namespace key
+(`auto-core.state.namespace("auto-finder"):get("last_section")`), not
+keyed by workspace. `M.open` read `4` from that key, called
+`M.focus(4)`, which `auto-core.ui.section.Registry:focus` rejected
+with `false, "no such section: 4"`. The panel had already been
+opened by `host.ensure_open` above, but no buffer ever got swapped
+in. The pcall around the registry call swallowed the error.
+
+### Fixed
+
+- **`lua/auto-finder/state.lua`** — new
+  `last_section_by_workspace` namespace key (default `{}`), keyed
+  by `sha256(workspace_root):sub(1,16)` (same shape as the existing
+  `sections` per-workspace map). New helpers
+  `get_last_section_for(wskey)` / `set_last_section_for(wskey, n?)`
+  mirror the `get_sections_for` / `set_sections_for` pattern. Type
+  validation, defensive deep-copy on write, nil-clears a record.
+
+- **`lua/auto-finder/init.lua`** initial seed at setup reads per-
+  workspace first, falls back to the legacy global key for back-
+  compat with pre-v0.2.28 namespaces:
+
+  ```lua
+  local _wskey_init = M._workspace_key()
+  M.state.section = (_wskey_init and state_mod.get_last_section_for(_wskey_init))
+    or state_mod.get_last_section()
+  ```
+
+- **`lua/auto-finder/init.lua`** `_post_focus` (the wrapper around
+  `M._registry.focus`) now persists to BOTH the legacy global key
+  and the per-workspace key when `wskey` is available. Writing
+  both keeps a downgrade window functional — pre-v0.2.28 still
+  finds a sensible (if cross-workspace) value.
+
+- **`lua/auto-finder/init.lua`** `_reseed_sections_for_workspace`
+  re-seeds `M.state.section` from the per-workspace record BEFORE
+  the slot-list diff check. Covers two cases: (1) slot list differs
+  → `_rebuild_section_registry` picks up `M.state.section` as
+  `prev` in its focus-target resolver; (2) slot list identical →
+  the early-return path now explicitly re-focuses when the per-
+  workspace `last_section` differs from the currently-active slot.
+
+- **`lua/auto-finder/init.lua`** `M.focus` gains a clamp: if
+  `views.resolve(key)` returns nil, the key is replaced with
+  `cfg.default_section or 0`. Single chokepoint covers all entry
+  points (`M.open` reading stale state, programmatic
+  `M.focus(N)`, legacy persisted values during the migration
+  window).
+
+### Migration
+
+Strictly additive. No setup config changes. No API removals.
+
+- Existing users keep using their global `last_section` until the
+  first focus after upgrade — that focus writes both the global key
+  and the new per-workspace key. From then on, per-project tracking
+  takes over.
+- The legacy `state.get_last_section()` / `set_last_section()`
+  helpers stay public (no deprecation). Writers update both keys so
+  a downgrade to v0.2.27 still finds a value.
+
+### Verified
+
+- `tests/smoke.lua` section `[12b]` adds 12 new assertions covering
+  per-workspace round-trip, cross-workspace isolation, nil-clear
+  semantics, typed-guard rejection of bad wskey / bad n, and the
+  M.focus clamp landing on `default_section` when called with an
+  out-of-range section number. Suite green at **437 passed / 0
+  failed** (was 425 pre-fix).
+
+### Consumer impact
+
+Strictly additive. No required auto-core version bump (uses
+existing `auto-core.state.namespace` surface). Consumers pinning
+`version = "^0.2.0"` pick up via `:Lazy update`.
+
 ## [v0.2.27] — 2026-05-20 — dbase: rebind keymaps + refresh winbar after deferred drawer mount
 
 ADR 0026 Phase 7 ships the dbase view through the

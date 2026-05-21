@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.2.27"
+M.version = "0.2.28"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -206,7 +206,15 @@ function M.setup(user_opts)
 
   -- Read namespace values into the live runtime mirrors.
   M.state.user_width = state_mod.get_user_width()
-  M.state.section    = state_mod.get_last_section()
+  -- v0.2.28: prefer the per-workspace `last_section` record; fall
+  -- back to the legacy global key for back-compat with pre-v0.2.28
+  -- namespaces. `_workspace_key()` returns nil when auto-core
+  -- hasn't captured workspace_root yet — the global fallback covers
+  -- that startup window. `M.focus`'s clamp catches any stale value
+  -- that slips through either path.
+  local _wskey_init = M._workspace_key()
+  M.state.section = (_wskey_init and state_mod.get_last_section_for(_wskey_init))
+    or state_mod.get_last_section()
 
   -- v0.2.0 step 3: claim the auto-core.ui.panel singleton. The marker
   -- name "auto-finder" produces `w:auto_finder_panel` after auto-core's
@@ -309,7 +317,19 @@ function M.setup(user_opts)
     local _original_focus = M._registry.focus
     local _post_focus = function(active)
       M.state.section = active
+      -- v0.2.28: persist BOTH the legacy global key (back-compat
+      -- with pre-v0.2.28 namespaces / a downgrade window) and the
+      -- per-workspace key when wskey is available. The per-
+      -- workspace key is the one consulted on next open, so
+      -- different projects no longer leak their last-focused slot
+      -- into each other (the original bug — project1's slot 4
+      -- displayed as empty panel in project2 with only 2 slots).
       pcall(require("auto-finder.state").set_last_section, active)
+      local _wskey_focus = M._workspace_key()
+      if _wskey_focus then
+        pcall(require("auto-finder.state").set_last_section_for,
+          _wskey_focus, active)
+      end
       local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
       if ok_mgr and type(manager.redraw) == "function" then
         pcall(manager.redraw, nil)
@@ -1428,6 +1448,22 @@ function M._reseed_sections_for_workspace()
   local target = persisted
     or vim.deepcopy(require("auto-finder.config").defaults.sections)
 
+  -- v0.2.28: re-seed `state.section` from the per-workspace
+  -- `last_section_by_workspace` record BEFORE the no-op check
+  -- and the rebuild. This covers two cases:
+  --   1. Slot list differs → _rebuild_section_registry reads
+  --      M.state.section as `prev` in its focus-target resolver,
+  --      so it lands on the right per-project slot rather than
+  --      whatever project the user was just on.
+  --   2. Slot list identical → the early-return below otherwise
+  --      leaves the active slot pinned to the previous project's
+  --      pick; we explicitly re-focus when the per-workspace
+  --      record differs.
+  local per_ws_section = state_mod.get_last_section_for(wskey)
+  if per_ws_section ~= nil then
+    M.state.section = per_ws_section
+  end
+
   -- No-op if the target already matches what's loaded.
   local current = cfg.sections or {}
   if #current == #target then
@@ -1435,7 +1471,19 @@ function M._reseed_sections_for_workspace()
     for i, s in ipairs(target) do
       if current[i] ~= s then same = false; break end
     end
-    if same then return end
+    if same then
+      -- Slot list unchanged. Re-focus the per-workspace
+      -- last_section if it differs from what's active — covers
+      -- the project1 → project2 hop where both projects share
+      -- the same slot composition but the user was on a
+      -- different slot in each. `M.focus`'s clamp handles a
+      -- stale value if the record is bad.
+      if per_ws_section ~= nil and M._registry
+          and per_ws_section ~= M._registry.active then
+        pcall(function() M.focus(per_ws_section) end)
+      end
+      return
+    end
   end
 
   M._rebuild_section_registry(target)
@@ -1727,6 +1775,23 @@ function M.focus(key)
   require("auto-finder.core").ensure_started(M.state.config)
   if not M._registry then
     return false, "auto-finder: registry not initialized"
+  end
+  -- v0.2.28: clamp out-of-range / unresolvable keys to
+  -- `default_section` (or 0). Three paths land here with stale
+  -- values today: (a) `M.open()` reads M.state.section which may
+  -- have been re-seeded from a per-workspace record that was
+  -- written before the slot list shrank; (b) the legacy global
+  -- `last_section` namespace key bled across workspaces in
+  -- pre-v0.2.28 namespaces and still feeds the back-compat read
+  -- path on first launch after upgrade; (c) programmatic
+  -- `M.focus(N)` callers may pass an N that's out of range for
+  -- the current workspace. Without the clamp the underlying
+  -- registry returns `false, "no such section"` AFTER the panel
+  -- was already opened by ensure_open below — user-visible
+  -- symptom is an empty panel.
+  local views = require("auto-finder.views")
+  if not views.resolve(key) then
+    key = M.state.config.default_section or 0
   end
   -- Auto-finder-specific min-width preflight (cfg.width.min + 20,
   -- stricter than auto-core's min+10). Run via the host wrapper which

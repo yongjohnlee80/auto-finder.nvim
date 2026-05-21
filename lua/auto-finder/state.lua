@@ -28,10 +28,12 @@
 ---  state.set_user_width(n?)          → ok, err?
 ---  state.get_last_section()          → integer?
 ---  state.set_last_section(n?)        → ok, err?
----  state.get_sections_for(wskey)     → string[]?
----  state.set_sections_for(wskey, …)  → ok, err?
----  state.watch_user_width(cb)        → handle
----  state.watch_last_section(cb)      → handle
+---  state.get_sections_for(wskey)         → string[]?
+---  state.set_sections_for(wskey, …)      → ok, err?
+---  state.get_last_section_for(wskey)     → integer?
+---  state.set_last_section_for(wskey, n?) → ok, err?
+---  state.watch_user_width(cb)            → handle
+---  state.watch_last_section(cb)          → handle
 ---
 ---Each watch_* helper subscribes the callback to
 ---`state.auto-finder:<key>:changed`. Callbacks receive the auto-core
@@ -73,6 +75,16 @@ local DEFAULTS = {
   -- register those types; this map persists the user's per-project
   -- composition.
   sections = {},
+  -- v0.2.28: per-project last_section. Keyed by the same workspace
+  -- hash as `sections`. Each entry holds the section index the
+  -- user last focused on that project. Eliminates the
+  -- "stale section 4 from project1 displayed as empty panel in
+  -- project2" bug — the previous global `last_section` bled
+  -- across workspaces. Writers update BOTH this map and the
+  -- legacy `last_section` key so a downgrade still finds a
+  -- sensible value; readers prefer this map and only fall back
+  -- to the global key on a per-workspace miss.
+  last_section_by_workspace = {},
 }
 
 local _ns = nil
@@ -208,6 +220,41 @@ function M.set_sections_for(workspace_key, sections)
   return true
 end
 
+-- ── per-project last_section (v0.2.28) ───────────────────────
+
+---Fetch the persisted last-focused section for `workspace_key`.
+---Returns nil when the project has no record yet — caller falls
+---back to the legacy global `get_last_section()` (or
+---`cfg.default_section`).
+---@param workspace_key string?  sha256(workspace_root):sub(1,16)
+---@return integer?
+function M.get_last_section_for(workspace_key)
+  if type(workspace_key) ~= "string" or workspace_key == "" then return nil end
+  local all = M.namespace():get("last_section_by_workspace") or {}
+  local n = all[workspace_key]
+  if type(n) == "number" then return n end
+  return nil
+end
+
+---Persist the last-focused section for `workspace_key`. Pass `nil`
+---to clear the per-workspace record (caller falls through to the
+---legacy global key on next read).
+---@param workspace_key string
+---@param n integer?
+---@return boolean ok, string? err
+function M.set_last_section_for(workspace_key, n)
+  if type(workspace_key) ~= "string" or workspace_key == "" then
+    return false, "workspace_key must be a non-empty string"
+  end
+  if n ~= nil and (type(n) ~= "number" or n ~= math.floor(n)) then
+    return false, "last_section must be nil or an integer; got " .. tostring(n)
+  end
+  local all = vim.deepcopy(M.namespace():get("last_section_by_workspace") or {})
+  all[workspace_key] = n
+  M.namespace():set("last_section_by_workspace", all)
+  return true
+end
+
 -- ── test-only ────────────────────────────────────────────────
 
 ---Test-only: clear the namespace cache + reset every key to defaults.
@@ -215,8 +262,10 @@ end
 function M._reset_for_tests()
   if _ns then
     pcall(function()
-      _ns:set("user_width",   DEFAULTS.user_width)
-      _ns:set("last_section", DEFAULTS.last_section)
+      _ns:set("user_width",                DEFAULTS.user_width)
+      _ns:set("last_section",              DEFAULTS.last_section)
+      _ns:set("sections",                  vim.deepcopy(DEFAULTS.sections))
+      _ns:set("last_section_by_workspace", vim.deepcopy(DEFAULTS.last_section_by_workspace))
     end)
   end
   _ns = nil
