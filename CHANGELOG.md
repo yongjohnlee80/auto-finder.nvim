@@ -2,6 +2,78 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.31] — 2026-05-20 — `marks` slot: panel-class filetype + `BOOKMARKS` title
+
+Fixes the "buffer filenames move above the auto-finder when the
+marks slot is active" bug + adds the explicit `BOOKMARKS` slot
+title at the top of the panel.
+
+### Fixed
+
+- **`lua/auto-finder/views/marks/init.lua`** buffer filetype
+  switched from `auto-finder-marks` → **`auto-finder`** (the
+  canonical panel-class filetype used by `files` / `repos` /
+  `buffers`). External bufferline plugins (e.g.
+  `akinsho/bufferline.nvim`) detect the auto-finder panel via
+  `offsets = { filetype = "auto-finder" }` and apply a left
+  offset so the bufferline doesn't stretch across the panel
+  column. Pre-v0.2.31 marks shipped its own filetype which
+  wasn't in users' bufferline `offsets`, so the bufferline
+  stretched edge-to-edge whenever the marks slot was active —
+  user-visible as "the buffer filename strip is now sitting on
+  top of the auto-finder column."
+
+  Per-view identity moved to the buffer-local var
+  **`vim.b[bufnr].auto_finder_view = "marks"`** for any logic
+  that still needs to distinguish slots (none in tree yet — the
+  view exposes the same panel-class filetype as everything else
+  in the panel, which is the right contract).
+
+### Added
+
+- **`BOOKMARKS` title at the top of the marks panel.** Renders
+  unconditionally above the `GLOBAL` / `LOCAL` sections (or the
+  `(no marks set)` placeholder), with a blank row separator. So
+  the panel always reads as `BOOKMARKS → contents`, making the
+  slot obvious independent of which marks are currently set.
+
+### Known related issue (not fixed in this release)
+
+- **dbase slot** has the same shape of bug — its buffer is
+  dbee's drawer with filetype `dbee` (dbee-controlled; can't be
+  changed from our side without breaking dbee's filetype-scoped
+  keymaps / highlights). Workaround for users of bufferline-
+  style plugins: add `dbee` to the `offsets` list alongside
+  `auto-finder`:
+
+  ```lua
+  -- bufferline.nvim setup snippet
+  offsets = {
+    { filetype = "auto-finder",        text = "Auto-Finder" },
+    { filetype = "dbee",               text = "Database" },
+    { filetype = "auto-finder-config", text = "" },
+  },
+  ```
+
+  A future release may layer a window-local marker on the panel
+  that bufferline can detect without filetype matching; for now
+  the docs-side workaround is the recommended path.
+
+### Verified
+
+- Smoke section `[12c]` updated for the filetype rename:
+  asserts `auto-finder` (panel-class) and the
+  `b:auto_finder_view = "marks"` tag. New assertion confirms
+  the `BOOKMARKS` title renders at the top. Suite green at
+  **460 passed / 0 failed** (was 458/0).
+
+### Consumer impact
+
+Strictly additive. No setup-config changes. Users picking up
+v0.2.31 from `^0.2.0` will see the marks slot now play nice
+with their bufferline offsets without needing to add a second
+filetype to the config.
+
 ## [v0.2.30] — 2026-05-20 — `marks` slot: path crop, two-line layout, `i` info popup
 
 Display polish + a new info keymap on the v0.2.29 marks slot.

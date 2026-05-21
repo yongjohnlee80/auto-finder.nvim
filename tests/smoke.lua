@@ -763,14 +763,23 @@ do
   local marks_bufnr = af._registry._bufs[2]
   ok("marks slot has a buffer",
     marks_bufnr ~= nil and vim.api.nvim_buf_is_valid(marks_bufnr))
-  ok("marks buffer filetype is auto-finder-marks",
-    vim.bo[marks_bufnr].filetype == "auto-finder-marks")
+  -- v0.2.31: filetype is `auto-finder` so external bufferline
+  -- plugins recognize the panel column. Per-view identity moved
+  -- to the buffer-local `b:auto_finder_view` var.
+  ok("marks buffer filetype is auto-finder (panel-class)",
+    vim.bo[marks_bufnr].filetype == "auto-finder")
+  ok("marks buffer-local auto_finder_view tag = 'marks'",
+    vim.b[marks_bufnr].auto_finder_view == "marks")
 
   -- Re-focus marks slot — on_focus re-renders.
   af.focus(2)
   marks_bufnr = af._registry._bufs[2]
   local lines = vim.api.nvim_buf_get_lines(marks_bufnr, 0, -1, false)
   local txt = table.concat(lines, "\n")
+  ok("rendered BOOKMARKS title at top",
+    txt:find("BOOKMARKS", 1, true) ~= nil
+      and (lines[1] or ""):find("BOOKMARKS", 1, true) ~= nil,
+    "first line=" .. tostring(lines[1]))
   ok("rendered GLOBAL section header",
     txt:find("GLOBAL", 1, true) ~= nil)
   ok("rendered LOCAL section header for the local-mark buffer",

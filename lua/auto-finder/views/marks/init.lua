@@ -42,7 +42,15 @@ local M = {
   description = "nvim marks (global A-Z + local a-z)",
 }
 
-local FILETYPE = "auto-finder-marks"
+-- v0.2.31: use the canonical `auto-finder` filetype so external
+-- bufferline-style plugins (akinsho/bufferline.nvim, etc.) that
+-- offset above the panel column via `offsets = { filetype =
+-- "auto-finder" }` recognize this slot as part of the panel.
+-- Pre-v0.2.31 used `auto-finder-marks` which made the bufferline
+-- stretch edge-to-edge when the marks slot was active. Per-view
+-- identity now lives in the buffer-local var `b:auto_finder_view`
+-- (set to "marks") for any logic that needs to distinguish slots.
+local FILETYPE = "auto-finder"
 
 -- Cached scratch bufnr — survives view-switch like the other views.
 M._bufnr = nil
@@ -190,6 +198,12 @@ local function _render(bufnr)
     lines[#lines + 1] = text
     lookup[#lines] = rec
   end
+
+  -- Always prefix with the slot title + a blank row, so the
+  -- panel reads as "BOOKMARKS" → contents, regardless of
+  -- whether globals or locals are present.
+  emit("BOOKMARKS", nil)
+  emit("", nil)
 
   if #globals == 0 and #locals == 0 then
     emit("(no marks set)", nil)
@@ -423,6 +437,9 @@ function M.get_buffer(panel_winid)
   vim.bo[b].buftype   = "nofile"
   vim.bo[b].swapfile  = false
   vim.bo[b].filetype  = FILETYPE
+  -- Buffer-local view identity (per-view differentiation lives
+  -- here now that the filetype is shared with files/repos).
+  vim.b[b].auto_finder_view = "marks"
   pcall(vim.api.nvim_buf_set_name, b, "auto-finder://marks")
   _render(b)
   _apply_keymaps(b, panel_winid)
