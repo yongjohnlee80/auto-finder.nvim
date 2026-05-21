@@ -701,6 +701,181 @@ do
   af.close()
 end
 
+-- ───────────────────────── 12c. marks slot (v0.2.29) ─────────────────────────
+-- New `marks` view renders nvim's native marks (global A-Z + local
+-- a-z) as a flat scratch-buffer list with <CR> to jump and `d` to
+-- delete the mark (matches :delmarks). Self-contained: this section
+-- sets and clears its own marks, doesn't depend on prior state.
+print("\n[12c] marks slot (v0.2.29)")
+do
+  local marks_view = require("auto-finder.views.marks")
+  marks_view._reset_for_tests()
+
+  -- Discoverability: scanned from views/marks/init.lua.
+  local types = af._available_section_types()
+  local has_marks = false
+  for _, t in ipairs(types) do
+    if t == "marks" then has_marks = true; break end
+  end
+  ok("marks is in _available_section_types",
+    has_marks,
+    "got: " .. table.concat(types, ", "))
+
+  -- Stage two test buffers in an EDITOR window (not the panel —
+  -- the panel has winfixbuf and is also a scratch nofile so any
+  -- `m<x>` we run there would attach to the marks buffer itself).
+  local file_x = vim.fn.tempname() .. "-marks-x.txt"
+  local file_y = vim.fn.tempname() .. "-marks-y.txt"
+  vim.fn.writefile(
+    { "line one of x", "line two of x", "line three of x" }, file_x)
+  vim.fn.writefile(
+    { "alpha", "beta", "gamma", "delta" }, file_y)
+
+  -- Load both files as buffers in the current (editor) window
+  -- BEFORE opening the panel. `bufadd` + `bufload` puts them in
+  -- the loaded set so getmarklist(b) finds them later.
+  local x_bufnr = vim.fn.bufadd(file_x)
+  vim.fn.bufload(x_bufnr)
+  local y_bufnr = vim.fn.bufadd(file_y)
+  vim.fn.bufload(y_bufnr)
+
+  -- Set global mark X on file_x:2 via setpos (no current-window
+  -- dependency, no winfixbuf interaction).
+  pcall(vim.fn.setpos, "'X", { x_bufnr, 2, 1, 0 })
+  -- Set local mark a on file_y:3 — must run in y_bufnr's context
+  -- so the mark lands on THAT buffer.
+  pcall(vim.api.nvim_buf_call, y_bufnr, function()
+    vim.fn.setpos("'a", { y_bufnr, 3, 1, 0 })
+  end)
+
+  -- Now rebuild the slot list to include marks and focus the slot.
+  af.setup({
+    width = { default = 38, min = 25, max = 100 },
+    default_section = 1,
+    sections = { "config", "files", "marks" },
+  })
+  af.open(true)
+  af.focus(2)
+  ok("focused marks slot",
+    af.state.section == 2,
+    "got " .. tostring(af.state.section))
+
+  local marks_bufnr = af._registry._bufs[2]
+  ok("marks slot has a buffer",
+    marks_bufnr ~= nil and vim.api.nvim_buf_is_valid(marks_bufnr))
+  ok("marks buffer filetype is auto-finder-marks",
+    vim.bo[marks_bufnr].filetype == "auto-finder-marks")
+
+  -- Re-focus marks slot — on_focus re-renders.
+  af.focus(2)
+  marks_bufnr = af._registry._bufs[2]
+  local lines = vim.api.nvim_buf_get_lines(marks_bufnr, 0, -1, false)
+  local txt = table.concat(lines, "\n")
+  ok("rendered GLOBAL section header",
+    txt:find("GLOBAL", 1, true) ~= nil)
+  ok("rendered LOCAL section header for the local-mark buffer",
+    txt:find("LOCAL", 1, true) ~= nil)
+  ok("rendered the [X] global mark row",
+    txt:find("[X]", 1, true) ~= nil)
+  ok("rendered the [a] local mark row",
+    txt:find("[a]", 1, true) ~= nil)
+  ok("global X row references the test file basename",
+    txt:find("marks%-x%.txt:2") ~= nil,
+    "txt=\n" .. txt)
+
+  -- _rows lookup: should have at least 2 mark records.
+  local mark_records = 0
+  for _, rec in pairs(marks_view._rows or {}) do
+    if rec then mark_records = mark_records + 1 end
+  end
+  ok("_rows lookup has 2 mark records (X global + a local)",
+    mark_records == 2,
+    "got " .. mark_records)
+
+  -- Find the X-mark line index and validate the record shape.
+  local x_line, x_rec
+  for ln, rec in pairs(marks_view._rows or {}) do
+    if rec and rec.mark == "X" then x_line, x_rec = ln, rec; break end
+  end
+  ok("X row record has kind='global' + line==2 + file==file_x",
+    x_rec ~= nil and x_rec.kind == "global"
+      and x_rec.line == 2 and x_rec.file == file_x,
+    x_rec and vim.inspect(x_rec) or "nil")
+
+  -- Delete-mark via vim.fn.setpos (what `d` keymap does internally).
+  pcall(vim.fn.setpos, "'X", { 0, 0, 0, 0 })
+  -- Re-render: the X row should disappear.
+  af.focus(2)
+  marks_bufnr = af._registry._bufs[2]
+  local lines2 = vim.api.nvim_buf_get_lines(marks_bufnr, 0, -1, false)
+  local txt2 = table.concat(lines2, "\n")
+  ok("after delmarks X, [X] row is gone",
+    txt2:find("[X]", 1, true) == nil,
+    "txt=\n" .. txt2)
+  ok("after delmarks X, [a] local row is still present",
+    txt2:find("[a]", 1, true) ~= nil)
+
+  -- Empty-state rendering when nothing's set.
+  pcall(vim.fn.setpos, "'a",
+    { y_bufnr, 0, 0, 0 })  -- clear local a; setpos works in-buffer
+  -- (Also clear by running setpos inside the buffer for safety.)
+  pcall(vim.api.nvim_buf_call, y_bufnr, function()
+    vim.fn.setpos("'a", { y_bufnr, 0, 0, 0 })
+  end)
+  af.focus(2)
+  marks_bufnr = af._registry._bufs[2]
+  local lines3 = vim.api.nvim_buf_get_lines(marks_bufnr, 0, -1, false)
+  local txt3 = table.concat(lines3, "\n")
+  ok("empty state renders the (no marks set) placeholder",
+    txt3:find("no marks set", 1, true) ~= nil)
+
+  -- Buffer-local keymaps installed (the d / <CR> / R contract).
+  local function _has_keymap(buf, lhs)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do
+      if m.lhs == lhs then return true end
+    end
+    return false
+  end
+  ok("buffer-local <CR> keymap installed",
+    _has_keymap(marks_bufnr, "<CR>"))
+  ok("buffer-local d keymap installed",
+    _has_keymap(marks_bufnr, "d"))
+  ok("buffer-local R keymap installed",
+    _has_keymap(marks_bufnr, "R"))
+
+  -- Auto-refresh wired: AutoFinderMarksRefresh augroup exists and
+  -- holds at least one autocmd with our descriptor.
+  local refresh_autos = vim.api.nvim_get_autocmds({
+    group = "AutoFinderMarksRefresh",
+  })
+  ok("AutoFinderMarksRefresh augroup has at least one autocmd",
+    #refresh_autos >= 1)
+  local refresh_desc_seen = false
+  for _, a in ipairs(refresh_autos) do
+    if (a.desc or ""):find(
+         "auto-finder.marks: refresh", 1, true) then
+      refresh_desc_seen = true; break
+    end
+  end
+  ok("AutoFinderMarksRefresh autocmd carries our descriptor",
+    refresh_desc_seen)
+
+  -- Cleanup: drop the staged buffers + tempfiles, restore the
+  -- default slot list (downstream sections depend on `repos`
+  -- being present), and close the panel.
+  pcall(vim.api.nvim_buf_delete, x_bufnr, { force = true })
+  pcall(vim.api.nvim_buf_delete, y_bufnr, { force = true })
+  pcall(vim.fn.delete, file_x)
+  pcall(vim.fn.delete, file_y)
+  af.setup({
+    width = { default = 38, min = 25, max = 100 },
+    default_section = 1,
+    sections = { "config", "files", "repos" },
+  })
+  af.close()
+  marks_view._reset_for_tests()
+end
+
 -- ───────────────────────── 13. directory-hijack defers M.open ─────────────────────────
 -- Regression: E242 "Can't split a window while closing another" on
 -- `nvim .` when the hijack called M.open synchronously. nvim_buf_delete

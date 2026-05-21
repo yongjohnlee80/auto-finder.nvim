@@ -2,6 +2,68 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.29] — 2026-05-20 — `marks` slot (nvim native marks panel)
+
+New top-level view rendering nvim's native marks as a flat list:
+global A-Z marks at the top, local a-z marks grouped per loaded
+buffer. Discoverable via `slot add marks` from the config REPL.
+
+### Added
+
+- **`lua/auto-finder/views/marks/init.lua`** — new view module.
+  Scratch buffer (not neo-tree-backed), filetype
+  `auto-finder-marks`. Renders all marks reachable from
+  `vim.fn.getmarklist()` (globals) and `vim.fn.getmarklist(b)`
+  (locals, one call per loaded buffer with a non-empty name).
+  Each row shows the mark letter, the file (cwd- or home-relative
+  when possible), the line number, and the line preview.
+
+  Buffer-local keymaps:
+  - `<CR>` — jump to mark. Routes via the existing
+    `M._editor_target_winid()` to land in an editor window (not
+    the panel), reuses the bufnr when the mark's buffer is still
+    loaded, falls back to `:edit <path>` otherwise. Places the
+    cursor at the recorded line/col.
+  - `d` — delete the mark (matches `:delmarks`). Globals cleared
+    via `vim.fn.setpos("'X", {0,0,0,0})`. Locals cleared inside
+    the owning buffer's context via `vim.api.nvim_buf_call`.
+    Re-renders after deletion. `nowait = true` makes the single-
+    key mapping fire immediately; the buffer is `nomodifiable`
+    anyway so nvim's `d`-operator would no-op even without it.
+  - `R` — manual refresh.
+
+  Auto-refresh wiring (nvim has no native `MarkChanged` event):
+  refresh fires on slot focus (always), and on `BufWritePost` /
+  `CursorHold` when the marks buffer is currently visible in
+  some window. The `_is_visible()` gate avoids paying the render
+  cost when the slot is hidden — the next focus will re-render
+  anyway. Augroup `AutoFinderMarksRefresh` is allocated on
+  `get_buffer` and torn down on `on_close`.
+
+- **Discovery** — `_available_section_types()` already scans
+  `views/<name>/init.lua` for bundled views, so `marks` appears
+  in the `slot add` / `slot modify` tab-completion automatically.
+  No registry hook required.
+
+### Verified
+
+- `tests/smoke.lua` section `[12c]` adds 19 assertions covering:
+  discoverability, slot focus + buffer creation + filetype, the
+  render output (GLOBAL / LOCAL headers + `[X]` / `[a]` rows +
+  cwd-relative file path), the `_rows` lookup shape (kind/line/
+  file fields on each record), delete-mark behavior (X removed,
+  unrelated `a` survives), empty-state placeholder, buffer-local
+  keymap installation (`<CR>` / `d` / `R`), and the
+  `AutoFinderMarksRefresh` autocmd registration. Suite green at
+  **456 passed / 0 failed** (was 437/0).
+
+### Consumer impact
+
+Strictly additive. No setup-config changes. No new auto-core
+requirement (uses the existing `_editor_target_winid()` and
+`views/<name>` discovery surface). Users opt in by typing
+`slot add marks` in the config slot.
+
 ## [v0.2.28] — 2026-05-20 — per-workspace `last_section` + clamp on focus
 
 Fixes a cross-project staleness bug where the last-focused section
