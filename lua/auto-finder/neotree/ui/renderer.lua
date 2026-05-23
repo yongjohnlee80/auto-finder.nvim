@@ -136,12 +136,14 @@ M.close = function(state, focus_prior_window)
         local ok_get, val = pcall(function() return vim.wo[state.winid].winfixbuf end)
         was_fixed = ok_get and val == true
         if was_fixed then
-          pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = state.winid })
+          -- ADR 0028 §3: `scope = "local"` for documentation hygiene
+          -- even on practically-window-local options.
+          pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = state.winid, scope = "local" })
         end
       end
       pcall(vim.api.nvim_win_set_buf, state.winid, new_buf)
       if was_fixed and vim.api.nvim_win_is_valid(state.winid) then
-        pcall(vim.api.nvim_set_option_value, "winfixbuf", true, { win = state.winid })
+        pcall(vim.api.nvim_set_option_value, "winfixbuf", true, { win = state.winid, scope = "local" })
       end
     else
       local args = {
@@ -1262,12 +1264,14 @@ M.acquire_window = function(state)
       local _ok, _val = pcall(function() return vim.wo[winid].winfixbuf end)
       _was_fixed = _ok and _val == true
       if _was_fixed then
-        pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = winid })
+        -- ADR 0028 §3: `scope = "local"` for documentation hygiene
+        -- even on practically-window-local options.
+        pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = winid, scope = "local" })
       end
     end
     vim.api.nvim_win_set_buf(state.winid, state.bufnr)
     if _was_fixed and vim.api.nvim_win_is_valid(winid) then
-      pcall(vim.api.nvim_set_option_value, "winfixbuf", true, { win = winid })
+      pcall(vim.api.nvim_set_option_value, "winfixbuf", true, { win = winid, scope = "local" })
     end
   else
     local close_old_window = function(new_winid)

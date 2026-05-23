@@ -143,7 +143,9 @@ local function create_editor_window()
       vim.cmd("rightbelow vsplit")
       newwin = vim.api.nvim_get_current_win()
       if newwin ~= panel then
-        vim.api.nvim_set_option_value("winfixbuf", false, { win = newwin })
+        -- ADR 0028 §3: `scope = "local"` for documentation hygiene
+        -- even on practically-window-local options.
+        vim.api.nvim_set_option_value("winfixbuf", false, { win = newwin, scope = "local" })
         local scratch = vim.api.nvim_create_buf(false, true)
         vim.bo[scratch].buftype  = "nofile"
         vim.bo[scratch].swapfile = false
@@ -163,7 +165,7 @@ local function create_editor_window()
   -- to inherit, no leak guard to fight).
   vim.cmd("vnew")
   local newwin = vim.api.nvim_get_current_win()
-  pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin })
+  pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin, scope = "local" })
   return newwin
 end
 
@@ -217,7 +219,7 @@ local function ensure_below_split(current_winid, parent_winid, show_fn, label)
   vim.cmd("belowright split")
   local newwin = vim.api.nvim_get_current_win()
   -- Same winfixbuf-propagation guard as create_editor_window.
-  pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin })
+  pcall(vim.api.nvim_set_option_value, "winfixbuf", false, { win = newwin, scope = "local" })
   local scratch = vim.api.nvim_create_buf(false, true)
   pcall(vim.api.nvim_win_set_buf, newwin, scratch)
 
