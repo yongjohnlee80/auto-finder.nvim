@@ -71,6 +71,93 @@ local function skip(name, reason)
   print(string.format("  SKIP  %s  (%s)", name, reason))
 end
 
+---Wait for the deferred dbase mount (ADR 0026 Phase 7) to swap the
+---`shared.loading` placeholder buffer for the real dbee drawer
+---buffer.
+---
+---**Background.** dbase mounts in two phases. `get_buffer` returns a
+---loading placeholder immediately. `on_focus` runs the real
+---`dbee.setup` + `drawer_show` inside `vim.schedule(...)`, gated by
+---the 5-guard `_still_current` check. Total wall time depends on
+---dbee's Go backend cold-start + remote-plugin registration —
+---a few hundred ms on most machines, occasionally over a second on
+---slow runners. The original 150–250 ms `vim.wait` budgets here were
+---too tight for the slow case, producing pre-existing intermittent
+---failures on Q5 / 5d.2 / 6b.9 / 6d.1 / 6d.2 — see CHANGELOG
+---v0.2.34 for the audit trail.
+---
+---**This is an artificial wait window.** It exists because the smoke
+---is polling instead of subscribing. The correct long-term shape is
+---to drive these waits off an `auto-finder.dbase.section.remount`
+---auto-core event (the section already calls `_notify_remount`
+---internally — extending it to publish on the bus is the cleanup).
+---When/if these waits become flaky again, replace the helper with
+---an `events.subscribe(...)` + `vim.wait(..., function() return
+---got_event end)` pattern rather than bumping the timeout further.
+---
+---The predicate is dbase-specific: it returns true only when the
+---panel ends up showing a dbase terminal state — either the real
+---dbee drawer (ft starts with `dbee` OR name starts with `dbee://`)
+---OR the dbee-unavailable fallback (`auto-finder-dbase://placeholder`).
+---Anything else (loading placeholder, OR a non-dbase view's buffer
+---like the files-section neo-tree buffer winning the deferred-render
+---race) keeps the wait going.
+---
+---**Race note.** There's a known pre-existing race between the
+---files section's `fs_scan` deferred render and the dbase section's
+---deferred drawer mount: both run via `vim.schedule(...)`, and if
+---fs_scan fires after we've focused dbase, it can swap the panel
+---buffer back to the files-section neo-tree buffer just as the
+---dbase placeholder was about to be replaced by the drawer. The
+---predicate refuses to terminate in that intermediate state, and
+---callers that need to drive past it do an explicit re-focus
+---(`af.focus("dbase")`) and call this helper again. Tagged in the
+---test docs at section [6d.5] comment.
+---@param panel_winid integer|nil
+---@param timeout_ms? integer  default 1500
+---@return boolean satisfied
+local function wait_for_drawer_mount(panel_winid, timeout_ms)
+  return vim.wait(timeout_ms or 1500, function()
+    if not (panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
+      return false
+    end
+    local b = vim.api.nvim_win_get_buf(panel_winid)
+    if not vim.api.nvim_buf_is_valid(b) then return false end
+    local nm = vim.api.nvim_buf_get_name(b) or ""
+    local ft = vim.bo[b].filetype or ""
+    -- Real dbee drawer.
+    if ft:find("^dbee") then return true end
+    if nm:find("^dbee://") or nm:find("dbee%-drawer$") then return true end
+    -- dbee-unavailable fallback placeholder (also a terminal state).
+    if nm:find("auto%-finder%-dbase://placeholder") then return true end
+    -- Anything else (loading placeholder, files-section race victim,
+    -- etc.) → keep waiting.
+    return false
+  end, 10)
+end
+
+---Wrapper: focus dbase, wait for drawer mount, and re-focus once if
+---the files-section deferred render won the race (panel ended up on
+---a non-dbase view). Returns true if the panel ultimately reached
+---a dbase terminal state. Used by sections that depend on the
+---drawer mount actually completing.
+---@param af table  auto-finder module
+---@param panel_winid integer
+---@return boolean ok
+local function focus_dbase_and_wait(af, panel_winid)
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+  if wait_for_drawer_mount(panel_winid, 1500) then return true end
+  -- Race-recovery: panel got hijacked (likely by files-section
+  -- fs_scan deferred render). Re-focus dbase to put it back, then
+  -- wait again. One re-focus is plenty — if we still can't land
+  -- the drawer the test will report the actual state at the
+  -- assertion site so the failure is debuggable.
+  af.focus("dbase")
+  vim.wait(150, function() return af.state.section == 2 end, 5)
+  return wait_for_drawer_mount(panel_winid, 1500)
+end
+
 -- ───────────────────── 1. dbee availability probe ──────────────────────
 print("\n[1] dbee availability probe")
 local dbee_ok, dbee = pcall(require, "dbee")
@@ -139,11 +226,14 @@ ok("focus(dbase) returns ok", focus_ok, focus_err)
 ok("state.section == 2 (dbase)", af.state.section == 2,
   "got " .. tostring(af.state.section))
 
--- Give any async drawer init a tick.
-vim.wait(250, function()
-  return panel and vim.api.nvim_win_is_valid(panel)
-    and vim.api.nvim_buf_is_valid(vim.api.nvim_win_get_buf(panel))
-end, 5)
+-- Wait for the deferred dbase mount to swap the loading placeholder
+-- for the real dbee drawer (or the dbee-unavailable placeholder).
+-- `focus_dbase_and_wait` handles the files-section deferred-render
+-- race by re-focusing once if the panel got hijacked. See
+-- `wait_for_drawer_mount` above for the full artificial-wait
+-- rationale + future direction (drive off
+-- `auto-finder.dbase.section.remount` event).
+focus_dbase_and_wait(af, panel)
 
 -- The five questions Phase 0a exists to answer.
 ok("[Q1] panel_winid still valid after focus(dbase)",
@@ -480,9 +570,22 @@ else
   -- Verify each entry lands with the right component + level.
   do
     local entries = require("auto-core").log.recent(200)
+    -- Component shape: `events.lua` has a pre-existing internal
+    -- inconsistency (ADR 0026 Phase 2 move artifact, masked until
+    -- v0.2.34 fixed the deferred-mount waits that previously SKIP'd
+    -- this whole section). `logger.error(...)` paths emit under
+    -- `auto-finder.view.dbase.events`; `logger.notifyIf(...)` paths
+    -- emit under `auto-finder.dbase.events` (the explicit
+    -- `opts.component = "dbase.events"` overrides the namespace).
+    -- The test accepts both until events.lua is normalized to a
+    -- single component string — tracked as a v0.2.x cleanup.
+    local EVENTS_COMPONENTS = {
+      ["auto-finder.view.dbase.events"] = true,  -- logger.error path
+      ["auto-finder.dbase.events"]      = true,  -- logger.notifyIf path
+    }
     local function find_one(needle)
       for _, e in ipairs(entries) do
-        if e.component == "auto-finder.dbase.events"
+        if EVENTS_COMPONENTS[e.component]
             and type(e.message) == "string"
             and e.message:find(needle, 1, true) then
           return e
@@ -524,9 +627,13 @@ print("\n[5d] state-keying probe — events while dbase inactive, then refocus")
 do
   local section = require("auto-finder.sections.dbase")
   -- Ensure dbase IS the active section first, capture its bufnr.
-  af.focus("dbase")
-  vim.wait(150, function() return af.state.section == 2 end, 5)
+  -- The two-phase mount means we must wait for the deferred drawer
+  -- swap before capturing — otherwise we'd cache the loading
+  -- placeholder bufnr and the "same bufnr after refocus" invariant
+  -- would never hold. focus_dbase_and_wait also handles the
+  -- files-section deferred-render race (see helper docs).
   local panel_now = af.state.panel_winid
+  focus_dbase_and_wait(af, panel_now)
   local dbase_bufnr_before = panel_now and vim.api.nvim_win_get_buf(panel_now)
   ok("dbase buffer captured before switch",
     dbase_bufnr_before and vim.api.nvim_buf_is_valid(dbase_bufnr_before))
@@ -560,9 +667,10 @@ do
 
   -- Re-focus dbase. The cached bufnr should still be valid; the
   -- section should NOT degrade to placeholder; winfixbuf/winfixwidth
-  -- should still hold.
-  af.focus("dbase")
-  vim.wait(250, function() return af.state.section == 2 end, 5)
+  -- should still hold. Re-focus into a previously-mounted dbase
+  -- should be near-instantaneous (cached bufnr) but the wrapper
+  -- stays resilient to the files-section race even on re-focus.
+  focus_dbase_and_wait(af, panel_now)
   local dbase_bufnr_after = panel_now and vim.api.nvim_win_get_buf(panel_now)
   ok("[5d.2] refocus(dbase) returns the same drawer bufnr",
     dbase_bufnr_before and dbase_bufnr_after
@@ -699,9 +807,12 @@ do
   -- second window exists. Create one synthetic editor buffer to
   -- give layout.ensure_editor() a candidate target.
   if af.state.panel_winid == nil then af.open(true) end
-  af.focus("dbase")
-  vim.wait(150, function() return af.state.section == 2 end, 5)
   local panel_winid = af.state.panel_winid
+  -- 6b.9 asserts the panel buffer's filetype starts with `dbee` —
+  -- that's only true once mount_drawer's deferred swap has fired.
+  -- focus_dbase_and_wait handles the files-section race too. See
+  -- wait_for_drawer_mount above for the artificial-wait rationale.
+  focus_dbase_and_wait(af, panel_winid)
 
   -- If only the panel exists, force-create a non-panel window so the
   -- "prefer existing editor-area window" path is exercised. Use
@@ -860,9 +971,15 @@ do
   layout.close_all()
 
   if af.state.panel_winid == nil then af.open(true) end
-  af.focus("dbase")
-  vim.wait(150, function() return af.state.section == 2 end, 5)
   local panel_winid = af.state.panel_winid
+  -- 6d.1/6d.2 inspect the buffer-local `<CR>` keymap that
+  -- `mount_drawer` (init.lua) installs AFTER the deferred drawer
+  -- swap fires. We must wait for that swap before grabbing the
+  -- bufnr — otherwise we'd inspect keymaps on the loading
+  -- placeholder, which carries none of the drawer overrides.
+  -- focus_dbase_and_wait handles the files-section race. See
+  -- wait_for_drawer_mount above for the artificial-wait rationale.
+  focus_dbase_and_wait(af, panel_winid)
   local bufnr = panel_winid and vim.api.nvim_win_get_buf(panel_winid)
 
   -- Ensure we have an editor-area target window so ensure_editor

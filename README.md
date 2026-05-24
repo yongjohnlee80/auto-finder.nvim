@@ -42,7 +42,7 @@ Five views in the box:
 | 1 | **files** | Filesystem tree (neo-tree filesystem source). Live-refresh on filesystem events; git status decorations from the auto-core git layer. |
 | 2 | **repos** | Auto-discovered git repos × worktrees from [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim). No registry, no manual add — what worktree.nvim sees is what shows up. fs_event watchers refresh on worktree mutations. |
 | 3 | **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. Tracked via Buf* autocmds through the core's buffer cache. |
-| 4 | **dbase** | [`nvim-dbee`](https://github.com/kndndrj/nvim-dbee) drawer mounted inside the panel. Soft dep — renders a placeholder buffer if dbee isn't installed. Connection files managed from the config REPL. |
+| 4 | **dbase** | [`nvim-dbee`](https://github.com/kndndrj/nvim-dbee) drawer mounted inside the panel. Soft dep — renders a placeholder buffer if dbee isn't installed. Connection vaults are at-rest encrypted (via `age` / `gpg`) and managed from the config REPL. |
 
 Plus the foundations behind the views, all centralized in
 `lua/auto-finder/core/`:
@@ -232,29 +232,105 @@ window hasn't been bound yet. Auto-finder mounts the companion
 editor/result panes first, then forwards to dbee — so notes
 always render the first time.
 
-### Connection files
+### Connection vaults (encrypted)
 
 Rather than hand-authoring dbee `Source` instances in your
-lazy config, the config REPL manages JSON connection files for
-you:
+lazy config, the config REPL manages connection vaults for you.
+**Connection URLs typically carry credentials in clear text**
+(passwords baked into the URL, API tokens as `?key=…`, etc.), so
+auto-finder encrypts vaults at rest.
 
 ```
 0                       # focus the config view (REPL)
-dbase new work          # creates work.json under auto-finder's dbase dir
-dbase load work         # makes work.json the active source
+dbase new work          # creates work.json.enc, prompts for a vault passphrase
+dbase load work         # activates the vault, decrypted only in memory
 dbase conn add          # prompts for name / type / url
 3                       # focus the dbase view — drawer renders the new entry
 ```
 
-Files live under `stdpath('state') .. /auto-finder/dbase/`.
-Each is loaded as a separate dbee `FileSource`. `dbase load
-<name>` swaps the active source without restarting; the drawer
-re-renders automatically.
+Vaults live under `stdpath('state') .. /auto-finder/dbase/<name>.json.enc`.
+On first access per nvim session the user is prompted for the
+vault passphrase via `vim.fn.inputsecret` (no echo). Plaintext
+exists only as decrypted bytes inside the running nvim process —
+it's never written to disk or to a log line.
+
+**Crypto provider.** The encryption itself is delegated to an
+external local tool. **`gpg` is the supported default.** Auto-finder
+orchestrates the passphrase prompt and file lifecycle; it does NOT
+implement cryptography. If `gpg` isn't on PATH at setup time, the
+section falls back to the legacy plaintext storage (see "Migration"
+below) and logs a WARN entry so you know.
+
+`age` is also supported but opt-in only — its passphrase automation
+relies on `AGE_PASSPHRASE` being honored by the local age build
+(`rage` and recent age do; stock age reads `/dev/tty` only). To
+prefer `age` when both are installed, set
+`AUTO_FINDER_DBASE_PROVIDER_AGE=1` in your shell environment before
+launching nvim. We'll revisit making age default once a real-provider
+smoke proves the passphrase path on each target platform.
+
+**Vault keymaps and verbs.**
+
+```
+dbase new <name>         # create a fresh empty encrypted vault
+dbase ls                 # list available vaults (active is *-marked)
+dbase rm <name>          # delete a vault
+dbase load [name]        # activate a vault (passphrase prompt on first decrypt)
+dbase conn add           # prompt for name/type/url, append to the active vault
+dbase conn ls            # list connections in the active vault
+dbase conn rm <name>     # remove a connection by name
+dbase lock               # forget the cached passphrase (re-prompt on next access)
+dbase status             # show storage mode + provider + active vault
+```
+
+### Migrating from plaintext (pre-v0.2.34)
+
+Earlier auto-finder versions stored connection files as plaintext
+JSON under `stdpath('state')/auto-finder/dbase/<name>.json`.
+v0.2.34 keeps those files readable but stops writing them — new
+operations land in the encrypted vault format. To move existing
+plaintext files into encrypted vaults:
+
+```
+dbase migrate <name>     # read <name>.json, encrypt to <name>.json.enc
+                         # plaintext file is LEFT IN PLACE for verification
+dbase load <name>        # activate the new encrypted vault
+                         # … verify your connections all work …
+dbase rmlegacy <name>    # delete the plaintext file once you've verified
+```
+
+`dbase migrate` is intentionally non-destructive — the plaintext
+file is preserved until you explicitly `rmlegacy` it. This lets
+you read both copies side-by-side until you're confident the
+migration round-tripped your connections correctly.
 
 If you'd rather pin sources from your lazy spec (e.g. an
 `EnvSource` reading `DBASE_CONNECTIONS` for secrets injected
 from `pass` / `1Password`), pass them through `opts.dbase.sources`
-— those are merged with any FileSource the REPL loads.
+— a non-empty list short-circuits the encrypted/legacy default
+path entirely.
+
+### Layout — full-width result strip
+
+The dbase view splits the screen into three areas: the drawer
+inside the auto-finder panel column, the SQL editor in the main
+editor area, and a full-width result strip across the bottom
+(spanning the width of the editor area). The bottom strip mirrors
+the gobugger / nvim-dap-view "bottom panel" shape — query
+results never feel squeezed regardless of how the user has split
+the editor area.
+
+The call-log tile splits below the result strip. Both tiles are
+created on first `<CR>` against a connection node in the drawer.
+
+### SQL note buffers are listed
+
+Since v0.2.34, dbee's SQL note buffers default to `buflisted = true`
+(dbee's stock default is `false`). This makes notes appear in
+auto-finder's `buffers` view, in autovim's editor-area winbar,
+and in any other surface that filters by `vim.fn.buflisted(b) == 1`.
+Override via `opts.dbase.extra.editor.buffer_options.buflisted = false`
+if you want dbee's original behavior.
 
 ## Architecture
 

@@ -43,13 +43,17 @@ local function help_lines()
     "  slot remove <N>              remove section at slot N (N>=1; slot 0 is protected)",
     "  slot modify <N> <type>       replace the section at slot N with <type>",
     "  slot types                   list available section types",
-    "  dbase new <name>             create empty connections file (`.json` auto-appended)",
-    "  dbase ls                     list available connections files",
-    "  dbase rm <name>              delete a connections file",
-    "  dbase load [name]            load file as active (prompts if name omitted)",
-    "  dbase conn add               prompt for name/type/url, append to active file",
-    "  dbase conn ls                list connections in the active file",
+    "  dbase new <name>             create empty connections vault (encrypted if age/gpg present)",
+    "  dbase ls                     list available vaults",
+    "  dbase rm <name>              delete a vault",
+    "  dbase load [name]            activate vault (prompts if name omitted)",
+    "  dbase conn add               prompt for name/type/url, append to active vault",
+    "  dbase conn ls                list connections in the active vault",
     "  dbase conn rm <name>         remove a connection by name",
+    "  dbase migrate <name>         encrypt a legacy plaintext file to a vault",
+    "  dbase rmlegacy <name>        delete a legacy plaintext file (after migrate)",
+    "  dbase status                 show storage mode, provider, active vault, file counts",
+    "  dbase lock                   forget cached passphrase (re-prompt on next access)",
     "  reload                       re-render the active section",
     "  status                       show current section, width, pin state",
     "  clear                        wipe history above the prompt",
@@ -411,7 +415,16 @@ local function dispatch(input)
     end
 
   elseif verb == "dbase" then
-    local files = require("auto-finder.views.dbase.files")
+    -- v0.2.34: route to the encrypted vault controller when a crypto
+    -- provider is available, falling back to the plaintext files
+    -- controller otherwise. The two have the same external surface
+    -- for `new/ls/rm/load/conn add/conn ls/conn rm`; the vault
+    -- controller adds `migrate`, `rmlegacy`, `status`, and `lock`.
+    local crypto = require("auto-finder.views.dbase.crypto")
+    local encrypted_mode = crypto.available() ~= nil
+    local files = encrypted_mode
+      and require("auto-finder.views.dbase.vault")
+      or  require("auto-finder.views.dbase.files")
     local sub = toks[2]
 
     if sub == "new" then
@@ -420,11 +433,12 @@ local function dispatch(input)
         emit({ "dbase new: name required (e.g. 'dbase new work')" })
       else
         local basename, err = files.new(name)
-        if err then
-          emit({ "dbase new: " .. err })
+        if not basename then
+          emit({ "dbase new: " .. tostring(err) })
         else
+          local activate = basename:gsub("%.json%.enc$", ""):gsub("%.json$", "")
           emit({ "dbase: created " .. basename
-            .. "   (use `dbase load " .. basename:gsub("%.json$", "") .. "` to activate)" })
+            .. "   (use `dbase load " .. activate .. "` to activate)" })
         end
       end
 
@@ -432,9 +446,13 @@ local function dispatch(input)
       local names = files.list()
       local current = files.current()
       if #names == 0 then
-        emit({ "dbase: no connection files yet (try `dbase new <name>`)" })
+        local hint = encrypted_mode
+          and "dbase: no vaults yet (try `dbase new <name>`)"
+          or  "dbase: no connection files yet (try `dbase new <name>`)"
+        emit({ hint })
       else
-        local lines = { "dbase files:" }
+        local header = encrypted_mode and "dbase vaults:" or "dbase files:"
+        local lines = { header }
         for _, n in ipairs(names) do
           local marker = (n == current) and "  * " or "    "
           lines[#lines + 1] = marker .. n
@@ -458,6 +476,85 @@ local function dispatch(input)
         else
           emit({ "dbase: removed " .. name })
         end
+      end
+
+    elseif sub == "migrate" then
+      if not encrypted_mode then
+        emit({ "dbase migrate: no crypto provider on PATH (install `age` or `gpg`)" })
+      else
+        local name = toks[3]
+        if not name or name == "" then
+          local vault = files  -- alias for clarity
+          local legacy = vault.list_legacy()
+          if #legacy == 0 then
+            emit({ "dbase migrate: no legacy plaintext files to migrate" })
+          else
+            local lines = { "dbase migrate: choose a legacy file to encrypt:" }
+            for _, n in ipairs(legacy) do lines[#lines + 1] = "    " .. n end
+            lines[#lines + 1] = "  (run `dbase migrate <name>` to encrypt)"
+            emit(lines)
+          end
+        else
+          local dest, err, count = files.migrate(name)
+          if not dest then
+            emit({ "dbase migrate: " .. tostring(err) })
+          else
+            emit({
+              "dbase: migrated " .. tostring(count or 0)
+                .. " connection(s) into " .. dest,
+              "        plaintext " .. name .. ".json LEFT IN PLACE — "
+                .. "delete it with `dbase rmlegacy " .. name .. "` once verified",
+            })
+          end
+        end
+      end
+
+    elseif sub == "rmlegacy" then
+      if not encrypted_mode then
+        emit({ "dbase rmlegacy: legacy files are still in active use (no crypto provider)" })
+      else
+        local name = toks[3]
+        if not name or name == "" then
+          emit({ "dbase rmlegacy: name required (e.g. 'dbase rmlegacy work')" })
+        else
+          local ok, err = files.rmlegacy(name)
+          if not ok then
+            emit({ "dbase rmlegacy: " .. tostring(err) })
+          else
+            emit({ "dbase: deleted plaintext " .. name .. ".json" })
+          end
+        end
+      end
+
+    elseif sub == "status" then
+      if encrypted_mode then
+        local s = files.status()
+        emit({
+          "dbase storage status:",
+          "  mode      encrypted (vault)",
+          "  provider  " .. (s.provider or "?")
+            .. (s.version and ("  [" .. s.version .. "]") or ""),
+          "  active    " .. (s.active or "(none)"),
+          "  vaults    " .. tostring(s.vaults),
+          "  legacy    " .. tostring(s.legacy)
+            .. (s.legacy > 0 and "    (migrate with `dbase migrate <name>`)" or ""),
+        })
+      else
+        emit({
+          "dbase storage status:",
+          "  mode      plaintext (legacy)",
+          "  provider  none — install `age` or `gpg` and reload to enable encrypted vaults",
+          "  active    " .. (files.current() or "(none)"),
+          "  files     " .. tostring(#files.list()),
+        })
+      end
+
+    elseif sub == "lock" then
+      if encrypted_mode then
+        files.lock()
+        emit({ "dbase: cached passphrase cleared" })
+      else
+        emit({ "dbase lock: no-op in plaintext mode" })
       end
 
     elseif sub == "load" then
@@ -517,7 +614,7 @@ local function dispatch(input)
         -- Multi-step prompt runs inside the admin REPL via the wizard
         -- (mirrors auto-agents' agent.add). Cancelling with <C-c>
         -- preserves the partial state on screen as history.
-        local DBASE_TYPES = require("auto-finder.views.dbase.files").TYPES
+        local DBASE_TYPES = files.TYPES
         local type_set = {}
         for _, t in ipairs(DBASE_TYPES) do type_set[t] = true end
         require("auto-finder.panel.wizard").start({
@@ -605,7 +702,15 @@ local function dispatch(input)
       end
 
     else
-      emit({ "dbase: subcommand must be 'new', 'ls', 'rm', 'load', or 'conn' (got '"
+      -- Surface the full verb set including encrypted-mode-only ones
+      -- when crypto is on PATH. Listing them unconditionally is fine
+      -- — the dispatch above rejects them with a clearer message in
+      -- plaintext mode ("no crypto provider on PATH").
+      local verbs = "'new', 'ls', 'rm', 'load', 'conn'"
+      if encrypted_mode then
+        verbs = verbs .. ", 'migrate', 'rmlegacy', 'status', 'lock'"
+      end
+      emit({ "dbase: subcommand must be " .. verbs .. " (got '"
         .. tostring(sub) .. "')" })
     end
 
@@ -824,19 +929,33 @@ local function complete_at(prompt, cursor_col)
     -- the verb groups so users discover what's available.
     candidates = { "focus", "panel", "files", "repos", "slot", "dbase", "general" }
   elseif #prev_toks == 1 and prev_toks[1] == "dbase" then
-    candidates = { "new", "ls", "rm", "load", "conn" }
+    candidates = { "new", "ls", "rm", "load", "conn",
+                   "migrate", "rmlegacy", "status", "lock" }
   elseif #prev_toks == 2 and prev_toks[1] == "dbase" and prev_toks[2] == "conn" then
     candidates = { "add", "ls", "rm" }
   elseif #prev_toks == 2 and prev_toks[1] == "dbase"
       and (prev_toks[2] == "rm" or prev_toks[2] == "load") then
-    -- Existing user files (no `.json` suffix in completion — matches
-    -- the dispatch's normalize_name, which appends it if missing).
-    local ok_files, files = pcall(require, "auto-finder.views.dbase.files")
+    -- Existing vaults / legacy files. v0.2.34: route to vault when
+    -- the crypto provider is on PATH, files otherwise.
+    local ok_crypto, crypto = pcall(require, "auto-finder.views.dbase.crypto")
+    local module_name = (ok_crypto and crypto.available())
+      and "auto-finder.views.dbase.vault"
+      or  "auto-finder.views.dbase.files"
+    local ok_files, files = pcall(require, module_name)
     candidates = ok_files and files.list() or {}
+  elseif #prev_toks == 2 and prev_toks[1] == "dbase"
+      and (prev_toks[2] == "migrate" or prev_toks[2] == "rmlegacy") then
+    -- Migration/cleanup verbs always operate on legacy plaintext files.
+    local ok_vault, vault = pcall(require, "auto-finder.views.dbase.vault")
+    candidates = ok_vault and vault.list_legacy() or {}
   elseif #prev_toks == 3 and prev_toks[1] == "dbase"
       and prev_toks[2] == "conn" and prev_toks[3] == "rm" then
-    -- Existing connection names in the currently-active file.
-    local ok_files, files = pcall(require, "auto-finder.views.dbase.files")
+    -- Existing connection names in the currently-active file/vault.
+    local ok_crypto, crypto = pcall(require, "auto-finder.views.dbase.crypto")
+    local module_name = (ok_crypto and crypto.available())
+      and "auto-finder.views.dbase.vault"
+      or  "auto-finder.views.dbase.files"
+    local ok_files, files = pcall(require, module_name)
     candidates = {}
     if ok_files then
       local conns = files.connections() or {}
@@ -982,52 +1101,114 @@ local TOPIC_HELP = {
       "",
     }
   end,
-  dbase = {
-    "",
-    "  dbase                        database UI (drawer + editor + result panes)",
-    "",
-    "  Add the panel section with `slot add dbase` (it's NOT in the",
-    "  default slot set — only added when you want it).",
-    "",
-    "  File management — `~/.local/state/nvim/auto-finder/dbase/`:",
-    "    dbase new <name>           create empty connections file",
-    "                                 `.json` is appended automatically",
-    "    dbase ls                   list available files (`*` marks active)",
-    "    dbase rm <name>            delete a file",
-    "    dbase load [name]          activate file (prompts if name omitted)",
-    "",
-    "  Connection management — operates on the ACTIVE file:",
-    "    dbase conn add             prompt for name / type / url",
-    "    dbase conn ls              list connections in the active file",
-    "    dbase conn rm <name>       remove a connection by name",
-    "",
-    "  The active file's contents are mirrored into `_active.json`, which",
-    "  is what dbee's FileSource reads. Swapping files via `dbase load`",
-    "  rewrites `_active.json` and calls `source_reload` — the drawer",
-    "  reflects the change without re-running `dbee.setup`. The named",
-    "  file (e.g. `work.json`) remains the durable record.",
-    "",
-    "  Mounting & companion panes:",
-    "  Focusing the dbase slot shows the connection drawer in the panel.",
-    "  <CR> on a connection opens dbee's editor + result + call_log panes",
-    "  in the main editor area (NOT in any auto-core panel). Closing the",
-    "  panel, reloading auto-finder, or removing the dbase slot tears",
-    "  those companions down; plain focus changes leave them mounted.",
-    "",
-    "  Programmatic config (advanced) — `cfg.dbase` at setup:",
-    "    sources  list of dbee Source instances. When set, REPLACES the",
-    "             pinned FileSource default; the file commands above no",
-    "             longer drive the drawer. Use this only if you're",
-    "             bypassing auto-finder's file management.",
-    "    extra    passthrough table merged into `dbee.setup`'s config.",
-    "",
-    "  Emitted events (subscribe with `:AutoCoreLogEvent notify <topic>`):",
-    "    auto-finder.dbase.connection.changed",
-    "    auto-finder.dbase.call.started",
-    "    auto-finder.dbase.call.completed",
-    "  Failures (setup, call) go through `log.error` and always toast.",
-    "",
-  },
+  dbase = function()
+    -- Live-evaluate the storage mode so help text matches the user's
+    -- actual environment. Encrypted vault mode when age/gpg is on
+    -- PATH, plaintext fallback otherwise.
+    local ok_crypto, crypto = pcall(require, "auto-finder.views.dbase.crypto")
+    local prov = ok_crypto and crypto.available() or nil
+    local mode_line
+    if prov then
+      mode_line = "  storage: ENCRYPTED VAULTS (provider: " .. prov.name
+        .. (prov.version and ("  [" .. prov.version .. "]") or "") .. ")"
+    else
+      mode_line = "  storage: LEGACY PLAINTEXT (install `age` or `gpg` to enable encrypted vaults)"
+    end
+    local body = {
+      "",
+      "  dbase                        database UI (drawer + editor + result panes)",
+      "",
+      "  Add the panel section with `slot add dbase` (it's NOT in the",
+      "  default slot set — only added when you want it).",
+      "",
+      mode_line,
+      "",
+    }
+
+    if prov then
+      vim.list_extend(body, {
+        "  Vault management — `~/.local/state/nvim/auto-finder/dbase/<name>.json.enc`:",
+        "    dbase new <name>           create empty encrypted vault",
+        "                                 prompts once for the vault passphrase",
+        "    dbase ls                   list vaults (`*` marks active)",
+        "    dbase rm <name>            delete a vault",
+        "    dbase load [name]          activate vault — decrypted in memory only",
+        "                                 first read per session prompts for passphrase",
+        "",
+        "  Connection management — operates on the ACTIVE vault:",
+        "    dbase conn add             prompt for name / type / url",
+        "    dbase conn ls              list connections (shows actual decrypt error",
+        "                                 instead of silently-empty on failure)",
+        "    dbase conn rm <name>       remove a connection by name",
+        "",
+        "  Migration from pre-v0.2.34 plaintext files:",
+        "    dbase migrate <name>       read <name>.json, encrypt to <name>.json.enc",
+        "                                 plaintext LEFT IN PLACE for verification",
+        "    dbase rmlegacy <name>      delete the plaintext file (explicit cleanup)",
+        "",
+        "  Operations:",
+        "    dbase status               storage mode, provider, active vault, counts",
+        "    dbase lock                 forget cached passphrase (re-prompt next read)",
+        "",
+        "  How dbee sees the vault:",
+        "  A single EncryptedFileSource is registered at dbee.setup time under",
+        "  a STABLE id (`auto-finder-vault`). `dbase load <name>` repoints its",
+        "  internal `path` field at the chosen vault and calls",
+        "  `dbee.api.core.source_reload(\"auto-finder-vault\")`. The drawer",
+        "  refreshes without re-running dbee.setup. Plaintext exists only in",
+        "  the running nvim process — never on disk, never in a log line.",
+        "",
+      })
+    else
+      vim.list_extend(body, {
+        "  File management — `~/.local/state/nvim/auto-finder/dbase/`:",
+        "    dbase new <name>           create empty connections file",
+        "                                 `.json` is appended automatically",
+        "    dbase ls                   list available files (`*` marks active)",
+        "    dbase rm <name>            delete a file",
+        "    dbase load [name]          activate file (prompts if name omitted)",
+        "",
+        "  Connection management — operates on the ACTIVE file:",
+        "    dbase conn add             prompt for name / type / url",
+        "    dbase conn ls              list connections in the active file",
+        "    dbase conn rm <name>       remove a connection by name",
+        "",
+        "  The active file's contents are mirrored into `_active.json`, which",
+        "  is what dbee's FileSource reads. Swapping files via `dbase load`",
+        "  rewrites `_active.json` and calls `source_reload` — the drawer",
+        "  reflects the change without re-running `dbee.setup`. The named",
+        "  file (e.g. `work.json`) remains the durable record.",
+        "",
+        "  Install `age` or `gpg` and restart nvim to opt into encrypted",
+        "  vault storage. Existing plaintext files can then be migrated",
+        "  with `dbase migrate <name>` (non-destructive).",
+        "",
+      })
+    end
+
+    vim.list_extend(body, {
+      "  Mounting & companion panes:",
+      "  Focusing the dbase slot shows the connection drawer in the panel.",
+      "  <CR> on a connection opens dbee's editor + result + call_log panes",
+      "  in the main editor area (NOT in any auto-core panel). The result",
+      "  pane spans the full editor-area width as a bottom strip.",
+      "",
+      "  Programmatic config (advanced) — `cfg.dbase` at setup:",
+      "    sources  list of dbee Source instances. When set, REPLACES the",
+      "             default source; the file/vault commands above no",
+      "             longer drive the drawer. Use this only if you're",
+      "             bypassing auto-finder's storage management.",
+      "    extra    passthrough table merged into `dbee.setup`'s config.",
+      "",
+      "  Emitted events (subscribe with `:AutoCoreLogEvent notify <topic>`):",
+      "    auto-finder.dbase.connection.changed",
+      "    auto-finder.dbase.call.started",
+      "    auto-finder.dbase.call.completed",
+      "  Failures (setup, call) go through `log.error` and always toast.",
+      "",
+    })
+    return body
+  end,
   general = {
     "",
     "  reload                     re-render the active section",

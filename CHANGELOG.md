@@ -2,6 +2,110 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.34] — 2026-05-24 — dbase: at-rest encrypted vaults + full-width result strip + SQL notes listed
+
+### Post-lector-rereview adjustments (same patch)
+
+- **`gpg` is now the default provider; `age` is opt-in.** Earlier in
+  the development cycle the provider precedence was age → gpg; lector's
+  re-review flagged that age's passphrase automation depends on a build
+  feature (`AGE_PASSPHRASE` env) that stock age does not honor (only
+  `rage` and recent age builds do). Stable posture for v0.2.34: only
+  `gpg` participates in the default probe order; set
+  `AUTO_FINDER_DBASE_PROVIDER_AGE=1` to opt into age. Header-dispatch
+  on existing age-encrypted vaults still works as long as `age` is on
+  PATH on the reading machine — we look across the full provider set
+  for decrypt, not just the active default registry.
+- **`dbase load` before first dbase focus no longer logs a scary
+  WARN.** `vault.repoint_source` now gates the
+  `dbee.api.core.source_reload` call on `setup.is_setup_done()` —
+  before the dbase section has been focused dbee.setup hasn't run,
+  source_reload errors `setup() has not been called yet`, and we were
+  surfacing that as a WARN even though the path mutation + active
+  vault persistence both succeeded. Now the early-load path is a quiet
+  success; the deferred dbee.setup picks up the active vault from
+  state on first focus.
+
+---
+
+Security hardening + layout / discoverability polish for the dbase
+view. The change carries over the lector handoff scope from KB
+synthesis `2026-05-24-auto-finder-dbase-security-layout-feasibility`
+without forking nvim-dbee.
+
+### Added
+
+- **Encrypted connection vaults** — `lua/auto-finder/views/dbase/crypto.lua`,
+  `encrypted_source.lua`, `vault.lua`. Connection URLs (which routinely
+  carry credentials in clear text) are now encrypted at rest via a thin
+  provider boundary around `gpg` (the supported default). `age` is also
+  supported but opt-in only via `AUTO_FINDER_DBASE_PROVIDER_AGE=1` — see
+  the post-rereview adjustments above for the rationale. Plaintext
+  exists only as decrypted bytes inside the running nvim process —
+  never on disk, never in a log line. Passphrase is prompted via
+  `vim.fn.inputsecret` on first decrypt per session and cached in
+  module-local memory; `dbase lock` clears it.
+
+- **Migration verbs** — `dbase migrate <name>` reads an existing
+  plaintext `<name>.json`, prompts for a passphrase, writes
+  `<name>.json.enc`, and leaves the plaintext file in place for
+  verification. `dbase rmlegacy <name>` performs the explicit (and
+  destructive) cleanup once the user is confident the migration
+  round-tripped. Destruction is never automatic.
+
+- **`dbase status` / `dbase lock`** verbs in the admin REPL — show
+  storage mode + provider + active vault + file counts, and drop the
+  cached passphrase respectively.
+
+- **Headless / smoke opt-out** — `AUTO_FINDER_DBASE_DISABLE_CRYPTO=1`
+  forces the legacy plaintext code path regardless of `age`/`gpg`
+  availability. Used by `tests/smoke.lua` so existing dbase REPL
+  assertions still pass; new encrypted-path coverage lives in
+  `tests/encrypted_vault_smoke.lua` (31 assertions).
+
+### Changed
+
+- **Result tile spans the full editor-area width** —
+  `views/dbase/layout.lua`'s `ensure_result()` now drives a
+  `:botright split` anchored in the editor area rather than a
+  `:belowright split` from the editor's column. The shape mirrors
+  gobugger / nvim-dap-view bottom panels: with the auto-finder
+  panel's `winfixwidth=true`, the panel column shrinks vertically by
+  the result strip's height rather than the result being squeezed
+  into one editor sub-column. Default result height is 15 lines;
+  `winfixheight` is intentionally NOT set so the user can resize.
+
+- **SQL note buffers default to `buflisted = true`** — dbee's stock
+  default is `false`, which hid notes from auto-finder's `buffers`
+  view, autovim's editor-area winbar, and every other surface that
+  filters by `vim.fn.buflisted(b) == 1`. Setup now merges
+  `editor.buffer_options.buflisted = true` into the dbee config so
+  notes register as real listed buffers. Consumer overrides still
+  win — `cfg.dbase.extra.editor.buffer_options.swapfile = false`
+  layers on top of (rather than replacing) our default block.
+
+- **Admin REPL routes through `vault.lua` when crypto is available**,
+  `files.lua` otherwise. Same external verb surface for `new / ls /
+  rm / load / conn …`; encrypted mode gains the new `migrate /
+  rmlegacy / status / lock` verbs. Tab completion was updated to
+  list the new verbs and to resolve file/vault names from the right
+  controller for the current mode.
+
+### Migration
+
+Existing users with plaintext `<name>.json` files in
+`stdpath('state')/auto-finder/dbase/` are auto-detected. When `age`
+or `gpg` is on PATH, the dbase REPL operates in encrypted mode by
+default; legacy plaintext files remain readable via `dbase migrate
+<name>`. When no crypto provider is available, the section falls
+back to the legacy plaintext path with a one-time WARN log so the
+user knows to install a provider.
+
+### Documentation
+
+- **`README.md`** — new "Connection vaults (encrypted)" section,
+  migration workflow, layout description, SQL-notes-listed callout.
+
 ## [v0.2.32] — 2026-05-21 — `marks` slot polish: drop `BOOKMARKS`, wrap help, accent palette + fix marks → buffers crash
 
 User-visible cleanup pass on the marks panel plus a regression fix

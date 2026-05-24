@@ -102,7 +102,7 @@ end
 ---Create a fresh editor-area window when none qualifies (the user
 ---has only the panel open, e.g. `nvim .` then closed all other
 ---splits). vsplit to the right of the auto-finder panel.
----@return integer winid
+---@return integer|nil winid
 local function create_editor_window()
   -- Focus the auto-finder panel briefly so the split lands right of
   -- it; the vsplit then becomes the new current window, which we
@@ -195,7 +195,8 @@ function M.ensure_editor()
 end
 
 ---Generic helper: ensure a tile is shown in a split below `parent_winid`.
----Used for both result and call_log. Idempotent on the tracked winid.
+---Used for call_log. Result has its own full-width path (see below).
+---Idempotent on the tracked winid.
 ---@param current_winid integer|nil  the cached winid (may be invalid)
 ---@param parent_winid integer|nil   reference window to split below
 ---@param show_fn fun(winid: integer)  dbee api.ui.<tile>_show
@@ -244,12 +245,103 @@ local function ensure_below_split(current_winid, parent_winid, show_fn, label)
   return newwin
 end
 
+---v0.2.34: Create the result window as a FULL-WIDTH bottom panel
+---— the gobugger / nvim-dap-view bottom-strip experience requested
+---in the lector handoff. The previous shape was a split-below-editor,
+---which (a) only spanned the editor column when the user had no other
+---splits, and (b) ended up short and squeezed when the user had
+---multiple editor windows open.
+---
+---The trick: `:botright split` creates a horizontal split at the
+---bottom-most extent of the tab. With the auto-finder panel marked
+---`winfixwidth = true`, that bottom strip ends up below ALL editor
+---windows AND below the panel column — which looks correct because
+---the panel just becomes shorter by the result height. This is the
+---same shape DAP-view uses for `windows.position = "below"`.
+---
+---Result height defaults to 15 lines; `:resize N` from inside the
+---result window lets the user fine-tune. We deliberately do NOT set
+---`winfixheight` so the user can grow / shrink it like any other
+---split.
+---@param show_fn fun(winid: integer)  dbee.api.ui.result_show
+---@return integer|nil winid
+local function ensure_bottom_result(show_fn)
+  -- We need to issue `:botright split` from somewhere that ISN'T the
+  -- panel — splitting from the panel propagates `winfixbuf=true` and
+  -- the panel-owner buffer marker, both of which trip auto-core's
+  -- leak guard. Anchor in an existing editor-area window if one
+  -- exists; otherwise we need to materialize one first.
+  local anchor = find_editor_window()
+  if not anchor then
+    anchor = M.ensure_editor()
+    if not anchor then
+      logger.error("view.dbase.layout",
+        "ensure_bottom_result: could not establish editor anchor")
+      return nil
+    end
+  end
+
+  -- eventignore around the split sequence — same rationale as
+  -- create_editor_window. The new window must NOT inherit the
+  -- anchor's filetype/buftype/winfixbuf via the panel-owner leak
+  -- guard before we re-bind it to a scratch buffer.
+  local saved_eventignore = vim.o.eventignore
+  vim.o.eventignore = "all"
+  local newwin
+  local ok, err = xpcall(function()
+    pcall(vim.api.nvim_set_current_win, anchor)
+    -- :botright split → horizontal split at the bottom of the tab,
+    -- spanning the full width. With the panel's winfixwidth, the
+    -- panel just gets shorter; the new window does NOT extend ABOVE
+    -- the panel's column.
+    vim.cmd("botright split")
+    newwin = vim.api.nvim_get_current_win()
+    if newwin ~= anchor then
+      pcall(vim.api.nvim_set_option_value, "winfixbuf", false,
+        { win = newwin, scope = "local" })
+      local scratch = vim.api.nvim_create_buf(false, true)
+      vim.bo[scratch].buftype  = "nofile"
+      vim.bo[scratch].swapfile = false
+      pcall(vim.api.nvim_win_set_buf, newwin, scratch)
+      -- Make the result strip a reasonable starting height. The user
+      -- can resize freely afterward.
+      pcall(vim.api.nvim_win_set_height, newwin, 15)
+    end
+  end, debug.traceback)
+  vim.o.eventignore = saved_eventignore
+  if not ok then
+    logger.error("view.dbase.layout",
+      "ensure_bottom_result xpcall body errored: " .. tostring(err))
+    return nil
+  end
+  if not newwin or not vim.api.nvim_win_is_valid(newwin) then
+    logger.error("view.dbase.layout",
+      "ensure_bottom_result: split produced no valid winid")
+    return nil
+  end
+
+  local show_ok, show_err = pcall(show_fn, newwin)
+  if not show_ok then
+    logger.warn("view.dbase.layout",
+      "result_show errored mid-init (probably a refresh failure): "
+        .. tostring(show_err))
+  end
+  if not vim.api.nvim_win_is_valid(newwin) then
+    logger.error("view.dbase.layout",
+      "result_show closed the window before we could capture it")
+    return nil
+  end
+  return newwin
+end
+
 ---@return integer|nil winid
 function M.ensure_result()
+  if M._result_winid and vim.api.nvim_win_is_valid(M._result_winid) then
+    return M._result_winid
+  end
   local ok, dbee = pcall(require, "dbee")
   if not ok then return nil end
-  local winid = ensure_below_split(M._result_winid, M._editor_winid,
-    dbee.api.ui.result_show, "result")
+  local winid = ensure_bottom_result(dbee.api.ui.result_show)
   M._result_winid = winid
   return winid
 end

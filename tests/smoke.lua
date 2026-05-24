@@ -67,6 +67,13 @@ vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-default"
 vim.fn.delete("/tmp/auto-finder-smoke-state-default", "rf")
 vim.env.XDG_STATE_HOME = "/tmp/auto-finder-smoke-state-default"
 
+-- v0.2.34: force the legacy plaintext storage code path for this smoke
+-- regardless of whether age/gpg is installed on the runner. The dbase
+-- REPL tests below were written before encrypted vaults existed and
+-- assume plaintext file layout (`<name>.json`, no passphrase prompt).
+-- The encrypted-path coverage lives in `tests/encrypted_vault_smoke.lua`.
+vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
+
 local fail_count = 0
 local pass_count = 0
 local function ok(name, cond, detail)

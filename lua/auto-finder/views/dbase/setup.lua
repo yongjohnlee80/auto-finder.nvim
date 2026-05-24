@@ -71,26 +71,68 @@ end
 ---@field sources? table[]   list of dbee Source instances; defaults to a single empty MemorySource
 ---@field extra? table       passthrough — merged into the dbee.setup config under the user's responsibility
 
----Default source set: a single FileSource pinned at
----`<state>/auto-finder/dbase/_active.json`. The user manages a
----library of named connection files via the `dbase` REPL commands
----(`dbase new`, `dbase load`, `dbase conn add`, …); those commands
----swap the contents of `_active.json` and call
----`dbee.api.core.source_reload("_active.json")` so the drawer
----reflects the change without re-running dbee.setup. Consumers that
----want to bypass this and pass their own `sources = { ... }`
----explicitly still can — the user-supplied list short-circuits
----this default path entirely.
+---Default source set.
+---
+---v0.2.34 — security pass. Connection vaults are at-rest encrypted
+---when a crypto provider (`age` or `gpg`) is on PATH. The encrypted
+---source is the single source of truth — no more `_active.json`
+---plaintext mirror. Vault file path is mutable: `vault.load(name)`
+---repoints the source and calls `source_reload` so dbee picks up
+---the new contents without re-running setup.
+---
+---Fallback: when no crypto provider is available, the section still
+---works against the legacy plaintext `_active.json` file (preserving
+---backwards compat for users who haven't installed `age`/`gpg` yet).
+---A WARN log fires at setup time so the user knows they're in
+---degraded-security mode and can migrate with `dbase migrate`.
+---
+---Consumer-supplied `sources = { ... }` still short-circuits the
+---whole default path (user takes full ownership of source registry).
 ---@return table[]
 local function default_sources()
   local ok, dbee_sources = pcall(require, "dbee.sources")
   if not ok then return {} end
+
+  local ok_crypto, crypto = pcall(require, "auto-finder.views.dbase.crypto")
+  local ok_vault, vault = pcall(require, "auto-finder.views.dbase.vault")
+  local ok_enc, enc_source = pcall(require, "auto-finder.views.dbase.encrypted_source")
+
+  -- Encrypted path: when a provider is present, register the
+  -- encrypted source bound to the last-active vault (or a synthetic
+  -- path that simply yields {} on load if no vault has been picked
+  -- yet — the user activates one via `dbase load <name>`).
+  --
+  -- **Source name is stable for the lifetime of dbee.setup** — see
+  -- the comment on `vault.repoint_source` for the dbee handler-key
+  -- invariant. The active vault's human-readable name lives in
+  -- `auto-core.state` under `vault.current()` and is surfaced by
+  -- `dbase status`, NOT in the source's name() return.
+  if ok_crypto and ok_vault and ok_enc and crypto.available() then
+    local active = vault.current()
+    local active_path
+    if active then
+      active_path = vault.state_dir() .. "/" .. active .. ".json.enc"
+    else
+      -- Placeholder path that yields {} on load. Repointed on first
+      -- `dbase load` via `vault.load`.
+      active_path = vault.state_dir() .. "/__no_active__.json.enc"
+    end
+    local src = enc_source.new(active_path, { name = vault.SOURCE_ID })
+    vault.bind_source(src)
+    return { src }
+  end
+
+  -- Legacy plaintext path. Log a one-time warning so the user knows
+  -- they're storing credentials in clear text — the migration
+  -- command (`dbase migrate <name>`) moves them off when they're
+  -- ready.
+  logger.warn("view.dbase.setup",
+    "no crypto provider on PATH — connection vaults will be stored as "
+      .. "plaintext JSON under stdpath('state')/auto-finder/dbase/. "
+      .. "Install `age` or `gpg` and run `dbase migrate <name>` to "
+      .. "encrypt at rest.")
   local ok_files, files = pcall(require, "auto-finder.views.dbase.files")
   if not ok_files then
-    -- Defensive fallback: this module ships alongside _dbase_files
-    -- so the require should always succeed, but if it doesn't, an
-    -- empty MemorySource is a less-destructive default than crashing
-    -- setup.
     return { dbee_sources.MemorySource:new({}, "dbase-default") }
   end
   return { dbee_sources.FileSource:new(files.active_path()) }
@@ -144,9 +186,27 @@ function M.ensure_setup(opts)
   local layout_mod = require("auto-finder.views.dbase.layout")
   cfg.window_layout = layout_mod.layout
 
+  -- v0.2.34: dbee's editor tile defaults SQL note buffers to
+  -- `buflisted = false` (`nvim-dbee/lua/dbee/ui/editor/init.lua:47`).
+  -- That hides notes from any auto-finder surface that filters by
+  -- `vim.fn.buflisted(b) == 1` — the buffers view, autovim's
+  -- editor-area winbar, and the bundled buffers neo-tree source.
+  -- Flip the default to true so SQL notes show up in those surfaces;
+  -- user can still override via cfg.dbase.extra.editor.buffer_options.
+  cfg.editor = vim.tbl_deep_extend("force", {
+    buffer_options = { buflisted = true },
+  }, cfg.editor or {})
+
   if type(opts.extra) == "table" then
     for k, v in pairs(opts.extra) do
-      if cfg[k] == nil then cfg[k] = v end
+      if cfg[k] == nil then
+        cfg[k] = v
+      elseif type(cfg[k]) == "table" and type(v) == "table" then
+        -- Deep-merge so consumer overrides for sub-keys (e.g.
+        -- editor.buffer_options.swapfile = false) layer cleanly on
+        -- top of our defaults without clobbering them entirely.
+        cfg[k] = vim.tbl_deep_extend("force", cfg[k], v)
+      end
     end
   end
 
