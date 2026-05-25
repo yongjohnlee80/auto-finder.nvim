@@ -674,11 +674,64 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.todos: migrate .todo-list/ to a new location")
 end
 
+-- ─── auto-refresh subscriptions ───────────────────────────────
+
+-- Captured auto-core.events handles for our two subscriptions:
+--   core.todo.status:changed
+--   core.todo:refreshed
+-- Singleton — set on first get_buffer / on_focus, cleared on
+-- on_close. The dedup is so a slot that re-focuses N times
+-- doesn't accumulate N callbacks per topic.
+M._subs = nil
+
+---Re-render iff the panel buffer is currently visible in some
+---window. Hidden-panel renders are wasted work — `on_focus` will
+---refresh us when the slot becomes active again.
+---@param reason string
+local function _on_event(reason)
+  if not (M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr)) then return end
+  local wins = vim.fn.win_findbuf(M._bufnr)
+  if #wins == 0 then return end
+  -- Re-render on the next tick. Event publishers are often inside
+  -- atomic write paths; defer so the render observes the final
+  -- on-disk state and doesn't recurse into the publish chain.
+  vim.schedule(function()
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+      pcall(_render, M._bufnr)
+    end
+  end)
+end
+
+---Subscribe to auto-core.todo lifecycle events. Idempotent — when
+---subscriptions already exist this is a no-op so re-focusing the
+---slot doesn't duplicate callbacks.
+local function _ensure_subscriptions()
+  if M._subs then return end
+  local ok_ev, ev = pcall(require, "auto-core.events")
+  if not (ok_ev and ev and type(ev.subscribe) == "function") then return end
+  M._subs = {
+    ev.subscribe("core.todo:refreshed",      function() _on_event("refresh") end),
+    ev.subscribe("core.todo.status:changed", function() _on_event("status")  end),
+  }
+end
+
+---Tear down subscriptions. Called from on_close so the next mount
+---starts with a fresh handle set.
+local function _dispose_subscriptions()
+  if not M._subs then return end
+  local ok_ev, ev = pcall(require, "auto-core.events")
+  if ok_ev and ev and type(ev.unsubscribe) == "function" then
+    for _, h in ipairs(M._subs) do pcall(ev.unsubscribe, h) end
+  end
+  M._subs = nil
+end
+
 -- ─── public — section descriptor lifecycle ────────────────────
 
 function M.get_buffer(panel_winid)
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     _apply_keymaps(M._bufnr, panel_winid)
+    _ensure_subscriptions()
     return M._bufnr
   end
   local b = vim.api.nvim_create_buf(false, true)
@@ -691,6 +744,7 @@ function M.get_buffer(panel_winid)
   _render(b)
   _apply_keymaps(b, panel_winid)
   M._bufnr = b
+  _ensure_subscriptions()
   return b
 end
 
@@ -698,9 +752,11 @@ function M.on_focus(panel_winid, bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   _render(bufnr)
   _apply_keymaps(bufnr, panel_winid)
+  _ensure_subscriptions()
 end
 
 function M.on_close()
+  _dispose_subscriptions()
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     pcall(vim.api.nvim_buf_delete, M._bufnr, { force = true })
   end
