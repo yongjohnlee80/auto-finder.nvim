@@ -660,6 +660,16 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.todos: refresh (auto-core.todo.refresh + re-render)")
   set("M", _migrate_dir,
     "auto-finder.todos: migrate .todo-list/ to a new location")
+
+  -- `?` opens the help overlay listing every keymap on this buffer
+  -- (auto-finder.shared.neotree.install_help_keymap walks the
+  -- buffer's keymaps via nvim_buf_get_keymap and floats them in the
+  -- canonical auto-finder help overlay — same UX as the files /
+  -- buffers / repos views).
+  local ok_help, neotree_shared = pcall(require, "auto-finder.shared.neotree")
+  if ok_help and type(neotree_shared.install_help_keymap) == "function" then
+    neotree_shared.install_help_keymap("todos", bufnr)
+  end
 end
 
 -- ─── auto-refresh subscriptions ───────────────────────────────

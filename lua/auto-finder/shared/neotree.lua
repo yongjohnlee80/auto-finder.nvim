@@ -361,6 +361,18 @@ local function install_help_keymap(section_name, bufnr)
   })
 end
 
+-- v0.2.36: promote the two helpers above to module exports so
+-- non-neotree views (views/todos and views/marks) can wire the
+-- same `?` UX without re-implementing it. The helpers aren't
+-- actually neo-tree-specific despite their location — collect_keymaps
+-- walks the buffer-local mappings via nvim_buf_get_keymap, and
+-- show_help routes through auto-core.ui.float.help_overlay (with a
+-- plain floating-window fallback). The file-local definitions stay
+-- in place so build_section's existing callers keep working
+-- unchanged.
+M.install_help_keymap = install_help_keymap
+M.show_help           = show_help
+
 ---Defensive monkey-patch: neo-tree's `renderer.get_expanded_nodes`
 ---indexes `tree:get_nodes(...)` without nil-checking, but the
 ---win_enter redirect can call it with `old_state.tree = nil` when a
