@@ -53,10 +53,6 @@ local HL = {
   header_deferred = "AutoFinderTodosHeaderDeferred",
   header_completed= "AutoFinderTodosHeaderCompleted",
   header_archived = "AutoFinderTodosHeaderArchived",
-  prefix_open     = "AutoFinderTodosPrefixOpen",     -- `[OPEN ]`
-  prefix_deferred = "AutoFinderTodosPrefixDeferred", -- `[DEFER]`
-  prefix_completed= "AutoFinderTodosPrefixCompleted",-- `[DONE ]`
-  prefix_archived = "AutoFinderTodosPrefixArchived", -- `[ARCH ]`
   index           = "AutoFinderTodosIndex",      -- `1.` ordinal for OPEN
   id              = "AutoFinderTodosId",         -- the task id
   title           = "AutoFinderTodosTitle",      -- task title (rendered after the id)
@@ -85,10 +81,6 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.header_deferred,   { link = "DiagnosticWarn", default = true })
   vim.api.nvim_set_hl(0, HL.header_completed,  { link = "DiagnosticOk",   default = true })
   vim.api.nvim_set_hl(0, HL.header_archived,   { link = "NonText",        default = true })
-  vim.api.nvim_set_hl(0, HL.prefix_open,       { link = "Function",       default = true })
-  vim.api.nvim_set_hl(0, HL.prefix_deferred,   { link = "DiagnosticWarn", default = true })
-  vim.api.nvim_set_hl(0, HL.prefix_completed,  { link = "DiagnosticOk",   default = true })
-  vim.api.nvim_set_hl(0, HL.prefix_archived,   { link = "NonText",        default = true })
   vim.api.nvim_set_hl(0, HL.index,             { link = "Number",         default = true })
   vim.api.nvim_set_hl(0, HL.id,                { link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.title,             { link = "Constant",       default = true })
@@ -109,12 +101,14 @@ do
   })
 end
 
--- Maps the schema status enum to {prefix, header_hl, prefix_hl}.
+-- Maps the schema status enum to {header label, header highlight}.
+-- v0.2.36 (Phase 2 polish): per-row `[XXXXX]` status prefix was
+-- removed because the section header already groups tasks by status.
 local BUCKETS = {
-  open      = { prefix = "OPEN ", header = "Open",      hl_prefix = HL.prefix_open,      hl_header = HL.header_open      },
-  deferred  = { prefix = "DEFER", header = "Deferred",  hl_prefix = HL.prefix_deferred,  hl_header = HL.header_deferred  },
-  completed = { prefix = "DONE ", header = "Completed", hl_prefix = HL.prefix_completed, hl_header = HL.header_completed },
-  archived  = { prefix = "ARCH ", header = "Archived",  hl_prefix = HL.prefix_archived,  hl_header = HL.header_archived  },
+  open      = { header = "Open",      hl_header = HL.header_open      },
+  deferred  = { header = "Deferred",  hl_header = HL.header_deferred  },
+  completed = { header = "Completed", hl_header = HL.header_completed },
+  archived  = { header = "Archived",  hl_header = HL.header_archived  },
 }
 
 -- Bucket render order — open at the top so OPEN tasks (the
@@ -146,9 +140,10 @@ end
 -- ─── render ───────────────────────────────────────────────────
 
 -- Layout constants (kept module-local so tests + later phases can
--- pin against them).
-local PREFIX_WIDTH = 7  -- `[OPEN ]`, `[DEFER]`, `[DONE ]`, `[ARCH ]`
-local INDEX_WIDTH  = 4  -- `NN. ` for OPEN; `    ` (spaces) for others
+-- pin against them). The status prefix that used to be `[XXXXX]`
+-- was removed in v0.2.36 — bucket headers carry the status.
+local LEADER_WIDTH  = 6  -- `  NN. ` for OPEN; `      ` (6 spaces) for others
+                        -- — both put the title's first char at column 7.
 
 ---Collect tasks via the auto-core.todo public surface, grouped by
 ---bucket per BUCKET_ORDER. Within each bucket: tasks with non-empty
@@ -229,24 +224,20 @@ local function _render(bufnr)
   -- Row line per task. `idx` is the 1-based ordinal (OPEN only; nil
   -- otherwise). Returns the new line number after appending.
   local function emit_task(bucket_name, task, idx)
-    local cfg   = BUCKETS[bucket_name]
     local parts = {}
 
-    -- 1. `[XXXXX]` status prefix (always exactly PREFIX_WIDTH chars).
-    parts[#parts + 1] = "[" .. cfg.prefix .. "]"
-
-    -- 2. Two spaces then either `NN. ` or `    ` (INDEX_WIDTH).
-    parts[#parts + 1] = "  "
+    -- 1. Leader: either `  NN. ` (OPEN ordinal) or 6 spaces
+    --    (non-OPEN buckets). Both put the title at column 7.
     if idx then
-      parts[#parts + 1] = string.format("%2d. ", idx)
+      parts[#parts + 1] = string.format("  %2d. ", idx)
     else
-      parts[#parts + 1] = string.rep(" ", INDEX_WIDTH)
+      parts[#parts + 1] = string.rep(" ", LEADER_WIDTH)
     end
 
-    -- 3. Title (always present — schema requires it).
+    -- 2. Title (always present — schema requires it).
     parts[#parts + 1] = tostring(task.title or "(untitled)")
 
-    -- 4. Inline annotations (errors badge first, then due).
+    -- 3. Inline annotations (errors badge first, then due).
     local err_count = type(task.errors) == "table" and #task.errors or 0
     if err_count > 0 then
       parts[#parts + 1] = "  ⚠ " .. err_count
@@ -255,41 +246,34 @@ local function _render(bufnr)
       parts[#parts + 1] = "  due:" .. task.due
     end
 
-    -- 5. The id in parens at the end as a stable reference.
+    -- 4. The id in parens at the end as a stable reference.
     parts[#parts + 1] = "  (" .. tostring(task.id or "?") .. ")"
 
     local line = table.concat(parts)
     lines[#lines + 1] = line
     local lnum0 = #lines - 1
 
-    -- Now figure out byte spans for highlighting. Reconstruct
-    -- cursor by walking `parts` in order; this is robust to any
-    -- future re-ordering as long as we update the walker too.
+    -- Highlight byte spans. Walk `parts` in order so any future
+    -- reorder stays in sync with the cursor advance.
     local cursor = 0
-    -- Prefix
+    -- Leader: highlight just the `NN.` part for OPEN; non-OPEN
+    -- leader is pure whitespace so no highlight needed.
     do
       local len = #parts[1]
-      mark(lnum0, cursor, cursor + len, cfg.hl_prefix)
-      cursor = cursor + len
-    end
-    -- Two-space pad
-    cursor = cursor + #parts[2]
-    -- Index segment (only highlight for OPEN where it's content)
-    do
-      local len = #parts[3]
       if idx then
-        mark(lnum0, cursor, cursor + len, HL.index)
+        -- Skip leading 2 spaces, mark `NN.`, skip trailing space.
+        mark(lnum0, cursor + 2, cursor + len - 1, HL.index)
       end
       cursor = cursor + len
     end
     -- Title
     do
-      local len = #parts[4]
+      local len = #parts[2]
       mark(lnum0, cursor, cursor + len, HL.title)
       cursor = cursor + len
     end
     -- Optional badge / due / id annotations (walked dynamically)
-    local i = 5
+    local i = 3
     if err_count > 0 then
       local len = #parts[i]
       mark(lnum0, cursor, cursor + len, HL.badge)
@@ -305,9 +289,8 @@ local function _render(bufnr)
     -- The trailing `  (<id>)` — the id portion in Directory color.
     do
       local segment = parts[i]
-      -- Highlight just the id inside the parens (skip the `  (` and the trailing `)`).
-      local inner_start = cursor + 3                  -- after "  ("
-      local inner_end   = cursor + #segment - 1       -- before the trailing ")"
+      local inner_start = cursor + 3              -- after "  ("
+      local inner_end   = cursor + #segment - 1   -- before trailing ")"
       mark(lnum0, inner_start, inner_end, HL.id)
       cursor = cursor + #segment
     end
