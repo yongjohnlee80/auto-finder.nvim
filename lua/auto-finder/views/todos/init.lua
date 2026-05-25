@@ -17,15 +17,18 @@
 ---    numbered assignment surface (ADR-0031 §5).
 ---
 ---Buffer-local keymaps:
----  <CR>  open the task's .md file via the editor-window resolver
+---  <CR>  open the task's .md file (or, on an expanded frontmatter
+---        path row, the referenced adr/review/blocked file)
 ---  i     floating preview (title / status / priority / assignee /
 ---        due / description; + errors section when non-empty)
 ---  a     prompt for title, add task, open file
 ---  d     remove task (with confirmation)
 ---  s     cycle status (open → completed → deferred → open)
+---  o     toggle inline frontmatter expansion (treeview-style)
 ---  R     manual refresh (auto-core.todo.refresh + re-render)
 ---  M     migrate `.todo-list/` to a new location (filesystem
 ---        rename + update auto-core's per-workspace dir override)
+---  ?     help overlay listing every keymap on this buffer
 ---
 ---Auto-refresh (task 24):
 ---  - on slot focus (always)
@@ -59,6 +62,13 @@ local HL = {
   badge           = "AutoFinderTodosErrorBadge", -- the `⚠ N` errors marker
   due             = "AutoFinderTodosDue",        -- the `due:YYYY-MM-DD` annotation
   separator       = "AutoFinderTodosSeparator",  -- middle-dot between fields
+
+  -- v0.2.36: inline frontmatter expansion (`o` toggle)
+  fm_label        = "AutoFinderTodosFmLabel",    -- `priority:` field label
+  fm_value        = "AutoFinderTodosFmValue",    -- the value
+  fm_bullet       = "AutoFinderTodosFmBullet",   -- `·` for list items
+  fm_path         = "AutoFinderTodosFmPath",     -- path-shaped values (adr/review/blocked target)
+  fm_null         = "AutoFinderTodosFmNull",     -- `null` / `(none)` placeholders
 }
 
 local NS = vim.api.nvim_create_namespace("auto-finder.todos.hl")
@@ -87,6 +97,11 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.badge,             { link = "DiagnosticError",default = true })
   vim.api.nvim_set_hl(0, HL.due,               { link = "Special",        default = true })
   vim.api.nvim_set_hl(0, HL.separator,         { link = "NonText",        default = true })
+  vim.api.nvim_set_hl(0, HL.fm_label,          { link = "Identifier",     default = true })
+  vim.api.nvim_set_hl(0, HL.fm_value,          { link = "Normal",         default = true })
+  vim.api.nvim_set_hl(0, HL.fm_bullet,         { link = "NonText",        default = true })
+  vim.api.nvim_set_hl(0, HL.fm_path,           { link = "Directory",      default = true })
+  vim.api.nvim_set_hl(0, HL.fm_null,           { link = "Comment",        default = true })
 end
 
 -- Apply at module load; re-apply on ColorScheme so links survive
@@ -115,10 +130,19 @@ local BUCKETS = {
 -- numbered ones) are immediately visible without scrolling.
 local BUCKET_ORDER = { "open", "deferred", "completed", "archived" }
 
--- Per-buffer row metadata: array of `{ id, status, errors_count, file_path?, lnum }`,
--- in render order. Used by the keymap layer to figure out "what
--- task is under the cursor". Populated by _render().
+-- Per-buffer row metadata: array of one of these shapes, in render order:
+--   { kind="task",              id, status, errors_count, lnum, task }
+--   { kind="frontmatter-field", lnum, task, field, filepath? }
+-- The keymap layer reads `kind` to decide what action to take —
+-- e.g. `<CR>` on a task row opens the task file; on a frontmatter-
+-- field row WITH a filepath, opens that file instead.
 M._rows = nil
+
+-- Per-task expand state for the `o` toggle: M._expanded[task_id]
+-- = true when the frontmatter is currently inlined under the task
+-- row. Persists across re-renders (sticky expansion) so an event-
+-- driven refresh doesn't collapse what the user just expanded.
+M._expanded = {}
 
 ---Return the row metadata entry under the cursor in the panel
 ---window. Returns nil for the visual cursor sitting on a header,
@@ -135,6 +159,58 @@ local function _row_under_cursor(panel_winid)
     if row.lnum == lnum then return row end
   end
   return nil
+end
+
+-- ─── path resolvers (used by the inline-expansion + <CR>) ──────
+
+---Resolve the KB root for KB-relative reference fields (adr / review).
+---Mirrors auto-core.todo's internal logic so the panel computes the
+---same path the validator does.
+---@return string?  absolute KB root, or nil if no KB env is set
+local function _kb_root()
+  local w = vim.env.AUTO_AGENTS_KB_WRITE
+  if w and w ~= "" then return vim.fn.fnamemodify(vim.fn.expand(w), ":p"):gsub("/$", "") end
+  local r = vim.env.AUTO_AGENTS_KB_READ
+  if r and r ~= "" then
+    local first = r:match("^([^:]+)")
+    if first and first ~= "" then
+      return vim.fn.fnamemodify(vim.fn.expand(first), ":p"):gsub("/$", "")
+    end
+  end
+  local legacy = vim.env.AUTO_AGENTS_KB_ROOT
+  if legacy and legacy ~= "" then
+    return vim.fn.fnamemodify(vim.fn.expand(legacy), ":p"):gsub("/$", "")
+  end
+  return nil
+end
+
+---Build the absolute path for a `blocked[i]` task id by looking up
+---the target task via `auto-core.todo.get` (which find_task_path's
+---internally) and computing its file path. Returns nil when the
+---blocked task doesn't exist — which is the error case that
+---`auto-core.todo.refresh` would have flagged in `errors[]`.
+---@param blocked_id string
+---@return string?
+local function _blocked_task_path(blocked_id)
+  if type(blocked_id) ~= "string" or blocked_id == "" then return nil end
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  if not ok_todo then return nil end
+  local task = todo.get(blocked_id)
+  if not task then return nil end
+  local ok_paths, paths = pcall(require, "auto-core.todo.paths")
+  if not ok_paths then return nil end
+  return paths.task_file_path(todo.get_todo_dir(), task.id, task.status, task.archived_at)
+end
+
+---Join a KB-relative path under the resolved KB root. Returns nil
+---when no KB env is set OR the relative path is empty.
+---@param rel string
+---@return string?
+local function _resolve_kb_path(rel)
+  if type(rel) ~= "string" or rel == "" then return nil end
+  local root = _kb_root()
+  if not root then return nil end
+  return root .. "/" .. rel:gsub("^/+", "")
 end
 
 -- ─── render ───────────────────────────────────────────────────
@@ -296,6 +372,7 @@ local function _render(bufnr)
     end
 
     rows[#rows + 1] = {
+      kind         = "task",
       id           = task.id,
       status       = task.status,
       errors_count = err_count,
@@ -304,17 +381,153 @@ local function _render(bufnr)
     }
   end
 
+  -- Frontmatter-field row emission (used when `M._expanded[task.id]`
+  -- is set — typically via the `o` keymap toggle).
+  --
+  -- Indent layout:
+  --   `<8 sp><label-col-16><value>`        scalar field
+  --   `<8 sp><label>:`                    list-field header
+  --   `<10 sp>· <item>`                    list-field bulleted item
+  --
+  -- Each emitted row goes into M._rows with kind="frontmatter-field"
+  -- so `<CR>` can dispatch on path-bearing fields (adr/review/
+  -- blocked) without re-parsing the buffer.
+  local FM_INDENT  = string.rep(" ", 8)
+  local FM_LABEL_W = 16
+  local FM_BULLET  = "          · "  -- 10 spaces + `· ` (2 bytes for `·` UTF-8 + space)
+
+  local function emit_fm_scalar(task, label, raw_value, opts)
+    opts = opts or {}
+    local hl     = opts.hl or HL.fm_value
+    local is_null = raw_value == nil or raw_value == ""
+    local v_text = is_null and "(none)" or tostring(raw_value)
+    local line   = FM_INDENT .. string.format("%-" .. FM_LABEL_W .. "s", label .. ":") .. v_text
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    -- Label highlight.
+    mark(lnum0, #FM_INDENT, #FM_INDENT + #label + 1, HL.fm_label)
+    -- Value highlight (skip when null — use the null group).
+    local v_col = #FM_INDENT + FM_LABEL_W
+    mark(lnum0, v_col, v_col + #v_text, is_null and HL.fm_null or hl)
+    rows[#rows + 1] = {
+      kind     = "frontmatter-field",
+      lnum     = lnum0 + 1,
+      task     = task,
+      field    = label,
+      filepath = opts.filepath,
+    }
+  end
+
+  local function emit_fm_list_header(task, label)
+    local line = FM_INDENT .. label .. ":"
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    mark(lnum0, #FM_INDENT, #FM_INDENT + #label + 1, HL.fm_label)
+    rows[#rows + 1] = {
+      kind  = "frontmatter-field",
+      lnum  = lnum0 + 1,
+      task  = task,
+      field = label,
+    }
+  end
+
+  local function emit_fm_list_item(task, label, value, opts)
+    opts = opts or {}
+    local v_text = tostring(value)
+    local line = FM_BULLET .. v_text
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    -- Highlight the bullet glyph (variable byte width — match by
+    -- finding the literal bullet position).
+    local bullet_b = line:find("·", 1, true)
+    if bullet_b then
+      -- `·` is 2 bytes; mark from bullet through trailing space.
+      mark(lnum0, bullet_b - 1, bullet_b + 2, HL.fm_bullet)
+    end
+    -- Value highlight (path-shaped if a filepath resolves).
+    local v_col = #FM_BULLET
+    mark(lnum0, v_col, v_col + #v_text,
+      opts.filepath and HL.fm_path or HL.fm_value)
+    rows[#rows + 1] = {
+      kind     = "frontmatter-field",
+      lnum     = lnum0 + 1,
+      task     = task,
+      field    = label,
+      filepath = opts.filepath,
+    }
+  end
+
+  local function emit_frontmatter(task)
+    -- Identity + status
+    emit_fm_scalar(task, "id",       task.id)
+    emit_fm_scalar(task, "version",  task.version)
+    emit_fm_scalar(task, "status",   task.status)
+    emit_fm_scalar(task, "title",    task.title)
+    emit_fm_scalar(task, "due",      task.due)
+    emit_fm_scalar(task, "priority", task.priority)
+    emit_fm_scalar(task, "assignee", task.assignee)
+
+    -- tags as a single comma-joined line (compact).
+    if type(task.tags) == "table" and #task.tags > 0 then
+      emit_fm_scalar(task, "tags", table.concat(task.tags, ", "))
+    end
+
+    -- adr — list of KB-relative paths.
+    if type(task.adr) == "table" and #task.adr > 0 then
+      emit_fm_list_header(task, "adr")
+      for _, rel in ipairs(task.adr) do
+        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_kb_path(rel) })
+      end
+    end
+
+    -- review — single KB-relative path.
+    if type(task.review) == "string" and task.review ~= "" then
+      emit_fm_scalar(task, "review", task.review,
+        { hl = HL.fm_path, filepath = _resolve_kb_path(task.review) })
+    end
+
+    -- blocked — list of task ids; each resolves to a task file path.
+    if type(task.blocked) == "table" and #task.blocked > 0 then
+      emit_fm_list_header(task, "blocked")
+      for _, ref in ipairs(task.blocked) do
+        emit_fm_list_item(task, "blocked[]", ref,
+          { filepath = _blocked_task_path(ref) })
+      end
+    end
+
+    -- Lifecycle timestamps last (less commonly-needed at a glance).
+    emit_fm_scalar(task, "created",        task.created)
+    emit_fm_scalar(task, "updated",        task.updated)
+    emit_fm_scalar(task, "status_changed", task.status_changed)
+    emit_fm_scalar(task, "completed_at",   task.completed_at)
+    emit_fm_scalar(task, "archived_at",    task.archived_at)
+
+    -- errors — list of {field, code, message, detected}.
+    if type(task.errors) == "table" and #task.errors > 0 then
+      emit_fm_list_header(task, "errors")
+      for i, e in ipairs(task.errors) do
+        local summary = string.format("[%d] %s — %s (%s, detected %s)",
+          i, tostring(e.field), tostring(e.message),
+          tostring(e.code), tostring(e.detected))
+        emit_fm_list_item(task, "errors[]", summary)
+      end
+    end
+  end
+
   -- Walk buckets in display order. The 1-based index is OPEN-only
   -- (matches the auto-agents numbered surface per ADR-0031 §5).
+  -- After each task row, if M._expanded[task.id] is set, the
+  -- frontmatter is inlined immediately below it (treeview-style).
   local total = 0
   for _, name in ipairs(BUCKET_ORDER) do
     local bucket = grouped[name] or {}
     if #bucket > 0 then
       emit_header(name, #bucket)
-      if name == "open" then
-        for i, t in ipairs(bucket) do emit_task(name, t, i) end
-      else
-        for _, t in ipairs(bucket) do emit_task(name, t, nil) end
+      for i, t in ipairs(bucket) do
+        emit_task(name, t, name == "open" and i or nil)
+        if M._expanded[t.id] then
+          emit_frontmatter(t)
+        end
       end
       total = total + #bucket
     end
@@ -540,6 +753,25 @@ local function _cycle_status(row)
   end
 end
 
+---`o` action: toggle inline frontmatter expansion for the task
+---under the cursor. Idempotent toggle — `o` on an already-expanded
+---task collapses; `o` on a collapsed task expands. When the cursor
+---is on a frontmatter child row, the toggle still targets the
+---parent task (so `o` collapses from anywhere inside the expansion).
+---@param row table?
+local function _toggle_expand(row)
+  if not row or not row.task or not row.task.id then return end
+  local id = row.task.id
+  if M._expanded[id] then
+    M._expanded[id] = nil
+  else
+    M._expanded[id] = true
+  end
+  if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+    _render(M._bufnr)
+  end
+end
+
 ---`R` action: full refresh via auto-core.todo.refresh, then
 ---re-render the panel.
 ---@param bufnr integer
@@ -656,6 +888,8 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.todos: remove task (with confirmation)")
   set("s", function() _cycle_status(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: cycle status (open → completed → deferred → open)")
+  set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
+    "auto-finder.todos: toggle inline frontmatter expansion")
   set("R", function() _refresh(bufnr) end,
     "auto-finder.todos: refresh (auto-core.todo.refresh + re-render)")
   set("M", _migrate_dir,
