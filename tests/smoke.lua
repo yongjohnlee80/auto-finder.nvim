@@ -39,6 +39,11 @@ for _, p in ipairs({
   -- their work was unmerged; both have since landed on `main` so
   -- the slot is intentionally empty. Add the next active feature
   -- worktree here when one exists.
+  --
+  -- 2026-05-26: feat/todo-system (ADR-0031) ships the
+  -- `auto-core.todo` module that this view consumes. Remove this
+  -- entry once feat/todo-system is merged into auto-core's main.
+  plugins_root .. "/auto-core.nvim/feat-todo-system",
 }) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:prepend(p)
