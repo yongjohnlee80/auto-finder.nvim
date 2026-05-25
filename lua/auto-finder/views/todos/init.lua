@@ -486,8 +486,11 @@ local function _add_task()
     if not input or input == "" then return end
     local ok, id_or_err = pcall(todo.add, { title = input })
     if not ok then
-      vim.notify("auto-finder.todos: add failed: " .. tostring(id_or_err),
-        vim.log.levels.ERROR)
+      -- log.error auto-toasts at ERROR level + writes the ring entry
+    -- (auto-core.log dispatch routes ERROR/WARN through should_toast
+    -- by default). One call, both surfaces.
+    require("auto-finder.log").error("view.todos",
+        "add failed: " .. tostring(id_or_err))
       return
     end
     -- Open the new file via the editor-window resolver. Build a
@@ -516,8 +519,8 @@ local function _remove_task(row)
   local ok, err = pcall(todo.remove, row.task.id)
   if not ok or not err then
     if err and err ~= true then
-      vim.notify("auto-finder.todos: remove failed: " .. tostring(err),
-        vim.log.levels.ERROR)
+      require("auto-finder.log").error("view.todos",
+        "remove failed: " .. tostring(err))
     end
   end
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
@@ -545,8 +548,8 @@ local function _cycle_status(row)
   local next_status = STATUS_CYCLE[row.task.status] or "open"
   local ok, err = pcall(todo.status, row.task.id, next_status)
   if not ok then
-    vim.notify("auto-finder.todos: status failed: " .. tostring(err),
-      vim.log.levels.ERROR)
+    require("auto-finder.log").error("view.todos",
+      "status failed: " .. tostring(err))
     return
   end
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
@@ -593,10 +596,9 @@ local function _migrate_dir()
     -- Refuse to clobber an existing target — the user can
     -- consolidate manually then re-run, or pick a fresh path.
     if target_exists and current_exists then
-      vim.notify(
-        "auto-finder.todos: target '" .. new_path .. "' already exists — "
-        .. "refusing to overwrite. Move/merge manually then `M` again.",
-        vim.log.levels.ERROR)
+      require("auto-finder.log").error("view.todos",
+        "migrate: target '" .. new_path .. "' already exists — "
+        .. "refusing to overwrite. Move/merge manually then `M` again.")
       return
     end
 
@@ -614,9 +616,9 @@ local function _migrate_dir()
     if not fs_path.is_dir(parent) then
       local mkok, mkerr = pcall(vim.fn.mkdir, parent, "p")
       if not mkok then
-        vim.notify(
-          "auto-finder.todos: could not create parent '" .. parent
-          .. "': " .. tostring(mkerr), vim.log.levels.ERROR)
+        require("auto-finder.log").error("view.todos",
+          "migrate: could not create parent '" .. parent
+          .. "': " .. tostring(mkerr))
         return
       end
     end
@@ -626,10 +628,9 @@ local function _migrate_dir()
     if current_exists then
       local ok, err = vim.uv.fs_rename(current, new_path)
       if not ok then
-        vim.notify(
-          "auto-finder.todos: rename failed: " .. tostring(err)
-          .. "\n(cross-filesystem moves need a manual copy+delete)",
-          vim.log.levels.ERROR)
+        require("auto-finder.log").error("view.todos",
+          "migrate: rename failed: " .. tostring(err)
+          .. "\n(cross-filesystem moves need a manual copy+delete)")
         return
       end
     end
@@ -638,8 +639,12 @@ local function _migrate_dir()
     -- resolve to the new location.
     todo.set_todo_dir(new_path)
 
-    vim.notify("auto-finder.todos: migrated to " .. new_path,
-      vim.log.levels.INFO)
+    -- Success path — INFO toast (notify=true so it always toasts;
+    -- INFO normally wouldn't per the default should_toast rule, but
+    -- the user explicitly invoked `M` and deserves visible confirmation).
+    require("auto-finder.log").notify(
+      "auto-finder.todos: migrated to " .. new_path,
+      { component = "view.todos", level = "info", notify = true })
     if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
       _render(M._bufnr)
     end
@@ -687,6 +692,18 @@ M._subs = nil
 ---Re-render iff the panel buffer is currently visible in some
 ---window. Hidden-panel renders are wasted work — `on_focus` will
 ---refresh us when the slot becomes active again.
+---
+---**No-hijack invariant (important):** this handler MUST NOT
+---change window focus, switch the current buffer in any window,
+---open a floating/split window, or move the cursor in a window
+---outside our own panel buffer. `_render` only mutates `M._bufnr`
+---via `nvim_buf_set_lines` + `nvim_buf_set_extmark` + buffer
+---options on the SAME buffer — all buffer-scoped, no window-
+---scoped side effects. The user's current window stays exactly
+---where it is regardless of what other panel is active.
+---
+---User-initiated paths (`<CR>` open / `a` add / `M` migrate) DO
+---change focus, but those are keymap-driven, not event-driven.
 ---@param reason string
 local function _on_event(reason)
   if not (M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr)) then return end

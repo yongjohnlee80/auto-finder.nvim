@@ -2,6 +2,64 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.35] — 2026-05-26 — `views.todos`: auto-core.todo panel view (Phase 2 of ADR-0031)
+
+Adds a new auto-finder panel view that consumes the `auto-core.todo`
+v0.1.36 surface for per-project task management. Tasks are read
+from `<workspace>/.todo-list/*.md` (one Markdown file per task with
+YAML frontmatter); the panel renders them as a flat, color-coded,
+bucket-grouped list with single-key actions.
+
+Add `"todos"` to your slot list (e.g. via `:AutoFinderSlot add todos`)
+to mount the view. **Dependency:** `auto-core ^0.1.36`.
+
+Render: one section per non-empty bucket (Open → Deferred → Completed
+→ Archived), errors-tagged tasks floated to the top of each bucket,
+fixed-width `[OPEN ] / [DEFER] / [DONE ] / [ARCH ]` status prefix,
+1-based ordinal on OPEN only (matches the auto-agents numbered surface
+from ADR-0031 §5), `⚠ N` error badge, inline `due:YYYY-MM-DD`, id in
+parens. Highlights under `AutoFinderTodos*` with default links to
+universal groups so the active palette applies automatically.
+
+Buffer-local keymaps (`nowait`):
+- `<CR>`  Open the task's `.md` file in the editor target.
+- `i`     Floating preview (title / status / id / priority /
+          assignee / due / lifecycle timestamps / tags / description;
+          plus an Errors section when `errors[]` is non-empty).
+- `a`     Prompt for title → `auto-core.todo.add` → open the file.
+- `d`     Confirm + `auto-core.todo.remove`.
+- `s`     Cycle status via `auto-core.todo.status` (open → completed
+          → deferred → open; archived rows cycle back to open).
+- `R`     Manual `auto-core.todo.refresh()` + re-render.
+- `M`     Migrate `.todo-list/` to a new path — atomic
+          `vim.uv.fs_rename` of the directory + update auto-core's
+          per-workspace dir-override registry via
+          `auto-core.todo.set_todo_dir`. Refuses to clobber an
+          existing target; surfaces a clear error on cross-fs
+          moves (manual copy+delete is the recommended fallback).
+
+Auto-refresh: subscribes to `core.todo.status:changed` and
+`core.todo:refreshed` via `auto-core.events`. Re-renders are gated
+on the panel buffer being visible (`win_findbuf > 0`); on_focus
+catches up after the panel was hidden.
+
+**No-hijack invariant**: event handlers never change window focus,
+switch buffers in any window, open floats, or move the cursor in
+any window other than the panel buffer. Only user-initiated paths
+(`<CR>`, `a`, `M`) ever change focus. Smoke section [39] explicitly
+asserts the current window is unchanged after an event-driven
+re-render.
+
+Errors land in `auto-core`'s log ring at ERROR level via
+`auto-finder.log.error("view.todos", msg)` — which routes through
+`auto-core.log.error` → ring write + auto-toast (per auto-core's
+default `should_toast` rule for ERROR/WARN).
+
+Tests: smoke section [39] adds 39 assertions; full suite goes from
+465 passed / 5 failed (main) to 504 passed / 5 failed (this branch).
+The 5 failures are pre-existing on `main` and unrelated to this
+feature.
+
 ## [v0.2.34] — 2026-05-24 — dbase: at-rest encrypted vaults + full-width result strip + SQL notes listed
 
 ### Post-lector-rereview adjustments (same patch)

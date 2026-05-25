@@ -4714,6 +4714,164 @@ do
 end
 end)()
 
+-- ─────────────────────── 39. views.todos — Phase 2 auto-core.todo panel ──
+print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
+;(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  ok("auto-finder.views.todos loads", ok_v, tostring(view))
+  if not ok_v then return end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  ok("auto-core.todo loads", ok_t, tostring(todo))
+  if not ok_t then return end
+
+  -- Isolate filesystem state.
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+
+  -- Module reset between sub-tests so we start clean.
+  view._reset_for_tests()
+
+  -- ── module shape ────────────────────────────────────────────
+  ok("M.name == 'todos'", view.name == "todos")
+  ok("M.description is a string", type(view.description) == "string")
+  ok("M.get_buffer is a function", type(view.get_buffer) == "function")
+  ok("M.on_focus is a function",   type(view.on_focus)   == "function")
+  ok("M.on_close is a function",   type(view.on_close)   == "function")
+
+  -- ── empty workspace: render shows the empty-state UX ───────
+  local b = view.get_buffer(nil)
+  ok("get_buffer returns a valid bufnr",
+    type(b) == "number" and vim.api.nvim_buf_is_valid(b))
+  ok("buffer filetype is 'auto-finder'", vim.bo[b].filetype == "auto-finder")
+  ok("buffer var b:auto_finder_view is 'todos'",
+    vim.b[b].auto_finder_view == "todos")
+
+  local lines_empty = vim.api.nvim_buf_get_lines(b, 0, -1, false)
+  local raw_empty = table.concat(lines_empty, "\n")
+  ok("empty workspace renders the 'no tasks' line",
+    raw_empty:find("no tasks") ~= nil, raw_empty)
+  ok("empty workspace renders the `a` add hint",
+    raw_empty:find("`a`") ~= nil)
+
+  -- ── populated render: buckets + ordinals + badges + due ────
+  todo.add({ id = "2026-05-25-foo", title = "First open task" })
+  todo.add({ id = "2026-05-26-bar", title = "Second open task", due = "2026-06-15" })
+  todo.add({ id = "2026-05-25-broken", title = "Broken refs",
+    blocked = { "missing-task" } })
+  todo.refresh()
+  local id_def = todo.add({ id = "2026-05-25-defer", title = "Deferred one" })
+  todo.status(id_def, "deferred")
+  todo.add({ id = "2026-05-20-done", title = "Already done",
+    status = "completed",
+    completed_at = "2026-05-21T10:00:00-07:00" })
+
+  view.on_focus(nil, b)
+  local lines_pop = vim.api.nvim_buf_get_lines(b, 0, -1, false)
+  local raw_pop = table.concat(lines_pop, "\n")
+
+  ok("renders Open header with count", raw_pop:find("Open %(3%)") ~= nil)
+  ok("renders Deferred header with count", raw_pop:find("Deferred %(1%)") ~= nil)
+  ok("renders Completed header with count", raw_pop:find("Completed %(1%)") ~= nil)
+  ok("OPEN prefix appears for open tasks", raw_pop:find("%[OPEN %]") ~= nil)
+  ok("DEFER prefix appears for deferred tasks", raw_pop:find("%[DEFER%]") ~= nil)
+  ok("DONE prefix appears for completed tasks", raw_pop:find("%[DONE %]") ~= nil)
+  ok("error badge ⚠ renders for the broken-refs task",
+    raw_pop:find("⚠ 1") ~= nil)
+  ok("due date renders inline for the dated open task",
+    raw_pop:find("due:2026%-06%-15") ~= nil)
+  -- Errors-first sort: the broken task should appear above non-error opens
+  -- (we check by line position).
+  local pos_broken = raw_pop:find("2026%-05%-25%-broken")
+  local pos_foo    = raw_pop:find("2026%-05%-25%-foo")
+  ok("error-tagged task floats above clean tasks in OPEN bucket",
+    pos_broken and pos_foo and pos_broken < pos_foo,
+    "broken=" .. tostring(pos_broken) .. " foo=" .. tostring(pos_foo))
+  -- 1-based OPEN ordinal
+  ok("OPEN bucket carries `1.` ordinal",
+    raw_pop:find(" 1%. ") ~= nil)
+
+  -- ── row metadata: M._rows populated with task tables ───────
+  ok("M._rows is populated", type(view._rows) == "table" and #view._rows >= 5)
+  ok("first row has id+status+task",
+    view._rows[1].id and view._rows[1].status and view._rows[1].task)
+
+  -- ── keymaps: all 7 registered with descriptions ────────────
+  local seen = {}
+  for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+    seen[k.lhs] = k.desc or true
+  end
+  for _, lhs in ipairs({ "<CR>", "i", "a", "d", "s", "R", "M" }) do
+    ok("keymap registered: " .. lhs, seen[lhs] ~= nil)
+  end
+
+  -- ── subscriptions registered ───────────────────────────────
+  ok("M._subs has 2 captured handles",
+    type(view._subs) == "table" and #view._subs == 2,
+    "got " .. tostring(view._subs and #view._subs))
+
+  -- ── event-driven re-render works when buffer is visible ────
+  -- Open a real window for the buffer so the visibility gate passes.
+  -- Earlier sections leave the auto-finder panel open; `topleft vnew`
+  -- can inherit winfixbuf via the WinNew chain, so explicitly clear
+  -- it on the test window before swapping buffers in.
+  vim.cmd("topleft 40vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  vim.api.nvim_win_set_buf(w, b)
+  -- Move focus back to a different window so we can detect hijack.
+  vim.cmd("wincmd p")
+  local pre_event_win = vim.api.nvim_get_current_win()
+
+  -- Trigger a status change → event → scheduled re-render
+  todo.status("2026-05-25-foo", "completed")
+  vim.wait(50, function() return false end)
+
+  ok("event-driven re-render: 'First open task' now under Completed bucket",
+    table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+      :find("First open task.-%(2026%-05%-25%-foo%)") ~= nil)
+  ok("no-hijack: current window unchanged after event-driven re-render",
+    vim.api.nvim_get_current_win() == pre_event_win,
+    "expected " .. pre_event_win .. ", got " .. vim.api.nvim_get_current_win())
+
+  -- ── hidden-buffer gate: events fire but no render ──────────
+  vim.wo[w].winfixbuf = false  -- defensive; some sections elsewhere may flip
+  vim.api.nvim_win_set_buf(w, vim.api.nvim_create_buf(false, true))
+  ok("buffer hidden (win_findbuf=0)", #vim.fn.win_findbuf(b) == 0)
+  local hidden_before = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  todo.add({ id = "2026-05-25-hidden-period", title = "Added while hidden" })
+  todo.refresh()
+  vim.wait(50, function() return false end)
+  local hidden_after = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("hidden-gate: buffer content unchanged while panel was hidden",
+    hidden_before == hidden_after)
+
+  -- on_focus picks up the changes made during the hidden period
+  vim.api.nvim_win_set_buf(w, b)
+  view.on_focus(w, b)
+  local after_focus = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("on_focus catches up: 'Added while hidden' now visible",
+    after_focus:find("Added while hidden") ~= nil)
+
+  -- ── on_close disposes subscriptions cleanly ────────────────
+  view.on_close()
+  ok("on_close clears M._subs", view._subs == nil)
+  ok("on_close invalidates M._bufnr", view._bufnr == nil)
+
+  -- ── cleanup ────────────────────────────────────────────────
+  if vim.api.nvim_win_is_valid(w) then
+    pcall(vim.api.nvim_win_close, w, true)
+  end
+  worktree.set_workspace_root(nil)
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(tmp_root, "rf")
+  vim.fn.delete(state_tmp, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
