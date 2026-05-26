@@ -65,6 +65,9 @@ local HL = {
   vars_value         = "AutoFinderTodosVarsValue",
   vars_builtin_tag   = "AutoFinderTodosVarsBuiltinTag",
   vars_unset         = "AutoFinderTodosVarsUnset",
+  -- v0.2.41: collapsible section UI
+  chevron            = "AutoFinderTodosChevron",       -- the ▼/▶ glyph
+  archive_period     = "AutoFinderTodosArchivePeriod", -- YYYY-MM sub-headers
   index           = "AutoFinderTodosIndex",      -- `1.` ordinal for OPEN
   id              = "AutoFinderTodosId",         -- the task id
   title           = "AutoFinderTodosTitle",      -- task title (rendered after the id)
@@ -108,6 +111,8 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.vars_value,        { link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.vars_builtin_tag,  { link = "Comment",        default = true })
   vim.api.nvim_set_hl(0, HL.vars_unset,        { link = "DiagnosticWarn", default = true })
+  vim.api.nvim_set_hl(0, HL.chevron,           { link = "NonText",        default = true })
+  vim.api.nvim_set_hl(0, HL.archive_period,    { link = "Comment",        default = true })
   vim.api.nvim_set_hl(0, HL.index,             { link = "Number",         default = true })
   vim.api.nvim_set_hl(0, HL.id,                { link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.title,             { link = "Constant",       default = true })
@@ -153,12 +158,17 @@ local BUCKET_ORDER = { "open", "deferred", "completed", "archived" }
 --   { kind="malformed-task",    lnum, filepath, bucket, err }
 --   { kind="vars-header",       lnum }                          -- v0.2.39
 --   { kind="vars-entry",        lnum, name, value, builtin, doc, is_unset? }
+--   { kind="bucket-header",     lnum, section }                 -- v0.2.41
+--   { kind="archive-period",    lnum, period }   -- v0.2.41 "YYYY-MM" sub-header
 -- The keymap layer reads `kind` to decide what action to take —
 -- e.g. `<CR>` on a task row opens the task file; on a frontmatter-
 -- field row WITH a filepath, opens that file instead; on a
 -- malformed-task row, opens the broken file so the user can repair
 -- the frontmatter. `s` / `o` / `d` no-op on malformed rows because
 -- there is no validated task to mutate; `i` shows the parse error.
+-- A bucket-header row carries `section` ∈ { "open", "deferred",
+-- "completed", "archived", "malformed", "vars" }; `<CR>` on it
+-- toggles the section's collapsed state.
 M._rows = nil
 
 -- Per-task expand state for the `o` toggle: M._expanded[task_id]
@@ -166,6 +176,119 @@ M._rows = nil
 -- row. Persists across re-renders (sticky expansion) so an event-
 -- driven refresh doesn't collapse what the user just expanded.
 M._expanded = {}
+
+-- v0.2.41: per-section collapse state. Persisted via
+-- `auto-core.state.namespace('todo.ui', {persist='json'})` under
+-- the key `collapsed.<section>` so it survives nvim restarts —
+-- "keep archived hidden" is a setup-once preference, not a
+-- per-session toggle.
+--
+-- Default policy: Archived starts collapsed (rarely-needed by
+-- design — completed-then-aged-out items live there). All other
+-- sections start expanded. Users adjust by pressing <CR> on the
+-- header; the next state.set persists immediately.
+M._collapsed = {}
+
+-- v0.2.41: archive year/month sub-sections. The archived bucket
+-- groups its tasks by `archived_at[1..7]` (YYYY-MM) so users with
+-- hundreds of archived tasks can navigate to a specific period
+-- instead of scrolling a flat list. Each period is itself
+-- collapsible — `M._archive_collapsed["2026-05"] = true/false`.
+-- Default: all archive periods start COLLAPSED (Archived is a
+-- searchable archive, not browsable by default).
+M._archive_collapsed = {}
+local DEFAULT_ARCHIVE_PERIOD_COLLAPSED = true
+
+local DEFAULT_COLLAPSED = {
+  open      = false,
+  deferred  = false,
+  completed = false,
+  archived  = true,   -- collapsed by default — see policy note above
+  malformed = false,  -- broken files should be impossible to miss
+  vars      = false,
+}
+
+---Lazy state-namespace handle for the panel's collapse state.
+---Soft-fail when auto-core.state isn't available (e.g. headless
+---test runs without the plugin loaded) — collapse state then
+---behaves as in-memory only.
+local _ui_state = nil
+local function _get_ui_state()
+  if _ui_state ~= nil then return _ui_state end
+  local ok, mod = pcall(require, "auto-core.state")
+  if not ok or type(mod) ~= "table" or type(mod.namespace) ~= "function" then
+    _ui_state = false
+    return nil
+  end
+  _ui_state = mod.namespace("todo.ui", { persist = "json" })
+  return _ui_state
+end
+
+---Hydrate M._collapsed + M._archive_collapsed from persistent
+---state (idempotent). Called from get_buffer so the first
+---render sees the user's persisted preferences.
+local function _hydrate_collapsed()
+  local s = _get_ui_state()
+  -- Section-level (top-level buckets + vars + malformed)
+  local stored = s and s:get("collapsed") or {}
+  if type(stored) ~= "table" then stored = {} end
+  for k, v in pairs(DEFAULT_COLLAPSED) do
+    if stored[k] ~= nil then
+      M._collapsed[k] = stored[k] == true
+    elseif M._collapsed[k] == nil then
+      M._collapsed[k] = v
+    end
+  end
+  -- Archive-period state (nested under archived)
+  local periods = s and s:get("archive_periods") or {}
+  if type(periods) ~= "table" then periods = {} end
+  for k, v in pairs(periods) do
+    if type(k) == "string" and v ~= nil then
+      M._archive_collapsed[k] = v == true
+    end
+  end
+end
+
+---Toggle the collapsed state of a section and persist.
+---@param section string
+local function _toggle_collapsed(section)
+  if type(section) ~= "string" or section == "" then return end
+  M._collapsed[section] = not M._collapsed[section]
+  local s = _get_ui_state()
+  if s then
+    local stored = s:get("collapsed") or {}
+    if type(stored) ~= "table" then stored = {} end
+    stored[section] = M._collapsed[section]
+    s:set("collapsed", stored)
+  end
+end
+
+---Toggle the collapsed state of an archive period and persist.
+---@param period string  YYYY-MM
+local function _toggle_archive_period(period)
+  if type(period) ~= "string" or period == "" then return end
+  local current = M._archive_collapsed[period]
+  if current == nil then current = DEFAULT_ARCHIVE_PERIOD_COLLAPSED end
+  M._archive_collapsed[period] = not current
+  local s = _get_ui_state()
+  if s then
+    local stored = s:get("archive_periods") or {}
+    if type(stored) ~= "table" then stored = {} end
+    stored[period] = M._archive_collapsed[period]
+    s:set("archive_periods", stored)
+  end
+end
+
+---Return whether an archive period is currently collapsed,
+---honoring the default-collapsed policy when no explicit
+---preference is recorded.
+---@param period string
+---@return boolean
+local function _archive_period_collapsed(period)
+  local v = M._archive_collapsed[period]
+  if v == nil then return DEFAULT_ARCHIVE_PERIOD_COLLAPSED end
+  return v == true
+end
 
 ---Return the row metadata entry under the cursor in the panel
 ---window. Returns nil for the visual cursor sitting on a header,
@@ -432,12 +555,24 @@ local function _render(bufnr)
   end
 
   -- Header line: blank separator + `<Label> (<count>)`.
+  -- v0.2.41: emit a top-level section header with a collapse
+  -- chevron. Pushes a kind="bucket-header" row so <CR> can toggle.
   local function emit_header(bucket_name, count)
     local cfg = BUCKETS[bucket_name]
     if #lines > 0 then lines[#lines + 1] = "" end       -- blank separator
-    local label = cfg.header .. " (" .. count .. ")"
-    lines[#lines + 1] = label
-    mark(#lines - 1, 0, #label, cfg.hl_header)
+    local collapsed = M._collapsed[bucket_name] == true
+    local chevron   = collapsed and "▶ " or "▼ "
+    local label     = cfg.header .. " (" .. count .. ")"
+    local line      = chevron .. label
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    mark(lnum0, 0, #chevron, HL.chevron)
+    mark(lnum0, #chevron, #chevron + #label, cfg.hl_header)
+    rows[#rows + 1] = {
+      kind    = "bucket-header",
+      lnum    = lnum0 + 1,
+      section = bucket_name,
+    }
   end
 
   -- Row line per task. `idx` is the 1-based ordinal (OPEN only; nil
@@ -662,11 +797,23 @@ local function _render(bufnr)
   -- validate. The user's first impression of the panel should be
   -- "there's something broken — fix this" rather than the broken
   -- task silently vanishing from a normal bucket.
+  -- v0.2.41: malformed header with chevron + kind="bucket-header"
+  -- row so <CR> toggles collapse via the same dispatch.
   local function emit_malformed_header(count)
     if #lines > 0 then lines[#lines + 1] = "" end
-    local label = "Malformed (" .. count .. ")"
-    lines[#lines + 1] = label
-    mark(#lines - 1, 0, #label, HL.header_malformed)
+    local collapsed = M._collapsed["malformed"] == true
+    local chevron   = collapsed and "▶ " or "▼ "
+    local label     = "Malformed (" .. count .. ")"
+    local line      = chevron .. label
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    mark(lnum0, 0, #chevron, HL.chevron)
+    mark(lnum0, #chevron, #chevron + #label, HL.header_malformed)
+    rows[#rows + 1] = {
+      kind    = "bucket-header",
+      lnum    = lnum0 + 1,
+      section = "malformed",
+    }
   end
 
   local function emit_malformed_row(m)
@@ -702,7 +849,47 @@ local function _render(bufnr)
 
   if type(malformed) == "table" and #malformed > 0 then
     emit_malformed_header(#malformed)
-    for _, m in ipairs(malformed) do emit_malformed_row(m) end
+    -- v0.2.41: skip body when section is collapsed
+    if not (M._collapsed["malformed"] == true) then
+      for _, m in ipairs(malformed) do emit_malformed_row(m) end
+    end
+  end
+
+  -- v0.2.41: emit a YYYY-MM sub-header inside the archived bucket.
+  -- Indented 2 cols under the Archived header. Pushes a row of
+  -- kind="archive-period" so <CR> can toggle this specific period.
+  local function emit_archive_period_header(period, count)
+    local collapsed = _archive_period_collapsed(period)
+    local chevron   = collapsed and "▶ " or "▼ "
+    local label     = period .. " (" .. count .. ")"
+    local line      = "  " .. chevron .. label
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    mark(lnum0, 2, 2 + #chevron, HL.chevron)
+    mark(lnum0, 2 + #chevron, 2 + #chevron + #label, HL.archive_period)
+    rows[#rows + 1] = {
+      kind   = "archive-period",
+      lnum   = lnum0 + 1,
+      period = period,
+    }
+  end
+
+  -- Group archived tasks by YYYY-MM (sourced from archived_at; falls
+  -- back to created when archived_at is missing for any reason).
+  -- Sorted descending so newest periods float to the top.
+  local function group_archived_by_period(tasks)
+    local periods = {}
+    for _, t in ipairs(tasks) do
+      local ts = t.archived_at or t.created or ""
+      local period = ts:sub(1, 7)  -- "YYYY-MM"
+      if period == "" then period = "unknown" end
+      if not periods[period] then periods[period] = {} end
+      table.insert(periods[period], t)
+    end
+    local keys = {}
+    for k in pairs(periods) do keys[#keys + 1] = k end
+    table.sort(keys, function(a, b) return a > b end)  -- desc
+    return keys, periods
   end
 
   -- Walk buckets in display order. The 1-based index is OPEN-only
@@ -714,10 +901,32 @@ local function _render(bufnr)
     local bucket = grouped[name] or {}
     if #bucket > 0 then
       emit_header(name, #bucket)
-      for i, t in ipairs(bucket) do
-        emit_task(name, t, name == "open" and i or nil)
-        if M._expanded[t.id] then
-          emit_frontmatter(t)
+      local collapsed = M._collapsed[name] == true
+      if not collapsed then
+        if name == "archived" then
+          -- v0.2.41: archived is rendered as a 2-level tree —
+          -- year/month sub-periods, then tasks inside each
+          -- expanded period.
+          local keys, periods = group_archived_by_period(bucket)
+          for _, period in ipairs(keys) do
+            local period_tasks = periods[period]
+            emit_archive_period_header(period, #period_tasks)
+            if not _archive_period_collapsed(period) then
+              for _, t in ipairs(period_tasks) do
+                emit_task(name, t, nil)
+                if M._expanded[t.id] then
+                  emit_frontmatter(t)
+                end
+              end
+            end
+          end
+        else
+          for i, t in ipairs(bucket) do
+            emit_task(name, t, name == "open" and i or nil)
+            if M._expanded[t.id] then
+              emit_frontmatter(t)
+            end
+          end
         end
       end
       total = total + #bucket
@@ -734,14 +943,32 @@ local function _render(bufnr)
     if ok_vars and type(vars.list) == "function" then
       local entries = vars.list() or {}
 
-      -- Header
+      -- Header with chevron (v0.2.41).
       if #lines > 0 then lines[#lines + 1] = "" end
-      local header = "Vars (" .. #entries .. ")"
-      lines[#lines + 1] = header
-      mark(#lines - 1, 0, #header, HL.header_vars)
-      rows[#rows + 1] = { kind = "vars-header", lnum = #lines }
+      local vars_collapsed = M._collapsed["vars"] == true
+      local vars_chevron   = vars_collapsed and "▶ " or "▼ "
+      local header         = "Vars (" .. #entries .. ")"
+      local header_line    = vars_chevron .. header
+      lines[#lines + 1] = header_line
+      local lnum0 = #lines - 1
+      mark(lnum0, 0, #vars_chevron, HL.chevron)
+      mark(lnum0, #vars_chevron, #vars_chevron + #header, HL.header_vars)
+      -- v0.2.41: the Vars header now doubles as a collapsible
+      -- bucket header. The original `kind="vars-header"` value
+      -- is preserved here ONLY for the `a` keymap's "add var"
+      -- dispatch path; the `<CR>` toggle path looks for
+      -- `section == "vars"`, so we tag it as a bucket-header
+      -- too. _row_under_cursor returns the FIRST matching row,
+      -- so we emit a single combined entry.
+      rows[#rows + 1] = {
+        kind    = "vars-header",  -- preserved for `a` dispatch
+        lnum    = lnum0 + 1,
+        section = "vars",         -- new — <CR> toggle dispatch
+      }
 
-      if #entries == 0 then
+      if vars_collapsed then
+        -- Skip body when collapsed.
+      elseif #entries == 0 then
         -- Vacuously empty — built-ins should always provide at
         -- least HOME/CWD; if the user really sees zero rows here
         -- it means vars.list() returned an empty table (which
@@ -879,7 +1106,30 @@ local function _open(row)
       end
     end
   elseif row.kind == "vars-header" then
-    -- No-op on the section header — `a` adds a new var.
+    -- v0.2.41: <CR> on the Vars header toggles its collapse state
+    -- (the row also carries section="vars"). `a` is still the
+    -- "add new variable" action when the cursor is on this row;
+    -- the two keymaps are disambiguated by which key was pressed.
+    if row.section then
+      _toggle_collapsed(row.section)
+      if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+        _render(M._bufnr)
+      end
+    end
+    return
+  elseif row.kind == "bucket-header" then
+    -- v0.2.41: toggle the section's collapsed state and re-render.
+    _toggle_collapsed(row.section)
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+      _render(M._bufnr)
+    end
+    return
+  elseif row.kind == "archive-period" then
+    -- v0.2.41: toggle a specific archive YYYY-MM period.
+    _toggle_archive_period(row.period)
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+      _render(M._bufnr)
+    end
     return
   else
     -- Task row (kind="task" or — for backwards-tolerance — any row
@@ -1544,6 +1794,11 @@ end
 -- ─── public — section descriptor lifecycle ────────────────────
 
 function M.get_buffer(panel_winid)
+  -- v0.2.41: hydrate per-section collapse state from persisted
+  -- preferences on every get_buffer entry. Idempotent — already-
+  -- set in-memory values win against defaults; this only fills
+  -- gaps from disk on first access.
+  _hydrate_collapsed()
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     _apply_keymaps(M._bufnr, panel_winid)
     _ensure_subscriptions()

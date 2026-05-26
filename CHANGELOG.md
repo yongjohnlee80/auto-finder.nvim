@@ -2,6 +2,79 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.41] — 2026-05-26 — Collapsible bucket sections + archived year/month grouping
+
+Two related UX changes for users carrying significant task
+history. Hundreds of archived tasks rendered as a flat list was
+cramping screen space and made finding a specific old task
+impossible without scrolling. Now the panel behaves like a tree
+explorer.
+
+### Collapsible sections
+
+Every top-level section header in the panel now carries a `▼`
+(expanded) / `▶` (collapsed) chevron. Pressing `<CR>` on the
+header toggles the collapse state for that section. Affected
+headers: `Open`, `Deferred`, `Completed`, `Archived`, `Vars`,
+and `Malformed`.
+
+State persists via `auto-core.state.namespace('todo.ui',
+{persist='json'})`, keyed by section name. Hydrated at every
+`get_buffer` call so the first render after an nvim restart
+sees your last preferences.
+
+**Defaults**:
+
+- `Open`, `Deferred`, `Completed`, `Vars`, `Malformed` — expanded
+- `Archived` — **collapsed** (a frequent ask: archived items are
+  searched, not browsed)
+
+You can override any of these per-section by pressing `<CR>` on
+the header once; the new state persists.
+
+### Archived: year/month sub-grouping
+
+Inside the Archived section, tasks are now grouped by
+`archived_at[1..7]` (YYYY-MM) instead of rendered as a flat list:
+
+```
+▶ Archived (143)            ← collapsed by default
+   ▶ 2026-05 (12)
+   ▶ 2026-04 (28)
+   ▶ 2026-03 (37)
+   ...
+```
+
+Each year-month sub-period is itself collapsible via `<CR>` on
+its header. Default: all sub-periods start collapsed (Archived
+is searched, not browsed). The on-disk layout
+`archived/YYYY/MM/` already groups by period — the panel now
+reflects that structure visually.
+
+Periods are sorted descending so the most recent month is at
+the top. Sub-period collapse state is persisted under
+`archive_periods.<YYYY-MM>` in the same `todo.ui` state
+namespace.
+
+### Implementation surface
+
+Two new row kinds in `M._rows`:
+
+- `bucket-header` — `{ lnum, section }`. `<CR>` toggles section.
+- `archive-period` — `{ lnum, period }`. `<CR>` toggles period.
+
+Two new highlight groups (both `default = true`):
+
+- `AutoFinderTodosChevron`        → `NonText`
+- `AutoFinderTodosArchivePeriod`  → `Comment`
+
+Existing keymaps (`a` / `e` / `d` / `i` / `s` / `o`) are no-ops
+on header rows so users don't accidentally trigger non-section
+actions when collapsing. The `a` dispatch on Vars header is
+preserved (the row carries both `kind="vars-header"` for the
+`a` handler and `section="vars"` for the `<CR>` handler — same
+row, two dispatch paths keyed by which key was pressed).
+
 ## [v0.2.40] — 2026-05-26 — Two fixes for `$VAR` paths in the todos panel
 
 ### `<CR>` no longer opens a junk buffer named `$VAR/...`

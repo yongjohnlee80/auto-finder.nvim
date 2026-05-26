@@ -4796,10 +4796,19 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
 
   -- ── row metadata: M._rows populated with task tables ───────
   ok("M._rows is populated", type(view._rows) == "table" and #view._rows >= 5)
-  ok("first row has id+status+task",
-    view._rows[1].id and view._rows[1].status and view._rows[1].task)
-  -- v0.2.36: task rows are tagged kind="task" so <CR> can dispatch.
-  ok("first task row has kind='task'", view._rows[1].kind == "task")
+  -- v0.2.41: bucket-header rows now precede tasks; find the
+  -- first kind="task" row instead of assuming view._rows[1].
+  local first_task_row
+  for _, r in ipairs(view._rows) do
+    if r.kind == "task" then first_task_row = r; break end
+  end
+  ok("first task row has id+status+task",
+    first_task_row
+      and first_task_row.id
+      and first_task_row.status
+      and first_task_row.task)
+  ok("first task row has kind='task'",
+    first_task_row and first_task_row.kind == "task")
 
   -- ── keymaps: all 9 registered with descriptions ────────────
   -- v0.2.36 added `o` (inline expansion) and `?` (help overlay).
@@ -4812,8 +4821,9 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   end
 
   -- ── subscriptions registered ───────────────────────────────
-  ok("M._subs has 2 captured handles",
-    type(view._subs) == "table" and #view._subs == 2,
+  -- v0.2.39 added a third subscription (core.todo.vars:changed).
+  ok("M._subs has 3 captured handles",
+    type(view._subs) == "table" and #view._subs == 3,
     "got " .. tostring(view._subs and #view._subs))
 
   -- ── v0.2.36: inline frontmatter expansion (`o`) ─────────────
@@ -5284,6 +5294,173 @@ print("\n[39c] views.todos — Vars section + numbered status modal")
   vim.fn.delete(tmp_root,  "rf")
   vim.fn.delete(state_tmp, "rf")
   package.loaded["auto-core.todo.vars"] = nil
+end)()
+
+-- ─────────────────────── 39d. views.todos — collapsible sections + archive periods (v0.2.41) ──
+print("\n[39d] views.todos — collapsible sections + archive year/month groups")
+;(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  if not ok_v then return end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  -- Reset in-memory collapse state so we test the persisted-default path.
+  view._collapsed = {}
+  view._archive_collapsed = {}
+
+  -- Seed: 1 open + 2 archived spanning two periods.
+  todo.add({ title = "open task A" })
+  -- Synthesize archived tasks in two periods by hand so we can
+  -- control archived_at without relying on the 28-day rule.
+  local td = todo._todo_dir()
+  vim.fn.mkdir(td .. "/archived/2026/05", "p")
+  vim.fn.mkdir(td .. "/archived/2026/04", "p")
+  local fh = io.open(td .. "/archived/2026/05/2026-05-05-may-task.md", "w")
+  fh:write(table.concat({
+    "---",
+    "id: 2026-05-05-may-task",
+    "version: 1",
+    "status: archived",
+    "title: May archived task",
+    "description: ''",
+    "created: 2026-05-05T00:00:00Z",
+    "updated: 2026-05-05T00:00:00Z",
+    "status_changed: 2026-05-05T00:00:00Z",
+    "archived_at: 2026-05-15T00:00:00Z",
+    "---",
+    "",
+  }, "\n"))
+  fh:close()
+  local fh2 = io.open(td .. "/archived/2026/04/2026-04-10-apr-task.md", "w")
+  fh2:write(table.concat({
+    "---",
+    "id: 2026-04-10-apr-task",
+    "version: 1",
+    "status: archived",
+    "title: April archived task",
+    "description: ''",
+    "created: 2026-04-10T00:00:00Z",
+    "updated: 2026-04-10T00:00:00Z",
+    "status_changed: 2026-04-10T00:00:00Z",
+    "archived_at: 2026-04-20T00:00:00Z",
+    "---",
+    "",
+  }, "\n"))
+  fh2:close()
+
+  vim.cmd("vsplit")
+  local panel_win = vim.api.nvim_get_current_win()
+  local b = view.get_buffer(panel_win)
+  vim.api.nvim_win_set_buf(panel_win, b)
+
+  local function panel_text()
+    return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  end
+
+  -- Defaults: Open expanded, Archived collapsed.
+  ok("Open section renders with ▼ chevron",
+    panel_text():find("▼ Open %(", 1, false) ~= nil,
+    "got:\n" .. panel_text())
+  ok("Archived section renders with ▶ chevron (default collapsed)",
+    panel_text():find("▶ Archived %(", 1, false) ~= nil,
+    "got:\n" .. panel_text())
+  -- Archived body should NOT render (collapsed). The open task's
+  -- id contains "2026-05" so we look specifically for the period-
+  -- header glyph rather than just the YYYY-MM substring.
+  ok("Archived collapsed: 2026-05 sub-header NOT visible",
+    panel_text():find("▶ 2026%-05 %(", 1, false) == nil)
+
+  -- Bucket-header rows present in M._rows
+  local saw_open_hdr, saw_archived_hdr = false, false
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "bucket-header" then
+      if row.section == "open"     then saw_open_hdr = true end
+      if row.section == "archived" then saw_archived_hdr = true end
+    end
+  end
+  ok("M._rows has Open bucket-header row",     saw_open_hdr)
+  ok("M._rows has Archived bucket-header row", saw_archived_hdr)
+
+  -- Toggle Archived expanded: emulate <CR> on the header.
+  local archived_lnum
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "bucket-header" and row.section == "archived" then
+      archived_lnum = row.lnum; break
+    end
+  end
+  ok("found Archived header lnum", type(archived_lnum) == "number")
+  if archived_lnum then
+    vim.api.nvim_win_set_cursor(panel_win, { archived_lnum, 0 })
+    local maps = vim.api.nvim_buf_get_keymap(b, "n")
+    local cr_cb
+    for _, mp in ipairs(maps) do
+      if mp.lhs == "<CR>" then cr_cb = mp.callback; break end
+    end
+    if cr_cb then cr_cb() end
+  end
+  ok("after toggle: Archived shows ▼ (expanded)",
+    panel_text():find("▼ Archived %(", 1, false) ~= nil)
+  ok("after toggle: 2026-05 sub-period visible (collapsed by default)",
+    panel_text():find("▶ 2026%-05 %(1%)", 1, false) ~= nil)
+  ok("after toggle: 2026-04 sub-period visible",
+    panel_text():find("▶ 2026%-04 %(1%)", 1, false) ~= nil)
+  ok("after toggle: tasks themselves NOT visible (periods collapsed)",
+    panel_text():find("May archived task", 1, true) == nil)
+  ok("after toggle: periods sorted descending (2026-05 above 2026-04)",
+    (function()
+      local t = panel_text()
+      local p5 = t:find("2026-05", 1, true)
+      local p4 = t:find("2026-04", 1, true)
+      return p5 and p4 and p5 < p4
+    end)())
+
+  -- Toggle 2026-05 period expanded.
+  local period_lnum
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "archive-period" and row.period == "2026-05" then
+      period_lnum = row.lnum; break
+    end
+  end
+  ok("found 2026-05 period row in M._rows", type(period_lnum) == "number")
+  if period_lnum then
+    vim.api.nvim_win_set_cursor(panel_win, { period_lnum, 0 })
+    local maps = vim.api.nvim_buf_get_keymap(b, "n")
+    local cr_cb
+    for _, mp in ipairs(maps) do
+      if mp.lhs == "<CR>" then cr_cb = mp.callback; break end
+    end
+    if cr_cb then cr_cb() end
+  end
+  ok("after period toggle: May archived task is visible",
+    panel_text():find("May archived task", 1, true) ~= nil)
+
+  -- Persistence: state.get('collapsed').archived should now be false.
+  local s = require("auto-core.state").namespace("todo.ui", { persist = "json" })
+  local stored = s:get("collapsed") or {}
+  ok("Archived collapse state persisted (now expanded)",
+    stored.archived == false,
+    "got: " .. tostring(stored.archived))
+  local stored_periods = s:get("archive_periods") or {}
+  ok("2026-05 period collapse state persisted (now expanded)",
+    stored_periods["2026-05"] == false,
+    "got: " .. tostring(stored_periods["2026-05"]))
+
+  view.on_close()
+  if vim.api.nvim_win_is_valid(panel_win) then
+    pcall(vim.api.nvim_win_close, panel_win, true)
+  end
+  worktree.set_workspace_root(nil)
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(tmp_root,  "rf")
+  vim.fn.delete(state_tmp, "rf")
 end)()
 
 -- ───────────────────────── summary ────────────────────────
