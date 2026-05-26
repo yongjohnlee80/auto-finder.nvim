@@ -4772,9 +4772,13 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   ok("renders Open header with count", raw_pop:find("Open %(3%)") ~= nil)
   ok("renders Deferred header with count", raw_pop:find("Deferred %(1%)") ~= nil)
   ok("renders Completed header with count", raw_pop:find("Completed %(1%)") ~= nil)
-  ok("OPEN prefix appears for open tasks", raw_pop:find("%[OPEN %]") ~= nil)
-  ok("DEFER prefix appears for deferred tasks", raw_pop:find("%[DEFER%]") ~= nil)
-  ok("DONE prefix appears for completed tasks", raw_pop:find("%[DONE %]") ~= nil)
+  -- v0.2.36: the per-row `[XXXXX]` status prefix was removed
+  -- because the section header carries the bucket. Verify the
+  -- prefix is GONE from rows.
+  ok("no per-row [OPEN ] / [DEFER] / [DONE ] status prefix on rows",
+    not raw_pop:find("%[OPEN %]")
+      and not raw_pop:find("%[DEFER%]")
+      and not raw_pop:find("%[DONE %]"))
   ok("error badge ⚠ renders for the broken-refs task",
     raw_pop:find("⚠ 1") ~= nil)
   ok("due date renders inline for the dated open task",
@@ -4794,13 +4798,16 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   ok("M._rows is populated", type(view._rows) == "table" and #view._rows >= 5)
   ok("first row has id+status+task",
     view._rows[1].id and view._rows[1].status and view._rows[1].task)
+  -- v0.2.36: task rows are tagged kind="task" so <CR> can dispatch.
+  ok("first task row has kind='task'", view._rows[1].kind == "task")
 
-  -- ── keymaps: all 7 registered with descriptions ────────────
+  -- ── keymaps: all 9 registered with descriptions ────────────
+  -- v0.2.36 added `o` (inline expansion) and `?` (help overlay).
   local seen = {}
   for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
     seen[k.lhs] = k.desc or true
   end
-  for _, lhs in ipairs({ "<CR>", "i", "a", "d", "s", "R", "M" }) do
+  for _, lhs in ipairs({ "<CR>", "i", "a", "d", "s", "o", "R", "M", "?" }) do
     ok("keymap registered: " .. lhs, seen[lhs] ~= nil)
   end
 
@@ -4808,6 +4815,72 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   ok("M._subs has 2 captured handles",
     type(view._subs) == "table" and #view._subs == 2,
     "got " .. tostring(view._subs and #view._subs))
+
+  -- ── v0.2.36: inline frontmatter expansion (`o`) ─────────────
+  -- Use the broken-refs task which carries adr (not set) + blocked
+  -- — we can verify path-bearing rows surface a resolved filepath.
+  -- The broken-refs task in the fixture has blocked={"missing-task"};
+  -- "missing-task" obviously doesn't resolve, so its filepath is nil
+  -- (correct — refresh's errors[] would flag it).
+  --
+  -- Add a task with adr that DOES resolve so we can assert the
+  -- frontmatter row carries a non-nil filepath.
+  local _kb_test_dir = vim.fn.tempname()
+  vim.fn.mkdir(_kb_test_dir .. "/shared/adrs", "p")
+  vim.fn.writefile({ "# adr" }, _kb_test_dir .. "/shared/adrs/0099-fix.md")
+  local saved_kb = vim.env.AUTO_AGENTS_KB_WRITE
+  vim.env.AUTO_AGENTS_KB_WRITE = _kb_test_dir
+
+  local id_with_adr = todo.add({
+    id    = "2026-05-25-with-adr",
+    title = "Task with resolvable adr",
+    adr   = { "shared/adrs/0099-fix.md" },
+  })
+
+  -- Pre-expansion: rows are task-only, no frontmatter-field rows
+  view._expanded = {}  -- start clean
+  view.on_focus(nil, b)
+  local pre_count = 0
+  for _, r in ipairs(view._rows) do
+    if r.kind == "frontmatter-field" then pre_count = pre_count + 1 end
+  end
+  ok("pre-expansion: no frontmatter-field rows in M._rows",
+    pre_count == 0)
+
+  -- Expand id_with_adr → frontmatter rows should appear
+  view._expanded[id_with_adr] = true
+  view.on_focus(nil, b)
+  local adr_item_row
+  local post_count = 0
+  for _, r in ipairs(view._rows) do
+    if r.kind == "frontmatter-field" then
+      post_count = post_count + 1
+      if r.task and r.task.id == id_with_adr and r.field == "adr[]" then
+        adr_item_row = r
+      end
+    end
+  end
+  ok("post-expansion: frontmatter-field rows present",
+    post_count > 0, "got " .. tostring(post_count))
+  ok("expanded task has an `adr[]` frontmatter row with a resolved filepath",
+    adr_item_row and adr_item_row.filepath == _kb_test_dir .. "/shared/adrs/0099-fix.md",
+    adr_item_row and tostring(adr_item_row.filepath))
+
+  -- Collapse → frontmatter rows go away again
+  view._expanded[id_with_adr] = nil
+  view.on_focus(nil, b)
+  local collapsed_count = 0
+  for _, r in ipairs(view._rows) do
+    if r.kind == "frontmatter-field" then
+      collapsed_count = collapsed_count + 1
+    end
+  end
+  ok("after collapse: frontmatter-field rows removed",
+    collapsed_count == 0, "got " .. tostring(collapsed_count))
+
+  -- Cleanup KB fixture
+  vim.env.AUTO_AGENTS_KB_WRITE = saved_kb
+  vim.fn.delete(_kb_test_dir, "rf")
 
   -- ── event-driven re-render works when buffer is visible ────
   -- Open a real window for the buffer so the visibility gate passes.

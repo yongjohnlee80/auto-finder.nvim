@@ -2,6 +2,52 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.36] — 2026-05-26 — `views.todos` polish from live testing
+
+Four UX changes driven by the first live-test pass on v0.2.35:
+
+- **Drop redundant `[XXXXX]` status prefix from rows.** The section
+  header (`Open (3)` / `Deferred (1)` / etc.) already groups tasks
+  by status; per-row `[OPEN ]` / `[DEFER]` / `[DONE ]` / `[ARCH ]`
+  was duplication. Row format is now
+  `  NN. Title  ⚠ N  due:YYYY-MM-DD  (id)` for OPEN and
+  `      Title  ⚠ N  due:YYYY-MM-DD  (id)` for non-OPEN buckets
+  (6 spaces of uniform leader so the title aligns at column 7
+  across all buckets).
+- **`?` help overlay** matching the convention from the neotree-
+  backed views (files / buffers / repos / dbase). Walks the
+  buffer-local keymaps via `nvim_buf_get_keymap` and floats them
+  via `auto-core.ui.float.help_overlay`. Implementation promotes
+  the previously file-local `install_help_keymap` + `show_help`
+  helpers in `auto-finder.shared.neotree` to module exports so
+  non-neotree views (todos, and potentially marks later) can wire
+  the same UX without re-implementing it.
+- **`o` toggles inline treeview-style frontmatter expansion.**
+  Press `o` on a task row → the task's structured fields render
+  as indented key:value rows immediately under the task. Sticky
+  across re-renders. Press `o` again (from the task row or any
+  child row) → collapse. List-valued fields (adr / blocked /
+  errors) emit a header line + `· <item>` bulleted children.
+  Path-bearing rows (adr items, review, blocked items) pre-resolve
+  their absolute filesystem path during render — `adr` and `review`
+  resolve under `$AUTO_AGENTS_KB_WRITE` / `$AUTO_AGENTS_KB_READ`
+  first entry / `$AUTO_AGENTS_KB_ROOT`; `blocked` resolves through
+  `auto-core.todo.get` + `auto-core.todo.paths.task_file_path`. The
+  resolved path lands on the row so the next item handles it.
+- **`<CR>` is now context-aware.** On a task row → opens the task's
+  own `.md` file in the editor target (existing behavior). On an
+  expanded frontmatter-field row with a resolved filepath
+  (`adr[]`, `review`, `blocked[]`) → opens THAT file. On a
+  frontmatter-field row without a filepath (`status:` / `tags:`
+  / lifecycle timestamps) → no-op (predictable: cursor on a
+  non-clickable field doesn't yank you out of the panel).
+
+Row metadata gains a `kind` field (`"task"` / `"frontmatter-field"`)
+to drive the dispatch. Auto-refresh subscriptions are unaffected —
+the no-hijack invariant still holds; event-driven re-renders never
+expand or collapse rows, only the user-initiated `o` does. Smoke
+section `[39]` updated accordingly.
+
 ## [v0.2.35] — 2026-05-26 — `views.todos`: auto-core.todo panel view (Phase 2 of ADR-0031)
 
 Adds a new auto-finder panel view that consumes the `auto-core.todo`
