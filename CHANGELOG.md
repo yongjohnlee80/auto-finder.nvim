@@ -2,6 +2,64 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.38] — 2026-05-26 — `views.todos` surfaces malformed task files
+
+Closes the "malformed task disappears" bug found in live testing
+of the polish-round-2 panel.
+
+**Symptom (prior)**: editing a task file's YAML frontmatter
+into something that fails to parse (or fails schema validation
+— e.g. missing required field) caused the task to silently
+vanish from the panel on the next render. No indicator, no
+error toast — the row just was gone. The only way to discover
+the broken file was to find it in `.todo-list/<bucket>/`
+manually.
+
+**Why it happened**: `auto-core.todo.list()` (and refresh's
+scanner) silently skip files that fail to decode or validate.
+That's correct for "give me validated data" but wrong for a
+panel-UI consumer.
+
+**Fix**: pair with auto-core v0.1.38's new `M.scan()`
+(`{ tasks, malformed }`). The view now:
+
+- Prefers `scan()` over `list()` (falls back to `list()` for
+  older auto-core).
+- Renders a synthetic top-of-panel **Malformed (N)** section
+  with one `  ⚠ <filename>  (<bucket>)  — <short-err>` row per
+  broken file. The full error is available via `i` preview.
+- Adds `kind = "malformed-task"` rows to `M._rows`. Keymap
+  dispatch:
+  - `<CR>` opens the broken file so the user can repair it.
+  - `i` floats a "malformed todo" preview with bucket, full
+    path, and the multi-line parse/validate error.
+  - `d` confirms + deletes the broken file directly via
+    `vim.uv.fs_unlink` (no `todo.remove` path since there is
+    no validated task id to route through).
+  - `s`, `o` no-op on malformed rows — they require a task to
+    mutate.
+- Suppresses the "(no tasks ... press a to add)" empty-state
+  copy when the panel is "empty of valid tasks but has
+  malformed files" — that case is categorically not empty.
+
+Three new highlight groups, all `default = true` so user
+overrides win:
+
+- `AutoFinderTodosHeaderMalformed`     → `DiagnosticError`
+- `AutoFinderTodosMalformedFilename`   → `Directory`
+- `AutoFinderTodosMalformedErr`        → `Comment`
+
+`_collect_grouped()` now returns `(grouped, malformed)`. Stable
+sort on `(bucket, filename)` so re-renders don't reshuffle the
+section. Pre-existing OPEN/DEFERRED/COMPLETED/ARCHIVED bucket
+rendering is byte-identical (the malformed pass emits before
+the existing bucket loop and shares nothing else with it).
+
+**Tests**: smoke section [39b] adds 12 assertions covering
+header presence, filename + valid-task co-rendering, M._rows
+entry shape (kind / filepath / bucket / err / lnum), and the
+empty-state suppression invariant. Suite delta: +12 passes.
+
 ## [v0.2.37] — 2026-05-26 — `views.todos` polish round 2 (live-testing bugs)
 
 Two UX fixes from a second live-test pass:

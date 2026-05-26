@@ -5065,6 +5065,101 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   vim.fn.delete(state_tmp, "rf")
 end)()
 
+-- ─────────────────────── 39b. views.todos — malformed-task render (v0.2.38) ──
+print("\n[39b] views.todos — malformed-task scan rendering")
+;(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  if not ok_v then return end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup()
+    worktree.set_workspace_root(nil)
+    vim.fn.delete(tmp_root, "rf")
+  end
+
+  ok("scan() is exposed by auto-core.todo (>= v0.1.38)",
+    type(todo.scan) == "function")
+
+  -- One valid + two malformed files.
+  todo.add({ title = "valid task in scan-render fixture" })
+  local td = todo._todo_dir()
+  local bad1 = td .. "/open/2026-05-26-broken-yaml.md"
+  local fh = io.open(bad1, "w")
+  fh:write("---\ntitle: [oh no\n---\nbody\n")
+  fh:close()
+  local bad2 = td .. "/open/2026-05-26-missing-fields.md"
+  local fh2 = io.open(bad2, "w")
+  fh2:write("---\ntitle: only a title\n---\n")
+  fh2:close()
+
+  local b = view.get_buffer(vim.api.nvim_get_current_win())
+  ok("get_buffer returned a buffer", b and vim.api.nvim_buf_is_valid(b),
+    "got " .. tostring(b))
+  local lines = vim.api.nvim_buf_get_lines(b, 0, -1, false)
+  local text  = table.concat(lines, "\n")
+
+  ok("render shows the 'Malformed (N)' header",
+    text:find("Malformed %(2%)") ~= nil,
+    "got:\n" .. text)
+  ok("render contains the malformed filename #1",
+    text:find("broken%-yaml%.md", 1, false) ~= nil)
+  ok("render contains the malformed filename #2",
+    text:find("missing%-fields%.md", 1, false) ~= nil)
+  ok("render still shows the valid task title",
+    text:find("valid task in scan%-render fixture") ~= nil)
+
+  -- Inspect M._rows for malformed-task entries.
+  local got_malformed = 0
+  local sample
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "malformed-task" then
+      got_malformed = got_malformed + 1
+      sample = sample or row
+    end
+  end
+  ok("M._rows has 2 kind='malformed-task' entries",
+    got_malformed == 2, "got " .. got_malformed)
+  ok("malformed row carries filepath",
+    sample and type(sample.filepath) == "string" and sample.filepath ~= "")
+  ok("malformed row carries bucket",
+    sample and sample.bucket == "open")
+  ok("malformed row carries err string",
+    sample and type(sample.err) == "string" and sample.err ~= "")
+  ok("malformed row carries lnum (1-based)",
+    sample and type(sample.lnum) == "number" and sample.lnum >= 1)
+
+  -- Empty-state suppression: if all that's in the dir is malformed
+  -- files (no valid tasks), the panel must NOT show the
+  -- "no tasks ... press a to add" empty-state copy.
+  view.on_close()
+  local tmp2 = vim.fn.tempname()
+  vim.fn.mkdir(tmp2, "p")
+  worktree.set_workspace_root(tmp2)
+  local td2 = todo._todo_dir()
+  vim.fn.mkdir(td2 .. "/open", "p")
+  local fh3 = io.open(td2 .. "/open/2026-05-26-lone-broken.md", "w")
+  fh3:write("---\nbad: [\n---\n")
+  fh3:close()
+
+  local b2 = view.get_buffer(vim.api.nvim_get_current_win())
+  local lines2 = vim.api.nvim_buf_get_lines(b2, 0, -1, false)
+  local text2  = table.concat(lines2, "\n")
+  ok("empty-state copy suppressed when only malformed entries exist",
+    text2:find("no tasks in this workspace") == nil,
+    "got:\n" .. text2)
+  ok("malformed header still rendered in malformed-only fixture",
+    text2:find("Malformed %(1%)") ~= nil)
+
+  view.on_close()
+  cleanup()
+  vim.fn.delete(tmp2, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

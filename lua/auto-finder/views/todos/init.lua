@@ -56,6 +56,9 @@ local HL = {
   header_deferred = "AutoFinderTodosHeaderDeferred",
   header_completed= "AutoFinderTodosHeaderCompleted",
   header_archived = "AutoFinderTodosHeaderArchived",
+  header_malformed = "AutoFinderTodosHeaderMalformed", -- v0.2.38: malformed section
+  malformed_filename = "AutoFinderTodosMalformedFilename",
+  malformed_err      = "AutoFinderTodosMalformedErr",
   index           = "AutoFinderTodosIndex",      -- `1.` ordinal for OPEN
   id              = "AutoFinderTodosId",         -- the task id
   title           = "AutoFinderTodosTitle",      -- task title (rendered after the id)
@@ -91,6 +94,9 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.header_deferred,   { link = "DiagnosticWarn", default = true })
   vim.api.nvim_set_hl(0, HL.header_completed,  { link = "DiagnosticOk",   default = true })
   vim.api.nvim_set_hl(0, HL.header_archived,   { link = "NonText",        default = true })
+  vim.api.nvim_set_hl(0, HL.header_malformed,  { link = "DiagnosticError",default = true })
+  vim.api.nvim_set_hl(0, HL.malformed_filename,{ link = "Directory",      default = true })
+  vim.api.nvim_set_hl(0, HL.malformed_err,     { link = "Comment",        default = true })
   vim.api.nvim_set_hl(0, HL.index,             { link = "Number",         default = true })
   vim.api.nvim_set_hl(0, HL.id,                { link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.title,             { link = "Constant",       default = true })
@@ -133,9 +139,13 @@ local BUCKET_ORDER = { "open", "deferred", "completed", "archived" }
 -- Per-buffer row metadata: array of one of these shapes, in render order:
 --   { kind="task",              id, status, errors_count, lnum, task }
 --   { kind="frontmatter-field", lnum, task, field, filepath? }
+--   { kind="malformed-task",    lnum, filepath, bucket, err }
 -- The keymap layer reads `kind` to decide what action to take —
 -- e.g. `<CR>` on a task row opens the task file; on a frontmatter-
--- field row WITH a filepath, opens that file instead.
+-- field row WITH a filepath, opens that file instead; on a
+-- malformed-task row, opens the broken file so the user can repair
+-- the frontmatter. `s` / `o` / `d` no-op on malformed rows because
+-- there is no validated task to mutate; `i` shows the parse error.
 M._rows = nil
 
 -- Per-task expand state for the `o` toggle: M._expanded[task_id]
@@ -276,13 +286,35 @@ local LEADER_WIDTH  = 6  -- `  NN. ` for OPEN; `      ` (6 spaces) for others
 ---bucket per BUCKET_ORDER. Within each bucket: tasks with non-empty
 ---errors[] float to the top; both groups are then sorted by id
 ---(lex = chronological because ids are `<YYYY-MM-DD>-<slug>`).
+---
+---v0.2.38: prefers `auto-core.todo.scan()` over `list()` so files
+---whose YAML frontmatter fails to parse or whose decoded body
+---fails schema validation also come back (in `.malformed`). list()
+---is used as fallback for older auto-core (< 0.1.38) — those
+---callers just won't see malformed files until they upgrade.
 ---@return table<string, table[]> grouped  bucket → list of tasks
+---@return table[] malformed                list of { file_path, bucket, filename, err }
 local function _collect_grouped()
-  local grouped = { open = {}, deferred = {}, completed = {}, archived = {} }
+  local grouped   = { open = {}, deferred = {}, completed = {}, archived = {} }
+  local malformed = {}
   local todo_ok, todo = pcall(require, "auto-core.todo")
-  if not todo_ok then return grouped end
-  local list_ok, tasks = pcall(todo.list)
-  if not list_ok or type(tasks) ~= "table" then return grouped end
+  if not todo_ok then return grouped, malformed end
+
+  local tasks
+  if type(todo.scan) == "function" then
+    local scan_ok, result = pcall(todo.scan)
+    if scan_ok and type(result) == "table" then
+      tasks     = result.tasks
+      malformed = type(result.malformed) == "table" and result.malformed or {}
+    end
+  end
+  if type(tasks) ~= "table" then
+    -- Older auto-core: fall back to list(). Malformed entries will
+    -- silently disappear (the pre-v0.2.38 behavior).
+    local list_ok, list_tasks = pcall(todo.list)
+    if list_ok and type(list_tasks) == "table" then tasks = list_tasks end
+  end
+  if type(tasks) ~= "table" then return grouped, malformed end
 
   for _, t in ipairs(tasks) do
     if type(t) == "table" and BUCKETS[t.status] then
@@ -299,7 +331,17 @@ local function _collect_grouped()
     end)
   end
   for _, name in ipairs(BUCKET_ORDER) do sort_bucket(grouped[name]) end
-  return grouped
+
+  -- Stable malformed order: sort by (bucket, filename) so the panel
+  -- doesn't reshuffle entries across renders.
+  table.sort(malformed, function(a, b)
+    if (a.bucket or "") ~= (b.bucket or "") then
+      return (a.bucket or "") < (b.bucket or "")
+    end
+    return (a.filename or "") < (b.filename or "")
+  end)
+
+  return grouped, malformed
 end
 
 ---Set a highlight via extmark on a byte range of a single line.
@@ -344,7 +386,7 @@ local function _render(bufnr)
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
 
-  local grouped = _collect_grouped()
+  local grouped, malformed = _collect_grouped()
   local rows    = {}     -- accumulating M._rows
   local lines   = {}     -- text lines we'll buf_set after the loop
   local marks   = {}     -- deferred extmarks { lnum0, col_s, col_e, hl }
@@ -580,6 +622,54 @@ local function _render(bufnr)
     end
   end
 
+  -- v0.2.38: emit the synthetic "Malformed" section at the top
+  -- when scan() surfaced any files that failed to parse or
+  -- validate. The user's first impression of the panel should be
+  -- "there's something broken — fix this" rather than the broken
+  -- task silently vanishing from a normal bucket.
+  local function emit_malformed_header(count)
+    if #lines > 0 then lines[#lines + 1] = "" end
+    local label = "Malformed (" .. count .. ")"
+    lines[#lines + 1] = label
+    mark(#lines - 1, 0, #label, HL.header_malformed)
+  end
+
+  local function emit_malformed_row(m)
+    local fname = tostring(m.filename or m.file_path or "?")
+    local err   = tostring(m.err or "?")
+    -- One-line summary; the `i` preview shows the full error.
+    -- Layout: `  ⚠ <filename>  (<bucket>)  — <short-err>`
+    local short_err = err:gsub("\n.*$", "")
+    if #short_err > 80 then short_err = short_err:sub(1, 77) .. "..." end
+    local prefix = "  ⚠ "
+    local mid    = "  (" .. tostring(m.bucket or "?") .. ")  — "
+    local line   = prefix .. fname .. mid .. short_err
+    lines[#lines + 1] = line
+    local lnum0 = #lines - 1
+    -- Highlight: ⚠ as error badge, filename as Directory, err tail as Comment.
+    local c = 0
+    mark(lnum0, c, c + #prefix, HL.badge)
+    c = c + #prefix
+    mark(lnum0, c, c + #fname, HL.malformed_filename)
+    c = c + #fname
+    -- mid is dim NonText-ish; skip explicit highlight (uses Normal)
+    c = c + #mid
+    mark(lnum0, c, c + #short_err, HL.malformed_err)
+
+    rows[#rows + 1] = {
+      kind     = "malformed-task",
+      lnum     = lnum0 + 1,
+      filepath = m.file_path,
+      bucket   = m.bucket,
+      err      = err,
+    }
+  end
+
+  if type(malformed) == "table" and #malformed > 0 then
+    emit_malformed_header(#malformed)
+    for _, m in ipairs(malformed) do emit_malformed_row(m) end
+  end
+
   -- Walk buckets in display order. The 1-based index is OPEN-only
   -- (matches the auto-agents numbered surface per ADR-0031 §5).
   -- After each task row, if M._expanded[task.id] is set, the
@@ -599,8 +689,10 @@ local function _render(bufnr)
     end
   end
 
-  -- Empty-state UX: no tasks anywhere.
-  if total == 0 then
+  -- Empty-state UX: no tasks anywhere. (Only shown when there are
+  -- no malformed entries either — a panel with broken files is
+  -- categorically NOT empty.)
+  if total == 0 and (type(malformed) ~= "table" or #malformed == 0) then
     lines[#lines + 1] = "(no tasks in this workspace's .todo-list/)"
     mark(#lines - 1, 0, #lines[#lines], HL.empty)
     lines[#lines + 1] = ""
@@ -669,6 +761,11 @@ local function _open(row)
     -- a pre-resolved abs filepath from the render pass. No fallback
     -- to the parent task — predictable behavior on non-path rows.
     path = row.filepath
+  elseif row.kind == "malformed-task" then
+    -- Malformed file row: open the broken file so the user can
+    -- repair the frontmatter. (`d` deletes it; `i` previews the
+    -- parse error.)
+    path = row.filepath
   else
     -- Task row (kind="task" or — for backwards-tolerance — any row
     -- with a task table and no kind tag).
@@ -691,7 +788,57 @@ end
 ---fields + description body + errors (if any). `q` / `<Esc>` close.
 ---@param row table?
 local function _preview_task(row)
-  if not row or not row.task then return end
+  if not row then return end
+
+  -- v0.2.38: malformed-task rows have no validated `task` — show
+  -- the file path + the full parse/validate error instead.
+  if row.kind == "malformed-task" then
+    local lines = {}
+    lines[#lines + 1] = "  Malformed todo file"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format("  %-12s %s", "Bucket", tostring(row.bucket or "?"))
+    lines[#lines + 1] = string.format("  %-12s %s", "Path",   tostring(row.filepath or "?"))
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "  Error"
+    for line in (tostring(row.err or "") .. "\n"):gmatch("([^\n]*)\n") do
+      lines[#lines + 1] = "    " .. line
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "  (q / <Esc> to close; <CR> to open the file)"
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].buftype   = "nofile"
+    vim.bo[buf].swapfile  = false
+    vim.bo[buf].filetype  = "auto-finder-todos-info"
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+
+    local max_w = 0
+    for _, l in ipairs(lines) do if #l > max_w then max_w = #l end end
+    local width  = math.min(max_w + 2, math.max(80, vim.o.columns - 8))
+    local height = math.min(#lines, math.max(10, vim.o.lines - 6))
+    local win = vim.api.nvim_open_win(buf, true, {
+      relative = "cursor", row = 1, col = 0,
+      width = width, height = height,
+      style = "minimal", border = "rounded",
+      title = " malformed todo ", title_pos = "left",
+    })
+    local function close()
+      if vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_close, win, true)
+      end
+    end
+    for _, key in ipairs({ "q", "<Esc>" }) do
+      pcall(vim.keymap.set, "n", key, close, {
+        buffer = buf, silent = true, nowait = true,
+        desc = "auto-finder.todos: dismiss preview",
+      })
+    end
+    return
+  end
+
+  if not row.task then return end
   local t = row.task
 
   local lines = {}
@@ -801,7 +948,29 @@ end
 ---`d` action: confirm + remove the task under the cursor.
 ---@param row table?
 local function _remove_task(row)
-  if not row or not row.task then return end
+  if not row then return end
+
+  -- v0.2.38: malformed-task rows have no validated task id to
+  -- route through `auto-core.todo.remove`. Delete the broken file
+  -- directly via libuv after confirmation.
+  if row.kind == "malformed-task" then
+    if not row.filepath then return end
+    local choice = vim.fn.confirm(
+      "Delete malformed file?\n   " .. tostring(row.filepath),
+      "&Yes\n&No", 2)
+    if choice ~= 1 then return end
+    local ok, err = vim.uv.fs_unlink(row.filepath)
+    if not ok then
+      require("auto-finder.log").error("view.todos",
+        "delete failed: " .. tostring(err))
+    end
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+      _render(M._bufnr)
+    end
+    return
+  end
+
+  if not row.task then return end
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return end
   local choice = vim.fn.confirm(
