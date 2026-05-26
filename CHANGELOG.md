@@ -2,6 +2,42 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.37] — 2026-05-26 — `views.todos` polish round 2 (live-testing bugs)
+
+Two UX fixes from a second live-test pass:
+
+- **Cursor stays on the task row when `o` toggles expansion.**
+  Previously the cursor would jump to the bucket header (`Open`,
+  `Completed`, …) on press. Cause: `_render` did an intermediate
+  `nvim_buf_set_lines(buf, 0, -1, false, {})` wipe that left the
+  cursor at L1; the subsequent write of the full content didn't
+  restore it. Fix: drop the wipe (the second call already
+  replaces all lines atomically) AND explicitly snapshot-and-
+  restore cursor for every window currently showing the buffer
+  around the render. Clamped to the new line count to satisfy
+  `nvim_win_set_cursor`'s 1-based contract.
+- **`<CR>` on an adr/review row now resolves absolute paths and
+  multiple relative-path roots.** Previously the resolver only
+  handled KB-relative paths (and silently returned nil when no
+  KB env was set), so absolute paths and workspace-relative refs
+  fell through to a silent no-op. Renamed `_resolve_kb_path` →
+  `_resolve_ref_path` with the new strategy:
+    1. Absolute path (`/...` or `~/...`) — `vim.fn.expand` and
+       use as-is.
+    2. Relative — try `<KB_root>/<rel>` → `<workspace_root>/<rel>`
+       → `<cwd>/<rel>`; return the first existence-confirmed
+       match. If none exist, return the KB-rooted candidate as a
+       "best guess" so the editor surfaces a visible "file not
+       found" rather than a silent no-op.
+  The KB-root resolver itself was tightened in `auto-core v0.1.37`
+  (ROOT > READ[0] > WRITE); this view-side change lays the second
+  half of the resolution chain on top.
+
+Tests: smoke section `[39]` adds 5 new assertions — cursor stays
+on lnum after expand and after collapse; absolute adr path used
+as-is; workspace-rooted adr resolves to `<ws>/<rel>` with no KB
+env; non-existent ref returns a non-nil best-guess path.
+
 ## [v0.2.36] — 2026-05-26 — `views.todos` polish from live testing
 
 Four UX changes driven by the first live-test pass on v0.2.35:

@@ -202,15 +202,66 @@ local function _blocked_task_path(blocked_id)
   return paths.task_file_path(todo.get_todo_dir(), task.id, task.status, task.archived_at)
 end
 
----Join a KB-relative path under the resolved KB root. Returns nil
----when no KB env is set OR the relative path is empty.
----@param rel string
----@return string?
-local function _resolve_kb_path(rel)
-  if type(rel) ~= "string" or rel == "" then return nil end
-  local root = _kb_root()
-  if not root then return nil end
-  return root .. "/" .. rel:gsub("^/+", "")
+---Resolve a reference string (an `adr:` / `review:` value) into an
+---absolute filesystem path. Multi-root strategy:
+---
+---  1. **Absolute path** (starts with `/` or `~`) — `vim.fn.expand`
+---     and return as-is.
+---  2. **Relative path** — try in order, returning the first that
+---     points at a readable file on disk:
+---        a. `<KB_root>/<rel>`                 (when KB env is set)
+---        b. `<workspace_root>/<rel>`          (auto-core.git.worktree)
+---        c. `<cwd>/<rel>`                     (last-resort fallback)
+---     If none exist, return the KB-rooted candidate as a "best
+---     guess" so the caller can still attempt to open it (the open
+---     will fail visibly via the editor's "file not found" rather
+---     than silently no-op).
+---@param ref string
+---@return string?  best-guess absolute path, or nil for invalid input
+local function _resolve_ref_path(ref)
+  if type(ref) ~= "string" or ref == "" then return nil end
+
+  -- Absolute: `/path` or `~/path` → expand and use.
+  if ref:sub(1, 1) == "/" or ref:sub(1, 1) == "~" then
+    return vim.fn.expand(ref)
+  end
+
+  local function exists(p)
+    return p and (vim.fn.filereadable(p) == 1 or vim.fn.isdirectory(p) == 1)
+  end
+  local function join(base, rel)
+    if not base or base == "" then return nil end
+    return base:gsub("/+$", "") .. "/" .. rel:gsub("^/+", "")
+  end
+
+  -- Candidate roots in priority order. The first existence-confirmed
+  -- match wins; otherwise the KB-rooted candidate is returned as a
+  -- best guess so the editor can produce a visible "file not found"
+  -- error rather than a silent no-op.
+  local candidates = {}
+
+  local kb = _kb_root()
+  local kb_cand = kb and join(kb, ref)
+  if kb_cand then candidates[#candidates + 1] = kb_cand end
+
+  local ok_paths, paths = pcall(require, "auto-core.todo.paths")
+  if ok_paths then
+    local ws = paths.workspace_root()
+    if ws and ws ~= "" then
+      candidates[#candidates + 1] = join(ws, ref)
+    end
+  end
+
+  candidates[#candidates + 1] = join(vim.fn.getcwd(), ref)
+
+  for _, cand in ipairs(candidates) do
+    if exists(cand) then return cand end
+  end
+  -- None exist on disk — return the first candidate (KB-rooted when
+  -- a KB is set, else workspace-rooted). The open path will surface
+  -- a "file not found" via the editor, which is more discoverable
+  -- than a silent no-op.
+  return candidates[1]
 end
 
 -- ─── render ───────────────────────────────────────────────────
@@ -274,9 +325,24 @@ end
 local function _render(bufnr)
   if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return end
 
+  -- v0.2.37: preserve cursor across re-renders. Pre-render, snapshot
+  -- the cursor of every window currently showing this buffer; post-
+  -- render, restore it (clamped to the new line count). Without this,
+  -- nvim_buf_set_lines's replace-all-lines call can shift the cursor
+  -- — most visibly when `o` expands a task and the user's cursor was
+  -- on the task row: even though the task row's lnum is stable, the
+  -- buffer mutation can land the cursor on the previous bucket
+  -- header. The save/restore pin makes the toggle feel like a
+  -- treeview expand (cursor stays put).
+  local cursor_saves = {}
+  for _, w in ipairs(vim.fn.win_findbuf(bufnr)) do
+    if vim.api.nvim_win_is_valid(w) then
+      cursor_saves[w] = vim.api.nvim_win_get_cursor(w)
+    end
+  end
+
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
-  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {})
 
   local grouped = _collect_grouped()
   local rows    = {}     -- accumulating M._rows
@@ -476,14 +542,14 @@ local function _render(bufnr)
     if type(task.adr) == "table" and #task.adr > 0 then
       emit_fm_list_header(task, "adr")
       for _, rel in ipairs(task.adr) do
-        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_kb_path(rel) })
+        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_ref_path(rel) })
       end
     end
 
     -- review — single KB-relative path.
     if type(task.review) == "string" and task.review ~= "" then
       emit_fm_scalar(task, "review", task.review,
-        { hl = HL.fm_path, filepath = _resolve_kb_path(task.review) })
+        { hl = HL.fm_path, filepath = _resolve_ref_path(task.review) })
     end
 
     -- blocked — list of task ids; each resolves to a task file path.
@@ -555,6 +621,18 @@ local function _render(bufnr)
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].modified   = false
   M._rows = rows
+
+  -- Restore cursors (clamped to the new line count). Skip lnum 0 to
+  -- satisfy nvim_win_set_cursor's 1-based contract.
+  local total = vim.api.nvim_buf_line_count(bufnr)
+  for w, pos in pairs(cursor_saves) do
+    if vim.api.nvim_win_is_valid(w)
+       and vim.api.nvim_win_get_buf(w) == bufnr
+    then
+      local lnum = math.max(1, math.min(pos[1], total))
+      pcall(vim.api.nvim_win_set_cursor, w, { lnum, pos[2] or 0 })
+    end
+  end
 end
 
 -- ─── keymap helpers ───────────────────────────────────────────

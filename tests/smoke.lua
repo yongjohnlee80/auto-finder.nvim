@@ -4878,6 +4878,131 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   ok("after collapse: frontmatter-field rows removed",
     collapsed_count == 0, "got " .. tostring(collapsed_count))
 
+  -- ── v0.2.37: cursor preservation across `o` toggle ────────────
+  -- The user reported pressing `o` jumped the cursor to the section
+  -- header. Cause: _render did an intermediate `nvim_buf_set_lines
+  -- (buf, 0, -1, false, {})` wipe that left cursor at L1; subsequent
+  -- write of the full content didn't restore it. Fix: drop the wipe
+  -- AND explicitly snapshot+restore cursor per visible window.
+  -- Find a window that's currently showing the buffer (re-use the
+  -- same one we'll set up later for the event-driven tests).
+  vim.cmd("topleft 40vnew")
+  local _cursor_w = vim.api.nvim_get_current_win()
+  vim.wo[_cursor_w].winfixbuf = false
+  vim.api.nvim_win_set_buf(_cursor_w, b)
+  -- Find the lnum for id_with_adr (a task we already created).
+  local id_for_cursor = id_with_adr
+  view._expanded = {}
+  view.on_focus(_cursor_w, b)
+  local task_lnum
+  for _, r in ipairs(view._rows) do
+    if r.kind == "task" and r.id == id_for_cursor then
+      task_lnum = r.lnum; break
+    end
+  end
+  ok("found task row to test cursor preservation against",
+    type(task_lnum) == "number")
+  vim.api.nvim_win_set_cursor(_cursor_w, { task_lnum, 0 })
+  -- Toggle expand — should NOT move cursor off the task row.
+  view._expanded[id_for_cursor] = true
+  view.on_focus(_cursor_w, b)
+  local pos_expanded = vim.api.nvim_win_get_cursor(_cursor_w)
+  ok("cursor stays on task lnum after expand",
+    pos_expanded[1] == task_lnum,
+    "expected lnum " .. task_lnum .. ", got " .. pos_expanded[1])
+  -- Toggle collapse — should also stay put.
+  view._expanded[id_for_cursor] = nil
+  view.on_focus(_cursor_w, b)
+  local pos_collapsed = vim.api.nvim_win_get_cursor(_cursor_w)
+  ok("cursor stays on task lnum after collapse",
+    pos_collapsed[1] == task_lnum,
+    "expected lnum " .. task_lnum .. ", got " .. pos_collapsed[1])
+  -- Clean up the test window (re-create later for the event tests).
+  pcall(vim.api.nvim_win_close, _cursor_w, true)
+
+  -- ── v0.2.37: _resolve_ref_path handles abs + multi-root rel ──
+  -- The user reported pressing <CR> on an adr row didn't open the
+  -- file when the KB env wasn't set / when the path was absolute.
+  -- _resolve_kb_path was renamed to _resolve_ref_path with the new
+  -- multi-root strategy. Verify each case via row.filepath.
+
+  -- (a) Absolute paths used as-is.
+  local id_abs = todo.add({
+    id    = "2026-05-26-abs-adr",
+    title = "Absolute adr",
+    adr   = { _kb_test_dir .. "/shared/adrs/0099-fix.md" },  -- absolute
+  })
+  view._expanded[id_abs] = true
+  view.on_focus(nil, b)
+  local adr_abs_row
+  for _, r in ipairs(view._rows) do
+    if r.kind == "frontmatter-field" and r.task and r.task.id == id_abs
+       and r.field == "adr[]"
+    then adr_abs_row = r; break end
+  end
+  ok("absolute adr path: row.filepath equals the input (no join)",
+    adr_abs_row and adr_abs_row.filepath
+      == _kb_test_dir .. "/shared/adrs/0099-fix.md",
+    adr_abs_row and tostring(adr_abs_row.filepath))
+
+  -- (b) Workspace-rooted relative when no KB env is set.
+  -- Save current KB env (the polish-1 block set it earlier and
+  -- the polish-2 cursor block above tweaked it again — sequence
+  -- aside, we need a known state here).
+  local _saved_kb_write = vim.env.AUTO_AGENTS_KB_WRITE
+  local _saved_kb_root  = vim.env.AUTO_AGENTS_KB_ROOT
+  local _saved_kb_read  = vim.env.AUTO_AGENTS_KB_READ
+  vim.env.AUTO_AGENTS_KB_WRITE = nil
+  vim.env.AUTO_AGENTS_KB_ROOT  = nil
+  vim.env.AUTO_AGENTS_KB_READ  = nil
+
+  -- Create a file under the workspace root that the rel path
+  -- should resolve to.
+  vim.fn.mkdir(tmp_root .. "/docs/refs", "p")
+  vim.fn.writefile({ "# ws-rooted" }, tmp_root .. "/docs/refs/v37.md")
+
+  local id_ws = todo.add({
+    id    = "2026-05-26-ws-rooted-adr",
+    title = "Workspace-rooted adr",
+    adr   = { "docs/refs/v37.md" },
+  })
+  view._expanded[id_ws] = true
+  view.on_focus(nil, b)
+  local adr_ws_row
+  for _, r in ipairs(view._rows) do
+    if r.kind == "frontmatter-field" and r.task and r.task.id == id_ws
+       and r.field == "adr[]"
+    then adr_ws_row = r; break end
+  end
+  ok("workspace-rooted adr (no KB env): row.filepath resolved to <ws>/<rel>",
+    adr_ws_row and adr_ws_row.filepath == tmp_root .. "/docs/refs/v37.md",
+    adr_ws_row and tostring(adr_ws_row.filepath))
+
+  vim.env.AUTO_AGENTS_KB_WRITE = _saved_kb_write
+  vim.env.AUTO_AGENTS_KB_ROOT  = _saved_kb_root
+  vim.env.AUTO_AGENTS_KB_READ  = _saved_kb_read
+
+  -- (c) Non-existent rel: best-guess KB-rooted candidate is
+  -- returned so the editor surfaces a "file not found" rather
+  -- than the keymap silently no-op'ing.
+  local id_ne = todo.add({
+    id    = "2026-05-26-nonexistent-adr",
+    title = "Nonexistent adr",
+    adr   = { "shared/adrs/Z-totally-missing.md" },
+  })
+  view._expanded[id_ne] = true
+  view.on_focus(nil, b)
+  local adr_ne_row
+  for _, r in ipairs(view._rows) do
+    if r.kind == "frontmatter-field" and r.task and r.task.id == id_ne
+       and r.field == "adr[]"
+    then adr_ne_row = r; break end
+  end
+  ok("non-existent adr: row.filepath returns a best-guess (non-nil) path",
+    adr_ne_row and type(adr_ne_row.filepath) == "string"
+      and adr_ne_row.filepath ~= "",
+    adr_ne_row and tostring(adr_ne_row.filepath))
+
   -- Cleanup KB fixture
   vim.env.AUTO_AGENTS_KB_WRITE = saved_kb
   vim.fn.delete(_kb_test_dir, "rf")
