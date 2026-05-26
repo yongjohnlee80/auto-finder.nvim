@@ -888,6 +888,23 @@ local function _open(row)
   end
   if not path or path == "" then return end
 
+  -- v0.2.40: refuse to "open" a literal `$VAR/...` path that
+  -- couldn't be resolved. Pre-v0.2.40, calling `:edit $KB_ROOT/...`
+  -- created a junk buffer NAMED `$KB_ROOT/...` because nvim
+  -- happily edits any string as a file path. Toast the underlying
+  -- problem so the user knows what to do (set the variable in
+  -- the Vars section, or set the env var and restart).
+  if path:sub(1, 1) == "$" then
+    local var_name = path:match("^%$([A-Za-z_][A-Za-z0-9_]*)")
+      or path:match("^%${([A-Za-z_][A-Za-z0-9_]*)}")
+      or "?"
+    require("auto-finder.log").error("view.todos",
+      "Cannot open '" .. path .. "' — variable $" .. var_name
+        .. " is not defined on this machine. Set it in the Vars "
+        .. "section or via the matching environment variable.")
+    return
+  end
+
   local af = require("auto-finder")
   local target = af._editor_target_winid()
   if not target then
@@ -1317,8 +1334,28 @@ local function _migrate_dir()
     completion = "dir",
   }, function(input)
     if not input or input == "" then return end
+
+    -- v0.2.40: resolve `$VAR/...` substitutions before computing
+    -- the absolute path. Lets the user type e.g.
+    -- `$KB_ROOT/personal/.todo-list` and have it land at the
+    -- correct location across machines.
+    local resolved_input = input
+    local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+    if ok_vars and type(vars.resolve_path) == "function" then
+      local r = vars.resolve_path(input)
+      if r.unresolved then
+        require("auto-finder.log").error("view.todos",
+          "migrate: variable $" .. tostring(r.var_name)
+            .. " is not defined on this machine — set it in the "
+            .. "Vars section or via the matching environment "
+            .. "variable, then try again.")
+        return
+      end
+      if r.ok and r.path then resolved_input = r.path end
+    end
+
     -- Expand `~`, normalize trailing slash.
-    local new_path = vim.fn.fnamemodify(vim.fn.expand(input), ":p")
+    local new_path = vim.fn.fnamemodify(vim.fn.expand(resolved_input), ":p")
       :gsub("/+$", "")
     if new_path == "" or new_path == current then return end
 

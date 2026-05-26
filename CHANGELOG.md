@@ -2,6 +2,38 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.40] — 2026-05-26 — Two fixes for `$VAR` paths in the todos panel
+
+### `<CR>` no longer opens a junk buffer named `$VAR/...`
+
+**Bug**: pressing `<CR>` on a frontmatter row referencing
+`$KB_ROOT/shared/adrs/0032-...md` when `$KB_ROOT` was unset
+created a buffer literally named `$KB_ROOT/shared/adrs/...`
+(because `:edit` happily takes any string as a filename).
+
+**Fix**: detect the literal `$`-prefix on the resolved path
+and toast an explicit "Cannot open '$KB_ROOT/...' — variable
+$KB_ROOT is not defined on this machine. Set it in the Vars
+section or via the matching environment variable." instead of
+opening anything.
+
+Pair with auto-core v0.1.41 which fixes the underlying
+"$KB_ROOT showed (unset) in parent nvim" bug — most users won't
+hit this `<CR>` codepath once $KB_ROOT resolves correctly.
+
+### Migration target accepts `$VAR/...` substitutions
+
+**Feature**: pressing `M` (migrate `.todo-list/` directory)
+now runs the typed destination through
+`auto-core.todo.vars.resolve_path` before computing the
+absolute path. Lets you type `$KB_ROOT/personal/.todo-list`
+and have it land at the correct location across machines.
+
+If the typed string references an undefined variable, the
+migration aborts with a clear error pointing at the Vars
+section instead of trying to create a literal `$VAR/...`
+directory.
+
 ## [v0.2.39] — 2026-05-26 — `views.todos` Vars section + numbered status modal
 
 Two changes wired together since they both touch the same view's
