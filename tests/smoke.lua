@@ -5160,6 +5160,132 @@ print("\n[39b] views.todos — malformed-task scan rendering")
   vim.fn.delete(tmp2, "rf")
 end)()
 
+-- ─────────────────────── 39c. views.todos — Vars section + status modal (v0.2.39) ──
+print("\n[39c] views.todos — Vars section + numbered status modal")
+;(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  if not ok_v then return end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  local tmp_root = vim.fn.tempname()
+  vim.fn.mkdir(tmp_root, "p")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  package.loaded["auto-core.todo.vars"] = nil
+  local vars = require("auto-core.todo.vars")
+
+  vars.set("PROJECT_DOCS", "/tmp/project-docs")
+  todo.add({ title = "task for vars test" })
+
+  -- Put the panel buffer in a visible window so event-driven
+  -- re-render isn't gated by win_findbuf=0.
+  vim.cmd("vsplit")
+  local panel_win = vim.api.nvim_get_current_win()
+  local b = view.get_buffer(panel_win)
+  vim.api.nvim_win_set_buf(panel_win, b)
+  ok("get_buffer returned a buffer", b and vim.api.nvim_buf_is_valid(b))
+
+  local lines = vim.api.nvim_buf_get_lines(b, 0, -1, false)
+  local text  = table.concat(lines, "\n")
+  ok("render shows Vars header", text:find("Vars %(") ~= nil)
+  ok("render lists $KB_ROOT built-in",     text:find("$KB_ROOT", 1, true) ~= nil)
+  ok("render lists $WORKSPACE built-in",   text:find("$WORKSPACE", 1, true) ~= nil)
+  ok("render lists $HOME built-in",        text:find("$HOME", 1, true) ~= nil)
+  ok("render lists $CWD built-in",         text:find("$CWD", 1, true) ~= nil)
+  ok("render lists user var $PROJECT_DOCS", text:find("$PROJECT_DOCS", 1, true) ~= nil)
+  ok("built-in rows have (auto) tag",      text:find("%(auto%)") ~= nil)
+
+  local saw_builtin, saw_user, user_row = false, false, nil
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "vars-entry" then
+      if row.builtin then saw_builtin = true
+      elseif row.name == "PROJECT_DOCS" then
+        saw_user = true; user_row = row
+      end
+    end
+  end
+  ok("M._rows includes a kind='vars-entry' built-in row", saw_builtin)
+  ok("M._rows includes a kind='vars-entry' user row", saw_user)
+  ok("user vars-entry row carries the right value",
+    user_row and user_row.value == "/tmp/project-docs")
+
+  -- Event-driven re-render: visible-buffer path.
+  vars.set("ANOTHER", "/tmp/another")
+  vim.wait(120, function() return false end)
+  local text2 = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("core.todo.vars:changed triggers a re-render (new var visible)",
+    text2:find("$ANOTHER", 1, true) ~= nil)
+
+  vars.remove("ANOTHER")
+  vim.wait(120, function() return false end)
+  local text3 = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("remove triggers re-render (var no longer visible)",
+    text3:find("$ANOTHER", 1, true) == nil)
+
+  -- Numbered status modal: stub vim.ui.select, fire the `s` keymap.
+  local id = todo.add({ title = "status-modal target" })
+  -- Force a refresh so the panel learns about the new task row
+  -- (todo.add doesn't fire core.todo:* on its own; the panel
+  -- relies on core.todo:refreshed for adds + core.todo.status:
+  -- changed for status mutations).
+  todo.refresh()
+  vim.wait(120, function() return false end)
+  local task_lnum
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id == id then
+      task_lnum = row.lnum; break
+    end
+  end
+  ok("status-modal: found the target task row in M._rows",
+    type(task_lnum) == "number")
+
+  local captured_choices
+  local orig_select = vim.ui.select
+  vim.ui.select = function(items, _opts, on_choice)
+    captured_choices = items
+    on_choice(items[2])  -- pick "completed"
+  end
+
+  if task_lnum then
+    vim.api.nvim_win_set_cursor(panel_win, { task_lnum, 0 })
+    local maps = vim.api.nvim_buf_get_keymap(b, "n")
+    local s_cb
+    for _, mp in ipairs(maps) do
+      if mp.lhs == "s" then s_cb = mp.callback; break end
+    end
+    ok("status-modal: `s` keymap is bound on the panel buffer",
+      type(s_cb) == "function")
+    if s_cb then s_cb() end
+  end
+  ok("status-modal: vim.ui.select invoked with 4 statuses in canonical order",
+    captured_choices and #captured_choices == 4
+      and captured_choices[1] == "open"
+      and captured_choices[2] == "completed"
+      and captured_choices[3] == "deferred"
+      and captured_choices[4] == "archived",
+    "got: " .. vim.inspect(captured_choices))
+  vim.wait(120, function() return false end)
+  local updated = todo.get(id)
+  ok("status-modal: choice 'completed' applied via auto-core.todo.status",
+    updated and updated.status == "completed",
+    "got status=" .. tostring(updated and updated.status))
+
+  vim.ui.select = orig_select
+  view.on_close()
+  if vim.api.nvim_win_is_valid(panel_win) then
+    pcall(vim.api.nvim_win_close, panel_win, true)
+  end
+  worktree.set_workspace_root(nil)
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(tmp_root,  "rf")
+  vim.fn.delete(state_tmp, "rf")
+  package.loaded["auto-core.todo.vars"] = nil
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

@@ -2,6 +2,91 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.39] — 2026-05-26 — `views.todos` Vars section + numbered status modal
+
+Two changes wired together since they both touch the same view's
+keymap surface.
+
+### Vars section
+
+Pair with auto-core v0.1.40's `auto-core.todo.vars`. Renders a new
+section at the bottom of the panel listing every available
+variable — built-ins (`$KB_ROOT`, `$WORKSPACE`, `$HOME`, `$CWD`)
+first, then user-defined entries sorted lexicographically. Each row:
+
+```
+  $KB_ROOT = /Users/.../kb              (auto)
+  $WORKSPACE = /Users/.../nvim-plugins  (auto)
+  $HOME = /Users/.../                   (auto)
+  $CWD = /Users/.../nvim-plugins        (auto)
+  $PROJECT_DOCS = /opt/my-project/docs
+```
+
+A built-in whose resolver returns nil renders as `$KB_ROOT =
+(unset)` in `DiagnosticWarn` so the user can spot environment
+problems at a glance.
+
+**Keymaps on a Vars row**:
+
+| Key  | Behavior                                                         |
+|------|------------------------------------------------------------------|
+| `<CR>` | Open the value as a file/dir in the editor target (if it exists) |
+| `i`    | Float a preview popup: name, value, source, doc                |
+| `e`    | Edit the value (user vars only; built-ins refuse with a warning) |
+| `d`    | Delete the var (user vars only; with confirmation)             |
+
+**Keymaps on the Vars header** (or anywhere in the Vars section):
+
+| Key  | Behavior                              |
+|------|---------------------------------------|
+| `a`  | Prompt for new variable name + value |
+
+The existing `a` (add task) is unchanged when the cursor sits on
+a task row — `a` now dispatches based on which section the
+cursor is in. No new keys added to the panel surface; `e` is new
+but only fires on Vars rows (no-op elsewhere).
+
+Three new highlight groups (all `default = true`):
+
+- `AutoFinderTodosHeaderVars`    → `Title`
+- `AutoFinderTodosVarsName`      → `Identifier`
+- `AutoFinderTodosVarsValue`     → `Directory`
+- `AutoFinderTodosVarsBuiltinTag`→ `Comment`
+- `AutoFinderTodosVarsUnset`     → `DiagnosticWarn`
+
+**Path resolution wired through**: `_resolve_ref_path` now
+delegates to `auto-core.todo.vars.resolve_path` first. So `$VAR/
+shared/adrs/...` references in a task's `adr:` list open via the
+new substitution path. Unresolved variables return the literal
+`$UNDEFINED/...` text so the editor's file-not-found message
+visibly cites the unresolved variable rather than silently
+producing a misleading best-guess.
+
+Subscribed to `core.todo.vars:changed` for event-driven re-render
+on var add/edit/delete.
+
+### Status modal (was the `s` cycle)
+
+`s` no longer cycles open → completed → deferred → open. It now
+opens a `vim.ui.select` numbered modal listing the four
+statuses:
+
+```
+Set status for 'my task':
+  1. open  (current)
+  2. completed
+  3. deferred
+  4. archived
+```
+
+Forces an explicit choice instead of "press `s` twice to land on
+deferred." Picking the current status is a no-op.
+
+**Tests**: smoke `[39c]` adds 14 assertions covering Vars row
+emission, M._rows shape, edit/add/remove via the helpers, status-
+modal selection (via stub), and event-driven re-render on
+`core.todo.vars:changed`.
+
 ## [v0.2.38] — 2026-05-26 — `views.todos` surfaces malformed task files
 
 Closes the "malformed task disappears" bug found in live testing

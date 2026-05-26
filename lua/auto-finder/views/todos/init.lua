@@ -59,6 +59,12 @@ local HL = {
   header_malformed = "AutoFinderTodosHeaderMalformed", -- v0.2.38: malformed section
   malformed_filename = "AutoFinderTodosMalformedFilename",
   malformed_err      = "AutoFinderTodosMalformedErr",
+  -- v0.2.39: Vars section
+  header_vars        = "AutoFinderTodosHeaderVars",
+  vars_name          = "AutoFinderTodosVarsName",
+  vars_value         = "AutoFinderTodosVarsValue",
+  vars_builtin_tag   = "AutoFinderTodosVarsBuiltinTag",
+  vars_unset         = "AutoFinderTodosVarsUnset",
   index           = "AutoFinderTodosIndex",      -- `1.` ordinal for OPEN
   id              = "AutoFinderTodosId",         -- the task id
   title           = "AutoFinderTodosTitle",      -- task title (rendered after the id)
@@ -97,6 +103,11 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.header_malformed,  { link = "DiagnosticError",default = true })
   vim.api.nvim_set_hl(0, HL.malformed_filename,{ link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.malformed_err,     { link = "Comment",        default = true })
+  vim.api.nvim_set_hl(0, HL.header_vars,       { link = "Title",          default = true })
+  vim.api.nvim_set_hl(0, HL.vars_name,         { link = "Identifier",     default = true })
+  vim.api.nvim_set_hl(0, HL.vars_value,        { link = "Directory",      default = true })
+  vim.api.nvim_set_hl(0, HL.vars_builtin_tag,  { link = "Comment",        default = true })
+  vim.api.nvim_set_hl(0, HL.vars_unset,        { link = "DiagnosticWarn", default = true })
   vim.api.nvim_set_hl(0, HL.index,             { link = "Number",         default = true })
   vim.api.nvim_set_hl(0, HL.id,                { link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.title,             { link = "Constant",       default = true })
@@ -140,6 +151,8 @@ local BUCKET_ORDER = { "open", "deferred", "completed", "archived" }
 --   { kind="task",              id, status, errors_count, lnum, task }
 --   { kind="frontmatter-field", lnum, task, field, filepath? }
 --   { kind="malformed-task",    lnum, filepath, bucket, err }
+--   { kind="vars-header",       lnum }                          -- v0.2.39
+--   { kind="vars-entry",        lnum, name, value, builtin, doc, is_unset? }
 -- The keymap layer reads `kind` to decide what action to take —
 -- e.g. `<CR>` on a task row opens the task file; on a frontmatter-
 -- field row WITH a filepath, opens that file instead; on a
@@ -231,7 +244,29 @@ end
 local function _resolve_ref_path(ref)
   if type(ref) ~= "string" or ref == "" then return nil end
 
-  -- Absolute: `/path` or `~/path` → expand and use.
+  -- v0.2.39: delegate `$VAR/...` and absolute-path forms to
+  -- auto-core.todo.vars.resolve_path. Unresolved variables still
+  -- come back via `r.unresolved=true` carrying the literal text;
+  -- we return that literal so the editor's file-not-found error
+  -- visibly cites the unresolved variable rather than silently
+  -- producing a misleading multi-root best-guess.
+  local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+  if ok_vars and type(vars.resolve_path) == "function" then
+    local r = vars.resolve_path(ref)
+    if r.unresolved then
+      return r.path  -- the literal $VAR/... so the editor surfaces a clear error
+    end
+    if r.ok and r.path then
+      -- `$VAR/...` substituted OR absolute/`~` expanded — return as-is.
+      if r.var_name or r.path:sub(1, 1) == "/" then
+        return r.path
+      end
+      -- plain relative case falls through to the multi-root logic below
+    end
+  end
+
+  -- Absolute: `/path` or `~/path` → expand and use (fallback path
+  -- when auto-core.todo.vars isn't available).
   if ref:sub(1, 1) == "/" or ref:sub(1, 1) == "~" then
     return vim.fn.expand(ref)
   end
@@ -689,6 +724,73 @@ local function _render(bufnr)
     end
   end
 
+  -- v0.2.39: Vars section. Renders BELOW the bucket list so the
+  -- task panel keeps its visual centre of gravity on tasks. The
+  -- section is always emitted (built-ins are always available),
+  -- so users have a discoverable place to look up "what's
+  -- $KB_ROOT currently resolving to?" without leaving the panel.
+  do
+    local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+    if ok_vars and type(vars.list) == "function" then
+      local entries = vars.list() or {}
+
+      -- Header
+      if #lines > 0 then lines[#lines + 1] = "" end
+      local header = "Vars (" .. #entries .. ")"
+      lines[#lines + 1] = header
+      mark(#lines - 1, 0, #header, HL.header_vars)
+      rows[#rows + 1] = { kind = "vars-header", lnum = #lines }
+
+      if #entries == 0 then
+        -- Vacuously empty — built-ins should always provide at
+        -- least HOME/CWD; if the user really sees zero rows here
+        -- it means vars.list() returned an empty table (which
+        -- only happens if BUILTINS was misconfigured). Show a
+        -- diagnostic line.
+        local line = "  (no variables)"
+        lines[#lines + 1] = line
+        mark(#lines - 1, 0, #line, HL.empty)
+      else
+        for _, e in ipairs(entries) do
+          -- Layout: `  $NAME = <value>  (auto)` for built-ins
+          --         `  $NAME = <value>`           for user vars
+          --         `  $NAME = (unset)`           for built-ins whose
+          --                                       resolver returned nil
+          local prefix     = "  "
+          local name_chunk = "$" .. tostring(e.name)
+          local eq_chunk   = " = "
+          local is_unset   = e.value == nil or e.value == ""
+          local val_chunk  = is_unset and "(unset)" or tostring(e.value)
+          local tag_chunk  = e.builtin and "  (auto)" or ""
+          local line = prefix .. name_chunk .. eq_chunk .. val_chunk .. tag_chunk
+          lines[#lines + 1] = line
+          local lnum0 = #lines - 1
+
+          -- Highlight spans
+          local c = #prefix
+          mark(lnum0, c, c + #name_chunk, HL.vars_name)
+          c = c + #name_chunk + #eq_chunk
+          mark(lnum0, c, c + #val_chunk,
+            is_unset and HL.vars_unset or HL.vars_value)
+          if e.builtin and #tag_chunk > 0 then
+            c = c + #val_chunk
+            mark(lnum0, c, c + #tag_chunk, HL.vars_builtin_tag)
+          end
+
+          rows[#rows + 1] = {
+            kind     = "vars-entry",
+            lnum     = lnum0 + 1,
+            name     = e.name,
+            value    = e.value,
+            builtin  = e.builtin == true,
+            doc      = e.doc,
+            is_unset = is_unset,
+          }
+        end
+      end
+    end
+  end
+
   -- Empty-state UX: no tasks anywhere. (Only shown when there are
   -- no malformed entries either — a panel with broken files is
   -- categorically NOT empty.)
@@ -766,6 +868,19 @@ local function _open(row)
     -- repair the frontmatter. (`d` deletes it; `i` previews the
     -- parse error.)
     path = row.filepath
+  elseif row.kind == "vars-entry" then
+    -- v0.2.39: vars row. <CR> opens the value as a filesystem path
+    -- when it looks like one (file or directory exists). Otherwise
+    -- no-op (use `e` to edit user vars, `i` to preview).
+    if not row.is_unset and type(row.value) == "string" and row.value ~= "" then
+      local v = vim.fn.expand(row.value)
+      if vim.fn.filereadable(v) == 1 or vim.fn.isdirectory(v) == 1 then
+        path = v
+      end
+    end
+  elseif row.kind == "vars-header" then
+    -- No-op on the section header — `a` adds a new var.
+    return
   else
     -- Task row (kind="task" or — for backwards-tolerance — any row
     -- with a task table and no kind tag).
@@ -823,6 +938,64 @@ local function _preview_task(row)
       width = width, height = height,
       style = "minimal", border = "rounded",
       title = " malformed todo ", title_pos = "left",
+    })
+    local function close()
+      if vim.api.nvim_win_is_valid(win) then
+        pcall(vim.api.nvim_win_close, win, true)
+      end
+    end
+    for _, key in ipairs({ "q", "<Esc>" }) do
+      pcall(vim.keymap.set, "n", key, close, {
+        buffer = buf, silent = true, nowait = true,
+        desc = "auto-finder.todos: dismiss preview",
+      })
+    end
+    return
+  end
+
+  -- v0.2.39: vars-entry preview shows the var's name, resolved
+  -- value, source (built-in resolver or user-defined), and doc.
+  if row.kind == "vars-entry" then
+    local lines = {}
+    lines[#lines + 1] = "  Variable"
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = string.format("  %-12s $%s", "Name",
+      tostring(row.name or "?"))
+    lines[#lines + 1] = string.format("  %-12s %s", "Value",
+      row.is_unset and "(unset)" or tostring(row.value or ""))
+    lines[#lines + 1] = string.format("  %-12s %s", "Source",
+      row.builtin and "built-in (auto-resolved, read-only)" or "user-defined")
+    if row.doc and row.doc ~= "" then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  Doc"
+      for line in (tostring(row.doc) .. "\n"):gmatch("([^\n]*)\n") do
+        lines[#lines + 1] = "    " .. line
+      end
+    end
+    lines[#lines + 1] = ""
+    if row.builtin then
+      lines[#lines + 1] = "  (q / <Esc> to close)"
+    else
+      lines[#lines + 1] = "  (q / <Esc> to close; e to edit; d to delete)"
+    end
+
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].bufhidden = "wipe"
+    vim.bo[buf].buftype   = "nofile"
+    vim.bo[buf].swapfile  = false
+    vim.bo[buf].filetype  = "auto-finder-todos-info"
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+
+    local max_w = 0
+    for _, l in ipairs(lines) do if #l > max_w then max_w = #l end end
+    local width  = math.min(max_w + 2, math.max(60, vim.o.columns - 8))
+    local height = math.min(#lines, math.max(8, vim.o.lines - 6))
+    local win = vim.api.nvim_open_win(buf, true, {
+      relative = "cursor", row = 1, col = 0,
+      width = width, height = height,
+      style = "minimal", border = "rounded",
+      title = " variable ", title_pos = "left",
     })
     local function close()
       if vim.api.nvim_win_is_valid(win) then
@@ -917,6 +1090,53 @@ end
 
 ---`a` action: prompt for a title; on non-empty, create a task via
 ---auto-core.todo.add and open its file in the editor target.
+---v0.2.39: prompt for a new user-defined variable. Two-step
+---prompt (name, then value) so the user sees the typed name
+---before committing the value. Both prompts must produce non-
+---empty inputs; either escape cancels the operation. Re-render
+---is driven by `core.todo.vars:changed`.
+local function _add_var()
+  local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+  if not ok_vars then return end
+  vim.ui.input({ prompt = "New variable name (no `$`): " }, function(name)
+    if not name or name == "" then return end
+    name = name:gsub("^%$+", "")  -- tolerate `$NAME` input
+    vim.ui.input({ prompt = "Value for $" .. name .. ": " }, function(value)
+      if not value or value == "" then return end
+      local ok, err = vars.set(name, value)
+      if not ok then
+        require("auto-finder.log").error("view.todos",
+          "var set failed: " .. tostring(err))
+      end
+    end)
+  end)
+end
+
+---v0.2.39: prompt to edit the value of an existing user-defined
+---variable. Built-ins refuse the edit (they auto-resolve).
+---@param row table?
+local function _edit_var(row)
+  if not row or row.kind ~= "vars-entry" then return end
+  if row.builtin then
+    require("auto-finder.log").warn("view.todos",
+      "$" .. tostring(row.name) .. " is a built-in variable (auto-resolved, read-only)")
+    return
+  end
+  local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+  if not ok_vars then return end
+  vim.ui.input({
+    prompt  = "Edit $" .. tostring(row.name) .. ": ",
+    default = tostring(row.value or ""),
+  }, function(input)
+    if input == nil then return end  -- cancelled
+    local ok, err = vars.set(row.name, input)
+    if not ok then
+      require("auto-finder.log").error("view.todos",
+        "var set failed: " .. tostring(err))
+    end
+  end)
+end
+
 local function _add_task()
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return end
@@ -949,6 +1169,28 @@ end
 ---@param row table?
 local function _remove_task(row)
   if not row then return end
+
+  -- v0.2.39: vars-entry rows route to vars.remove (user vars only).
+  if row.kind == "vars-entry" then
+    if row.builtin then
+      require("auto-finder.log").warn("view.todos",
+        "$" .. tostring(row.name) .. " is a built-in variable and cannot be removed")
+      return
+    end
+    local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+    if not ok_vars then return end
+    local choice = vim.fn.confirm(
+      "Delete user variable '$" .. tostring(row.name) .. "'?",
+      "&Yes\n&No", 2)
+    if choice ~= 1 then return end
+    local ok, err = vars.remove(row.name)
+    if not ok then
+      require("auto-finder.log").error("view.todos",
+        "var remove failed: " .. tostring(err))
+    end
+    -- Re-render driven by core.todo.vars:changed event.
+    return
+  end
 
   -- v0.2.38: malformed-task rows have no validated task id to
   -- route through `auto-core.todo.remove`. Delete the broken file
@@ -989,33 +1231,43 @@ local function _remove_task(row)
   end
 end
 
--- Status cycle for the `s` key. Skips archived because it's a
--- terminal-ish state — explicit archive lives behind the auto-core
--- API for the rare manual case.
-local STATUS_CYCLE = {
-  open      = "completed",
-  completed = "deferred",
-  deferred  = "open",
-  archived  = "open",  -- archived → open re-opens the task
-}
+-- v0.2.39: status changes are now driven by a vim.ui.select
+-- numbered modal instead of the v0.2.38 hardcoded cycle. The cycle
+-- forced users to think through "what's my current status, what's
+-- the next state in the rotation, do I need to press `s` twice or
+-- thrice to land on `deferred`?" — the modal eliminates that
+-- mental tax: the user always sees the four destinations and
+-- picks one.
+local STATUS_CHOICES = { "open", "completed", "deferred", "archived" }
 
----`s` action: cycle status via auto-core.todo.status (the API path
----that fires side-effect events).
+---`s` action: open a numbered-options modal listing the four
+---valid statuses; on selection, route through auto-core.todo.status.
 ---@param row table?
-local function _cycle_status(row)
+local function _set_status(row)
   if not row or not row.task then return end
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return end
-  local next_status = STATUS_CYCLE[row.task.status] or "open"
-  local ok, err = pcall(todo.status, row.task.id, next_status)
-  if not ok then
-    require("auto-finder.log").error("view.todos",
-      "status failed: " .. tostring(err))
-    return
-  end
-  if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-    _render(M._bufnr)
-  end
+
+  local current = row.task.status
+  vim.ui.select(STATUS_CHOICES, {
+    prompt = "Set status for '"
+      .. tostring(row.task.title or row.task.id or "?") .. "':",
+    format_item = function(item)
+      if item == current then return item .. "  (current)" end
+      return item
+    end,
+  }, function(choice)
+    if not choice or choice == current then return end
+    local ok, err = pcall(todo.status, row.task.id, choice)
+    if not ok then
+      require("auto-finder.log").error("view.todos",
+        "status failed: " .. tostring(err))
+      return
+    end
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+      _render(M._bufnr)
+    end
+  end)
 end
 
 ---`o` action: toggle inline frontmatter expansion for the task
@@ -1144,15 +1396,31 @@ local function _apply_keymaps(bufnr, panel_winid)
     })
   end
   set("<CR>", function() _open(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: open task .md file (or referenced doc on a frontmatter path row)")
+    "auto-finder.todos: open task .md file (or referenced doc on a frontmatter path row, or value path on a Vars row)")
   set("i", function() _preview_task(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: preview (popup)")
-  set("a", _add_task,
-    "auto-finder.todos: add new task (prompt for title)")
+    "auto-finder.todos: preview (popup) — task / malformed / variable")
+  -- v0.2.39: `a` dispatches based on what section the cursor is
+  -- in. On a Vars row or the Vars header → add a new variable;
+  -- everywhere else → add a new task. This avoids splitting the
+  -- keymap surface across `a` (add task) vs. some-other-key (add
+  -- var) and keeps the "add something here" intent intuitive.
+  set("a", function()
+    local row = _row_under_cursor(panel_winid)
+    if row and (row.kind == "vars-entry" or row.kind == "vars-header") then
+      _add_var()
+    else
+      _add_task()
+    end
+  end, "auto-finder.todos: add (new task by default; new variable when cursor is in the Vars section)")
+  set("e", function() _edit_var(_row_under_cursor(panel_winid)) end,
+    "auto-finder.todos: edit (user-defined variable under cursor; no-op elsewhere)")
   set("d", function() _remove_task(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: remove task (with confirmation)")
-  set("s", function() _cycle_status(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: cycle status (open → completed → deferred → open)")
+    "auto-finder.todos: remove (task / malformed file / user variable, with confirmation)")
+  -- v0.2.39: `s` now opens a numbered modal listing the four
+  -- statuses instead of cycling. Picking the current status is a
+  -- no-op.
+  set("s", function() _set_status(_row_under_cursor(panel_winid)) end,
+    "auto-finder.todos: set status (numbered modal: open / completed / deferred / archived)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: toggle inline frontmatter expansion")
   set("R", function() _refresh(bufnr) end,
@@ -1221,6 +1489,7 @@ local function _ensure_subscriptions()
   M._subs = {
     ev.subscribe("core.todo:refreshed",      function() _on_event("refresh") end),
     ev.subscribe("core.todo.status:changed", function() _on_event("status")  end),
+    ev.subscribe("core.todo.vars:changed",   function() _on_event("vars")    end),
   }
 end
 
