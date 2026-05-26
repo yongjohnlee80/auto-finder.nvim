@@ -574,13 +574,30 @@ local function _task_file_path(task)
   return paths.task_file_path(td, task.id, task.status, task.archived_at)
 end
 
----`<CR>` action: open the task file in the editor target window
----(NOT the panel itself). Mirrors the marks-view `_jump` pattern.
+---`<CR>` action: context-aware open in the editor-target window.
+---  • On a task row → opens the task's own .md file.
+---  • On an expanded frontmatter-field row that pre-resolved a
+---    filepath (adr / review / blocked items) → opens THAT file.
+---  • On a frontmatter-field row without a filepath (e.g. cursor
+---    on `status:` or `tags:`) → no-op. Predictable: cursor on a
+---    non-clickable field doesn't yank you away from the panel.
 ---@param row table?    M._rows entry under the cursor
-local function _open_task(row)
+local function _open(row)
   if not row then return end
-  local path = _task_file_path(row.task)
-  if not path then return end
+
+  local path
+  if row.kind == "frontmatter-field" then
+    -- Path-bearing frontmatter rows (adr / review / blocked) carry
+    -- a pre-resolved abs filepath from the render pass. No fallback
+    -- to the parent task — predictable behavior on non-path rows.
+    path = row.filepath
+  else
+    -- Task row (kind="task" or — for backwards-tolerance — any row
+    -- with a task table and no kind tag).
+    path = _task_file_path(row.task)
+  end
+  if not path or path == "" then return end
+
   local af = require("auto-finder")
   local target = af._editor_target_winid()
   if not target then
@@ -690,10 +707,11 @@ local function _add_task()
       return
     end
     -- Open the new file via the editor-window resolver. Build a
-    -- synthetic row for _open_task.
+    -- Synthetic row for _open — kind="task" so the dispatch lands on
+    -- the task-file branch.
     local task = todo.get(id_or_err)
     if task then
-      _open_task({ task = task })
+      _open({ kind = "task", task = task })
     end
     -- Re-render the panel buffer (we own M._bufnr).
     if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
@@ -878,8 +896,8 @@ local function _apply_keymaps(bufnr, panel_winid)
       buffer = bufnr, silent = true, nowait = true, desc = desc,
     })
   end
-  set("<CR>", function() _open_task(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: open task .md file")
+  set("<CR>", function() _open(_row_under_cursor(panel_winid)) end,
+    "auto-finder.todos: open task .md file (or referenced doc on a frontmatter path row)")
   set("i", function() _preview_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: preview (popup)")
   set("a", _add_task,
