@@ -1703,39 +1703,72 @@ local function _migrate_dir()
     local current_exists = fs_path.is_dir(current)
     local target_exists  = fs_path.exists(new_path)
 
-    -- Refuse to clobber an existing target — the user can
-    -- consolidate manually then re-run, or pick a fresh path.
-    if target_exists and current_exists then
-      require("auto-finder.log").error("view.todos",
-        "migrate: target '" .. new_path .. "' already exists — "
-        .. "refusing to overwrite. Move/merge manually then `M` again.")
-      return
+    -- v0.2.44: decide the action up front. Three shapes:
+    --   * both exist            → 3-option confirm (Move+switch is
+    --                              disabled here because we won't
+    --                              clobber; offer Switch only or Cancel)
+    --   * only current exists   → move + switch (single Yes/No)
+    --   * only target exists    → switch only (single Yes/No)
+    --   * neither exists        → switch only (the target will be
+    --                              created lazily on first add)
+    --
+    -- "Switch only" is the cross-machine workflow: you pulled a
+    -- shared `.todo-list/` from git into the KB and want THIS
+    -- workspace's local override to point at it. The local files
+    -- (if any) stay where they are — orphaned in the panel until
+    -- you switch back — so the prompt explicitly calls that out.
+    local action  -- "move_switch" | "switch_only"
+
+    if current_exists and target_exists then
+      local choice = vim.fn.confirm(
+        string.format(
+          "Both directories exist:\n   from: %s\n   to:   %s\n\n"
+            .. "(M)ove would clobber the target — pick (S)witch only "
+            .. "to just re-point the override. Local files at the "
+            .. "current path will remain on disk but become invisible "
+            .. "in the panel until you switch back.",
+          current, new_path),
+        "&Switch only\n&Cancel", 2)
+      if choice ~= 1 then return end
+      action = "switch_only"
+
+    elseif current_exists then
+      local choice = vim.fn.confirm(
+        string.format(
+          "Move\n   %s\n → %s\n\nThe per-workspace override will be updated.",
+          current, new_path),
+        "&Yes\n&No", 2)
+      if choice ~= 1 then return end
+      action = "move_switch"
+
+    else
+      local choice = vim.fn.confirm(
+        string.format(
+          target_exists
+            and "Switch the per-workspace override to:\n   %s\n\n(target already exists; no files will be moved)"
+            or  "No tasks to move (%s does not exist).\nSet the per-workspace override to:\n   %s",
+          target_exists and new_path or current,
+          new_path),
+        "&Yes\n&No", 2)
+      if choice ~= 1 then return end
+      action = "switch_only"
     end
 
-    local choice = vim.fn.confirm(
-      string.format(
-        current_exists
-          and "Move\n   %s\n → %s\n\nThe per-workspace override will be updated."
-          or  "No tasks to move (%s does not exist).\nSet the per-workspace override to:\n   %s",
-        current, new_path),
-      "&Yes\n&No", 2)
-    if choice ~= 1 then return end
-
-    -- Ensure target's parent dir exists so fs_rename can place it.
-    local parent = fs_path.parent(new_path)
-    if not fs_path.is_dir(parent) then
-      local mkok, mkerr = pcall(vim.fn.mkdir, parent, "p")
-      if not mkok then
-        require("auto-finder.log").error("view.todos",
-          "migrate: could not create parent '" .. parent
-          .. "': " .. tostring(mkerr))
-        return
+    -- Ensure target's parent dir exists so fs_rename can place it
+    -- (only needed for the move path — switch_only doesn't touch
+    -- the filesystem).
+    if action == "move_switch" then
+      local parent = fs_path.parent(new_path)
+      if not fs_path.is_dir(parent) then
+        local mkok, mkerr = pcall(vim.fn.mkdir, parent, "p")
+        if not mkok then
+          require("auto-finder.log").error("view.todos",
+            "migrate: could not create parent '" .. parent
+            .. "': " .. tostring(mkerr))
+          return
+        end
       end
-    end
 
-    -- Move the directory atomically. Skipped when there's nothing
-    -- to move (current dir doesn't exist on disk yet).
-    if current_exists then
       local ok, err = vim.uv.fs_rename(current, new_path)
       if not ok then
         require("auto-finder.log").error("view.todos",
@@ -1753,7 +1786,10 @@ local function _migrate_dir()
     -- INFO normally wouldn't per the default should_toast rule, but
     -- the user explicitly invoked `M` and deserves visible confirmation).
     require("auto-finder.log").notify(
-      "auto-finder.todos: migrated to " .. new_path,
+      action == "move_switch"
+        and ("auto-finder.todos: migrated to " .. new_path)
+        or  ("auto-finder.todos: override switched to " .. new_path
+              .. " (no files moved)"),
       { component = "view.todos", level = "info", notify = true })
     if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
       _render(M._bufnr)
