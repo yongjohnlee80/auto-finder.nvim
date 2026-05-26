@@ -921,6 +921,16 @@ local function _render(bufnr)
             end
           end
         else
+          -- v0.2.42: render a one-line "(index is ephemeral —
+          -- refer by id)" hint right under the Open header so
+          -- users (and agents calling `todos.list`) know the
+          -- 1-based numbers reorder on every refresh and aren't
+          -- a stable address. ADR-0031 §5 / Phase 3.2.
+          if name == "open" then
+            local hint = "    (index is ephemeral — refer by id for anything persistent)"
+            lines[#lines + 1] = hint
+            mark(#lines - 1, 0, #hint, HL.empty)  -- reuse the dim Comment link
+          end
           for i, t in ipairs(bucket) do
             emit_task(name, t, name == "open" and i or nil)
             if M._expanded[t.id] then
