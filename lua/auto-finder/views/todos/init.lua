@@ -1547,6 +1547,87 @@ local function _set_status(row)
   end)
 end
 
+---v0.2.43: `A` action — assign the task under the cursor to a
+---live spawned agent, with an optional one-line directive
+---explaining how the recipient should address it (e.g. "create
+---ADR", "open a PR", "investigate then come back to me").
+---
+---Flow:
+---  1. Pull the spawned-agent roster from
+---     `auto-agents.spawned_agents()` (only currently-alive
+---     bootstrap slots). Falls back to `auto-core.mailbox.
+---     registry.list()` when auto-agents isn't loaded.
+---  2. Show a `vim.ui.select` picker of agent names.
+---  3. After selection, prompt for notes via `vim.ui.input`.
+---     Empty input is fine (assignee set without notes).
+---  4. Call `auto-core.todo.assign(id, mailbox_id, notes)` —
+---     fires `core.todo.assignee:changed`; auto-agents'
+---     subscriber routes a one-shot mailbox message into the
+---     recipient's inbox carrying title, id, file path, and
+---     the notes as `reason:`.
+---
+---No-op on non-task rows (vars / malformed / headers).
+---@param row table?
+local function _assign_task(row)
+  if not row or not row.task or not row.task.id then return end
+
+  -- Try the auto-agents Lua API first; it returns only ALIVE
+  -- bootstrap slots, which is the natural "agents available right
+  -- now" surface the user expects.
+  local agents = {}
+  local ok_aa, aa = pcall(require, "auto-agents")
+  if ok_aa and type(aa.spawned_agents) == "function" then
+    local list = aa.spawned_agents() or {}
+    for _, entry in ipairs(list) do
+      agents[#agents + 1] = {
+        label      = string.format("%d: %s%s",
+          entry.slot or 0,
+          tostring(entry.name or "?"),
+          entry.kind and (" (" .. entry.kind .. ")") or ""),
+        name       = entry.name,
+        mailbox_id = entry.mailbox_id or ("agent:" .. tostring(entry.name)),
+      }
+    end
+  end
+
+  if #agents == 0 then
+    require("auto-finder.log").error("view.todos",
+      "no spawned agents found — start at least one slot via :AutoAgents or panel")
+    return
+  end
+
+  vim.ui.select(agents, {
+    prompt = "Assign '" .. tostring(row.task.title or row.task.id) .. "' to:",
+    format_item = function(item) return item.label end,
+  }, function(choice)
+    if not choice then return end
+    vim.ui.input({
+      prompt = "Notes / direction for " .. choice.name
+        .. " (optional, e.g. 'create ADR', 'open a PR'): ",
+    }, function(notes)
+      if notes == nil then return end  -- user cancelled the input
+      local ok_todo, todo = pcall(require, "auto-core.todo")
+      if not ok_todo then return end
+      local _, err = todo.assign(row.task.id, choice.mailbox_id,
+        notes ~= "" and notes or nil)
+      if err then
+        require("auto-finder.log").error("view.todos",
+          "assign failed: " .. tostring(err))
+        return
+      end
+      require("auto-finder.log").notify(
+        string.format("assigned '%s' to %s%s",
+          row.task.title or row.task.id,
+          choice.name,
+          notes ~= "" and (" — " .. notes) or ""),
+        { component = "view.todos", level = "info", notify = true })
+      if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+        _render(M._bufnr)
+      end
+    end)
+  end)
+end
+
 ---`o` action: toggle inline frontmatter expansion for the task
 ---under the cursor. Idempotent toggle — `o` on an already-expanded
 ---task collapses; `o` on a collapsed task expands. When the cursor
@@ -1718,6 +1799,12 @@ local function _apply_keymaps(bufnr, panel_winid)
   -- no-op.
   set("s", function() _set_status(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: set status (numbered modal: open / completed / deferred / archived)")
+  -- v0.2.43: `A` (capital — distinct from `a` add) assigns the
+  -- task under the cursor to a spawned agent with optional
+  -- direction notes. Routes through auto-core.todo.assign which
+  -- fires the mailbox-notification event.
+  set("A", function() _assign_task(_row_under_cursor(panel_winid)) end,
+    "auto-finder.todos: assign task to a spawned agent (picker + notes prompt)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: toggle inline frontmatter expansion")
   set("R", function() _refresh(bufnr) end,
