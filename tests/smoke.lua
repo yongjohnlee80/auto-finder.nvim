@@ -443,6 +443,63 @@ local missing = store.load()
 ok("load on missing file returns empty table",
   type(missing) == "table" and next(missing) == nil)
 
+-- ─────────────────── 10c. legacy panel-store migration ────────────
+-- Regression for the "resize pin reverts to old width on restart" bug:
+-- the pre-v0.2.0 legacy store carried `panel.user_width`, and setup()
+-- re-seeded it into the namespace on EVERY boot, clobbering the user's
+-- newer pin. The migration now (1) seeds only when the namespace has
+-- no explicit value, and (2) drains the legacy `panel` block so it can
+-- never re-seed.
+print("\n[10c] legacy panel store → namespace migration (guard + drain)")
+do
+  local state_mod = require("auto-finder.state")
+  local cfg = af.state.config
+
+  -- Isolated config dir so we control the legacy file byte-for-byte.
+  local tmp_c = "/tmp/auto-finder-smoke-migrate"
+  vim.fn.delete(tmp_c, "rf")
+  vim.env.XDG_CONFIG_HOME = tmp_c
+  vim.fn.mkdir(store._dir(), "p")
+  local legacy_path = store._path()
+  local function write_legacy(uw)
+    vim.fn.writefile({ vim.json.encode({
+      version = 1,
+      panel   = { user_width = uw, side = "left", last_section = 1 },
+      files   = { hide_dotfiles = false },
+    }) }, legacy_path)
+  end
+
+  -- Case 1: namespace ALREADY pinned → legacy must NOT clobber it.
+  state_mod.set_user_width(70)
+  write_legacy(50)
+  af._migrate_legacy_panel_store(cfg)
+  ok("guard: existing namespace pin (70) not clobbered by legacy (50)",
+    state_mod.get_user_width() == 70,
+    "got " .. tostring(state_mod.get_user_width()))
+  ok("drain: legacy panel block stripped after migration (case 1)",
+    (store.load().panel or {}).user_width == nil,
+    vim.inspect(store.load()))
+
+  -- Case 2: namespace empty → legacy value IS adopted, then drained.
+  state_mod.set_user_width(nil)
+  write_legacy(45)
+  af._migrate_legacy_panel_store(cfg)
+  ok("seed: empty namespace adopts legacy pin (45)",
+    state_mod.get_user_width() == 45,
+    "got " .. tostring(state_mod.get_user_width()))
+  ok("drain: legacy panel block stripped after migration (case 2)",
+    (store.load().panel or {}).user_width == nil)
+
+  -- Case 3: re-running on the drained file is a no-op.
+  af._migrate_legacy_panel_store(cfg)
+  ok("idempotent: second migration leaves the adopted pin (45) intact",
+    state_mod.get_user_width() == 45)
+
+  -- Restore namespace to a clean slate for subsequent tests.
+  state_mod.set_user_width(nil)
+  vim.fn.delete(tmp_c, "rf")
+end
+
 -- ─────────────────────── 10. winbar + completion ──────────────────
 print("\n[10] winbar clickable regions + admin tab-completion")
 -- v0.2.0 step 3: lua/auto-finder/panel/winbar.lua removed; auto-core's

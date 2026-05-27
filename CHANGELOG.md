@@ -2,6 +2,34 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.47] — 2026-05-27 — Fix width pin reverting on restart + `review` list render
+
+**Bug fix — panel width pin reverted to the old value after restart.**
+Resizing the panel (`:AutoFinderResize N`) wrote `user_width` correctly
+to the auto-core state namespace, but the stale pre-v0.2.0 legacy store
+`<config>/.auto-finder/config.json` still carried `panel.user_width` and
+`setup()` re-seeded it into the namespace **unconditionally on every
+boot**, clobbering the newer pin. The "drain on next save" cleanup only
+fired on a file-filter toggle, so it effectively never ran.
+
+- Extracted the migration into `M._migrate_legacy_panel_store(cfg)` with
+  two guarantees: **(1) guarded seed** — legacy `user_width` /
+  `last_section` are adopted only when the namespace has no explicit
+  value yet (genuine first boot after upgrade); otherwise the namespace
+  wins. **(2) drain** — the legacy `panel` block is rewritten away via
+  `store.save()` (keeps `version` + `files`) immediately after being
+  consumed, so it can never re-seed. Self-limiting + idempotent.
+- Native border-drag / `<C-w>` resize remains by-design non-persistent
+  (`enforce_pin` snaps back to the pin); `:AutoFinderResize N` is the
+  persisting path.
+- Smoke section `[10c]` added (guard + drain + idempotent); suite green
+  at 572 passed, 0 failed.
+
+**`review` frontmatter now renders as a list.** Paired with auto-core
+v0.1.48 (which widened the `review` todo field from a single string to a
+`string_list`), `views/todos` renders `review` as a bulleted list
+(`emit_fm_list_*`), with a scalar fallback for not-yet-rewritten files.
+
 ## [v0.2.41] — 2026-05-26 — Collapsible bucket sections + archived year/month grouping
 
 Two related UX changes for users carrying significant task

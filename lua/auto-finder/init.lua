@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.2.46"
+M.version = "0.2.47"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
@@ -31,6 +31,48 @@ M.state = {
   section = nil,
   section_buffers = {},
 }
+
+---One-time migration of the pre-v0.2.0 `panel` block out of the
+---legacy `<config>/.auto-finder/config.json` store and into the
+---auto-core state namespace.
+---
+---Two guarantees, both load-bearing for "resize pin survives restart":
+---  1. **Guarded seed.** The legacy `user_width` / `last_section` are
+---     adopted ONLY when the namespace has no explicit value yet
+---     (genuine first boot after upgrade). On every later boot the
+---     namespace — already loaded from disk by `state.setup()` — wins;
+---     an unconditional re-seed would clobber the user's pin with the
+---     stale legacy value on every restart.
+---  2. **Drain.** After consuming the block we rewrite the legacy file
+---     via `store.save()`, which strips `panel.*` (keeping only
+---     `version` + `files`). This makes the migration genuinely
+---     one-shot instead of waiting for a future file-filter toggle to
+---     trigger the strip. Self-limiting: once drained, `persisted.panel`
+---     is absent and the function no-ops.
+---@param cfg AutoFinderConfig
+function M._migrate_legacy_panel_store(cfg)
+  local state_mod = require("auto-finder.state")
+  local store = require("auto-finder.store")
+  local persisted = store.load()
+  if not persisted.panel then return end
+
+  if state_mod.get_user_width() == nil
+      and type(persisted.panel.user_width) == "number"
+      and persisted.panel.user_width >= cfg.width.min
+      and persisted.panel.user_width <= cfg.width.max then
+    state_mod.set_user_width(persisted.panel.user_width)
+  end
+  -- Validated against the live section registry so a stored index for
+  -- a now-disabled section silently falls back to default_section.
+  if state_mod.get_last_section() == nil
+      and type(persisted.panel.last_section) == "number"
+      and require("auto-finder.views").resolve(persisted.panel.last_section) then
+    state_mod.set_last_section(persisted.panel.last_section)
+  end
+  -- The `side` field was removed from the config — never applied; the
+  -- panel is always left-anchored now. Drain the whole block.
+  store.save(persisted)
+end
 
 ---Initialize the plugin. Idempotent — re-calling re-applies opts.
 ---@param user_opts table?
@@ -183,26 +225,10 @@ function M.setup(user_opts)
   local state_mod = require("auto-finder.state")
   state_mod.setup()
 
-  local persisted = require("auto-finder.store").load()
-  if persisted.panel then
-    if type(persisted.panel.user_width) == "number"
-        and persisted.panel.user_width >= cfg.width.min
-        and persisted.panel.user_width <= cfg.width.max then
-      state_mod.set_user_width(persisted.panel.user_width)
-    end
-    -- Restore the last-active section so the panel reopens on the
-    -- same slot the user was on. Validated against the live section
-    -- registry so a stored index for a now-disabled section silently
-    -- falls back to default_section.
-    if type(persisted.panel.last_section) == "number"
-        and require("auto-finder.views").resolve(persisted.panel.last_section) then
-      state_mod.set_last_section(persisted.panel.last_section)
-    end
-    -- The `side` field was removed from the config. We deliberately do
-    -- NOT apply persisted.panel.side here — the panel is always
-    -- left-anchored now. Old store files containing `side` are left
-    -- intact on disk so a downgrade still finds them.
-  end
+  -- One-time legacy-store → namespace migration (guarded seed + drain).
+  -- MUST run after state_mod.setup() so the namespace is already loaded
+  -- from disk and the guard can see the authoritative persisted pin.
+  M._migrate_legacy_panel_store(cfg)
 
   -- Read namespace values into the live runtime mirrors.
   M.state.user_width = state_mod.get_user_width()
@@ -402,7 +428,12 @@ function M.setup(user_opts)
   --
   -- Naming flip: the legacy schema used `hide_*` (true = hide);
   -- auto-core uses `show_*` (true = show). Negate at the boundary.
+  --
+  -- Reload the legacy store here: `M._migrate_legacy_panel_store` above
+  -- drained the `panel` block but preserves `files.*`, so this read
+  -- still surfaces the file-filter prefs for one-shot hydration.
   do
+    local persisted = require("auto-finder.store").load()
     local ok_core, core = pcall(require, "auto-core")
     if ok_core and core and core.files then
       -- One-shot migration from legacy store, if values present.

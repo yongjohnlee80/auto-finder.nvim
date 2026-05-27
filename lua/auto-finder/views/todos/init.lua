@@ -759,8 +759,14 @@ local function _render(bufnr)
       end
     end
 
-    -- review — single KB-relative path.
-    if type(task.review) == "string" and task.review ~= "" then
+    -- review — list of KB-relative paths. Back-compat: a bare string
+    -- from a not-yet-rewritten file renders as a single scalar entry.
+    if type(task.review) == "table" and #task.review > 0 then
+      emit_fm_list_header(task, "review")
+      for _, rel in ipairs(task.review) do
+        emit_fm_list_item(task, "review[]", rel, { filepath = _resolve_ref_path(rel) })
+      end
+    elseif type(task.review) == "string" and task.review ~= "" then
       emit_fm_scalar(task, "review", task.review,
         { hl = HL.fm_path, filepath = _resolve_ref_path(task.review) })
     end
