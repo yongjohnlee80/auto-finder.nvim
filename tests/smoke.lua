@@ -4821,9 +4821,10 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   end
 
   -- ── subscriptions registered ───────────────────────────────
-  -- v0.2.39 added a third subscription (core.todo.vars:changed).
-  ok("M._subs has 3 captured handles",
-    type(view._subs) == "table" and #view._subs == 3,
+  -- v0.2.39 added core.todo.vars:changed (3rd); v0.2.45 added
+  -- core.todo:changed (4th).
+  ok("M._subs has 4 captured handles",
+    type(view._subs) == "table" and #view._subs == 4,
     "got " .. tostring(view._subs and #view._subs))
 
   -- ── v0.2.36: inline frontmatter expansion (`o`) ─────────────

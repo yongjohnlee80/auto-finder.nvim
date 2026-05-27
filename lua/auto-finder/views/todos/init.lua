@@ -1910,6 +1910,11 @@ local function _ensure_subscriptions()
     ev.subscribe("core.todo:refreshed",      function() _on_event("refresh") end),
     ev.subscribe("core.todo.status:changed", function() _on_event("status")  end),
     ev.subscribe("core.todo.vars:changed",   function() _on_event("vars")    end),
+    -- v0.2.45: re-render on add / update / remove (auto-core
+    -- v0.1.46+ fires core.todo:changed). Closes the stale-panel
+    -- gap when an agent creates a task via `todos.add` — the
+    -- panel now updates without waiting for a manual R / refresh.
+    ev.subscribe("core.todo:changed",        function() _on_event("changed") end),
   }
 end
 
