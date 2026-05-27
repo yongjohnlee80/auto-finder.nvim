@@ -24,7 +24,8 @@
 ---  a     prompt for title, add task, open file
 ---  d     remove task (with confirmation)
 ---  s     cycle status (open → completed → deferred → open)
----  o     toggle inline frontmatter expansion (treeview-style)
+---  o     toggle — task frontmatter expansion, or section/period
+---        collapse when on a header (same as <CR> on a header)
 ---  R     manual refresh (auto-core.todo.refresh + re-render)
 ---  M     migrate `.todo-list/` to a new location (filesystem
 ---        rename + update auto-core's per-workspace dir override)
@@ -1628,14 +1629,39 @@ local function _assign_task(row)
   end)
 end
 
----`o` action: toggle inline frontmatter expansion for the task
----under the cursor. Idempotent toggle — `o` on an already-expanded
----task collapses; `o` on a collapsed task expands. When the cursor
----is on a frontmatter child row, the toggle still targets the
----parent task (so `o` collapses from anywhere inside the expansion).
+---`o` action: context-aware toggle.
+---  • On a task row → toggle inline frontmatter expansion.
+---  • On a bucket/vars header → toggle the section collapse
+---    (v0.2.46: same as `<CR>` on a header, so `o` works as a
+---    universal "open/close the thing under the cursor" key).
+---  • On an archive YYYY-MM period header → toggle that period.
+---When the cursor is on a frontmatter child row, the toggle still
+---targets the parent task (so `o` collapses from anywhere inside
+---the expansion).
 ---@param row table?
 local function _toggle_expand(row)
-  if not row or not row.task or not row.task.id then return end
+  if not row then return end
+
+  -- v0.2.46: section headers fold/unfold like the task tree, so
+  -- `o` and `<CR>` behave identically on a header. Mirrors the
+  -- dispatch in `_open`.
+  if row.kind == "bucket-header" or row.kind == "vars-header" then
+    if row.section then
+      _toggle_collapsed(row.section)
+      if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+        _render(M._bufnr)
+      end
+    end
+    return
+  elseif row.kind == "archive-period" then
+    _toggle_archive_period(row.period)
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+      _render(M._bufnr)
+    end
+    return
+  end
+
+  if not row.task or not row.task.id then return end
   local id = row.task.id
   if M._expanded[id] then
     M._expanded[id] = nil
@@ -1842,7 +1868,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("A", function() _assign_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: assign task to a spawned agent (picker + notes prompt)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: toggle inline frontmatter expansion")
+    "auto-finder.todos: toggle — task frontmatter expansion, or section/period collapse on a header")
   set("R", function() _refresh(bufnr) end,
     "auto-finder.todos: refresh (auto-core.todo.refresh + re-render)")
   set("M", _migrate_dir,

@@ -5409,6 +5409,24 @@ print("\n[39d] views.todos — collapsible sections + archive year/month groups"
   end
   ok("after toggle: Archived shows ▼ (expanded)",
     panel_text():find("▼ Archived %(", 1, false) ~= nil)
+
+  -- v0.2.46: `o` toggles a section header too (not just <CR>).
+  -- Fire `o` twice on the Archived header (collapse → re-expand)
+  -- so net state stays expanded for the asserts below.
+  do
+    local o_cb
+    for _, mp in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+      if mp.lhs == "o" then o_cb = mp.callback; break end
+    end
+    -- cursor is still on the Archived header row
+    if o_cb then o_cb() end
+    ok("o on a section header collapses it (▶ Archived)",
+      panel_text():find("▶ Archived %(", 1, false) ~= nil)
+    if o_cb then o_cb() end
+    ok("o again re-expands the section (▼ Archived)",
+      panel_text():find("▼ Archived %(", 1, false) ~= nil)
+  end
+
   ok("after toggle: 2026-05 sub-period visible (collapsed by default)",
     panel_text():find("▶ 2026%-05 %(1%)", 1, false) ~= nil)
   ok("after toggle: 2026-04 sub-period visible",
