@@ -53,11 +53,13 @@ local HL = {
   empty           = "AutoFinderTodosEmpty",       -- "(no tasks)"
   help            = "AutoFinderTodosHelp",        -- "Try `a` to add ..."
   help_key        = "AutoFinderTodosHelpKey",     -- the `a` / `d` snippets
-  header_open     = "AutoFinderTodosHeaderOpen",
-  header_deferred = "AutoFinderTodosHeaderDeferred",
-  header_completed= "AutoFinderTodosHeaderCompleted",
-  header_archived = "AutoFinderTodosHeaderArchived",
-  header_malformed = "AutoFinderTodosHeaderMalformed", -- v0.2.38: malformed section
+  header_open        = "AutoFinderTodosHeaderOpen",
+  header_in_progress = "AutoFinderTodosHeaderInProgress", -- ADR-0035 Phase 1
+  header_automated   = "AutoFinderTodosHeaderAutomated",  -- ADR-0035 Phase 1
+  header_deferred    = "AutoFinderTodosHeaderDeferred",
+  header_completed   = "AutoFinderTodosHeaderCompleted",
+  header_archived    = "AutoFinderTodosHeaderArchived",
+  header_malformed   = "AutoFinderTodosHeaderMalformed", -- v0.2.38: malformed section
   malformed_filename = "AutoFinderTodosMalformedFilename",
   malformed_err      = "AutoFinderTodosMalformedErr",
   -- v0.2.39: Vars section
@@ -100,10 +102,18 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.empty,             { link = "Comment",        default = true })
   vim.api.nvim_set_hl(0, HL.help,              { link = "Comment",        default = true })
   vim.api.nvim_set_hl(0, HL.help_key,          { link = "Identifier",     default = true })
-  vim.api.nvim_set_hl(0, HL.header_open,       { link = "Title",          default = true })
-  vim.api.nvim_set_hl(0, HL.header_deferred,   { link = "DiagnosticWarn", default = true })
-  vim.api.nvim_set_hl(0, HL.header_completed,  { link = "DiagnosticOk",   default = true })
-  vim.api.nvim_set_hl(0, HL.header_archived,   { link = "NonText",        default = true })
+  vim.api.nvim_set_hl(0, HL.header_open,         { link = "Title",          default = true })
+  -- ADR-0035 Phase 1: in-progress reads as "active work" — `Statement`
+  -- pulls a high-contrast accent color in most themes (kanagawa/tokyonight
+  -- /catppuccin/everforest) without colliding with the OK/Warn/Error
+  -- semantic palette the other buckets use.
+  vim.api.nvim_set_hl(0, HL.header_in_progress,  { link = "Statement",      default = true })
+  -- ADR-0035 Phase 1: automated reads as "special — not normal task" —
+  -- `Special` is the universal "this is structurally different" group.
+  vim.api.nvim_set_hl(0, HL.header_automated,    { link = "Special",        default = true })
+  vim.api.nvim_set_hl(0, HL.header_deferred,     { link = "DiagnosticWarn", default = true })
+  vim.api.nvim_set_hl(0, HL.header_completed,    { link = "DiagnosticOk",   default = true })
+  vim.api.nvim_set_hl(0, HL.header_archived,     { link = "NonText",        default = true })
   vim.api.nvim_set_hl(0, HL.header_malformed,  { link = "DiagnosticError",default = true })
   vim.api.nvim_set_hl(0, HL.malformed_filename,{ link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.malformed_err,     { link = "Comment",        default = true })
@@ -142,16 +152,22 @@ end
 -- Maps the schema status enum to {header label, header highlight}.
 -- v0.2.36 (Phase 2 polish): per-row `[XXXXX]` status prefix was
 -- removed because the section header already groups tasks by status.
+-- ADR-0035 Phase 1: `in-progress` and `automated` join the enum;
+-- panel ordering anchors them at the top per ADR §9.
 local BUCKETS = {
-  open      = { header = "Open",      hl_header = HL.header_open      },
-  deferred  = { header = "Deferred",  hl_header = HL.header_deferred  },
-  completed = { header = "Completed", hl_header = HL.header_completed },
-  archived  = { header = "Archived",  hl_header = HL.header_archived  },
+  open            = { header = "Open",        hl_header = HL.header_open         },
+  ["in-progress"] = { header = "In Progress", hl_header = HL.header_in_progress  },
+  automated       = { header = "Automated",   hl_header = HL.header_automated    },
+  deferred        = { header = "Deferred",    hl_header = HL.header_deferred     },
+  completed       = { header = "Completed",   hl_header = HL.header_completed    },
+  archived        = { header = "Archived",    hl_header = HL.header_archived     },
 }
 
 -- Bucket render order — open at the top so OPEN tasks (the
 -- numbered ones) are immediately visible without scrolling.
-local BUCKET_ORDER = { "open", "deferred", "completed", "archived" }
+-- ADR-0035 §9: `In Progress` directly below `Open`, then `Automated`
+-- (templates), then the existing deferred/completed/archived tail.
+local BUCKET_ORDER = { "open", "in-progress", "automated", "deferred", "completed", "archived" }
 
 -- Per-buffer row metadata: array of one of these shapes, in render order:
 --   { kind="task",              id, status, errors_count, lnum, task }
@@ -201,12 +217,14 @@ M._archive_collapsed = {}
 local DEFAULT_ARCHIVE_PERIOD_COLLAPSED = true
 
 local DEFAULT_COLLAPSED = {
-  open      = false,
-  deferred  = false,
-  completed = false,
-  archived  = true,   -- collapsed by default — see policy note above
-  malformed = false,  -- broken files should be impossible to miss
-  vars      = false,
+  open            = false,
+  ["in-progress"] = false,  -- ADR-0035: active work — keep visible
+  automated       = false,  -- ADR-0035: templates — keep visible (Phase 2 fires them)
+  deferred        = false,
+  completed       = false,
+  archived        = true,   -- collapsed by default — see policy note above
+  malformed       = false,  -- broken files should be impossible to miss
+  vars            = false,
 }
 
 ---Lazy state-namespace handle for the panel's collapse state.
@@ -454,7 +472,12 @@ local LEADER_WIDTH  = 6  -- `  NN. ` for OPEN; `      ` (6 spaces) for others
 ---@return table<string, table[]> grouped  bucket → list of tasks
 ---@return table[] malformed                list of { file_path, bucket, filename, err }
 local function _collect_grouped()
-  local grouped   = { open = {}, deferred = {}, completed = {}, archived = {} }
+  -- ADR-0035 Phase 1: six buckets total. Keep the initializer
+  -- aligned with BUCKETS / BUCKET_ORDER so a future bucket addition
+  -- only requires updating one source of truth — the BUCKETS table —
+  -- and `_collect_grouped` walks it automatically.
+  local grouped   = {}
+  for name, _ in pairs(BUCKETS) do grouped[name] = {} end
   local malformed = {}
   local todo_ok, todo = pcall(require, "auto-core.todo")
   if not todo_ok then return grouped, malformed end
@@ -933,13 +956,24 @@ local function _render(bufnr)
           -- users (and agents calling `todos.list`) know the
           -- 1-based numbers reorder on every refresh and aren't
           -- a stable address. ADR-0031 §5 / Phase 3.2.
+          --
+          -- ADR-0035 Phase 1: the numbering now applies to every
+          -- non-archived bucket (each bucket counts fresh from 1),
+          -- not just OPEN. The hint stays scoped to the Open
+          -- section so we surface it exactly once — once the user
+          -- has read it under Open, the same rule transparently
+          -- applies to the buckets below.
           if name == "open" then
             local hint = "    (index is ephemeral — refer by id for anything persistent)"
             lines[#lines + 1] = hint
             mark(#lines - 1, 0, #hint, HL.empty)  -- reuse the dim Comment link
           end
           for i, t in ipairs(bucket) do
-            emit_task(name, t, name == "open" and i or nil)
+            -- ADR-0035 Phase 1: every non-archived bucket renders a
+            -- 1-based per-bucket index. The `name == "archived"`
+            -- branch above never reaches here (handled separately
+            -- with no idx), so passing `i` unconditionally is safe.
+            emit_task(name, t, i)
             if M._expanded[t.id] then
               emit_frontmatter(t)
             end
@@ -1520,9 +1554,16 @@ end
 -- forced users to think through "what's my current status, what's
 -- the next state in the rotation, do I need to press `s` twice or
 -- thrice to land on `deferred`?" — the modal eliminates that
--- mental tax: the user always sees the four destinations and
--- picks one.
-local STATUS_CHOICES = { "open", "completed", "deferred", "archived" }
+-- mental tax: the user always sees the destinations and picks one.
+--
+-- ADR-0035 Phase 1: `in-progress` joins the cycle (auto-engaged by
+-- `M.assign()` but can be hand-set / hand-cleared too). `automated`
+-- is intentionally EXCLUDED — `automated` is a template status; a
+-- normal task should never cycle into it. Users authoring a
+-- template start from `automated` directly (set via direct YAML
+-- or a future Phase 2/3 dedicated command), and templates aren't
+-- cycled by the panel `s` modal.
+local STATUS_CHOICES = { "open", "in-progress", "completed", "deferred", "archived" }
 
 ---`s` action: open a numbered-options modal listing the four
 ---valid statuses; on selection, route through auto-core.todo.status.
@@ -1866,7 +1907,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   -- statuses instead of cycling. Picking the current status is a
   -- no-op.
   set("s", function() _set_status(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: set status (numbered modal: open / completed / deferred / archived)")
+    "auto-finder.todos: set status (numbered modal: open / in-progress / completed / deferred / archived)")
   -- v0.2.43: `A` (capital — distinct from `a` add) assigns the
   -- task under the cursor to a spawned agent with optional
   -- direction notes. Routes through auto-core.todo.assign which

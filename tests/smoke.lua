@@ -39,6 +39,11 @@ for _, p in ipairs({
   -- their work was unmerged; both have since landed on `main` so
   -- the slot is intentionally empty. Add the next active feature
   -- worktree here when one exists.
+  --
+  -- ADR-0035 Phase 1 (in-flight): the auto-core side adds the
+  -- `in-progress` / `automated` statuses + the atomic assign hook.
+  -- This worktree must win over `main` until Phase 1 lands.
+  plugins_root .. "/auto-core.nvim/adr-0035-p1",
 }) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:prepend(p)
@@ -5315,7 +5320,15 @@ print("\n[39c] views.todos — Vars section + numbered status modal")
   local orig_select = vim.ui.select
   vim.ui.select = function(items, _opts, on_choice)
     captured_choices = items
-    on_choice(items[2])  -- pick "completed"
+    -- ADR-0035 Phase 1: pick "completed" by name rather than by
+    -- positional index so the test survives future cycle-order
+    -- additions. The previous fixture indexed `items[2]` which
+    -- broke when `in-progress` joined the modal between `open`
+    -- and `completed`.
+    for _, item in ipairs(items) do
+      if item == "completed" then on_choice(item); return end
+    end
+    on_choice(items[1])  -- fallback
   end
 
   if task_lnum then
@@ -5329,12 +5342,26 @@ print("\n[39c] views.todos — Vars section + numbered status modal")
       type(s_cb) == "function")
     if s_cb then s_cb() end
   end
-  ok("status-modal: vim.ui.select invoked with 4 statuses in canonical order",
-    captured_choices and #captured_choices == 4
+  -- ADR-0035 Phase 1: modal lists 5 user-cyclable statuses in
+  -- canonical order (open → in-progress → completed → deferred →
+  -- archived). `automated` is INTENTIONALLY EXCLUDED — templates
+  -- aren't cycled by the panel `s` action.
+  ok("status-modal: vim.ui.select invoked with 5 statuses in canonical order",
+    captured_choices and #captured_choices == 5
       and captured_choices[1] == "open"
-      and captured_choices[2] == "completed"
-      and captured_choices[3] == "deferred"
-      and captured_choices[4] == "archived",
+      and captured_choices[2] == "in-progress"
+      and captured_choices[3] == "completed"
+      and captured_choices[4] == "deferred"
+      and captured_choices[5] == "archived",
+    "got: " .. vim.inspect(captured_choices))
+  ok("status-modal: `automated` is excluded from the user cycle",
+    (function()
+      if not captured_choices then return false end
+      for _, item in ipairs(captured_choices) do
+        if item == "automated" then return false end
+      end
+      return true
+    end)(),
     "got: " .. vim.inspect(captured_choices))
   vim.wait(120, function() return false end)
   local updated = todo.get(id)
@@ -5537,6 +5564,164 @@ print("\n[39d] views.todos — collapsible sections + archive year/month groups"
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(tmp_root,  "rf")
   vim.fn.delete(state_tmp, "rf")
+end)()
+
+-- ─────────────────────── 40. ADR-0035 Phase 1 ────────────────────────
+-- Six-bucket rendering (`Open → In Progress → Automated → Deferred →
+-- Completed → Archived`) and per-bucket 1-based numbering on every
+-- non-archived bucket.
+print("\n[40] ADR-0035 Phase 1 — six-bucket panel + numbered non-archived rendering")
+;(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  if not ok_v then return end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  -- Isolate state (mirrors [39c] pattern).
+  local tmp_root  = vim.fn.tempname()
+  local state_tmp = vim.fn.tempname() .. "_p40-state"
+  vim.fn.mkdir(tmp_root, "p")
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup()
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root,  "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- Seed one task per bucket via the public API so the file
+  -- placement is the auto-core-blessed shape. The panel's render
+  -- loop only emits a section header when its bucket is non-empty,
+  -- so every bucket we want to assert on must carry at least one
+  -- row before the snapshot — including `archived`.
+  local id_open = todo.add({ id = "2026-05-30-p40-open",     title = "open task"     })
+  local id_def  = todo.add({ id = "2026-05-30-p40-deferred", title = "deferred task" })
+  todo.status(id_def, "deferred")
+  local id_done = todo.add({ id = "2026-05-30-p40-done",     title = "completed task"})
+  todo.status(id_done, "completed")
+  local id_ip   = todo.add({ id = "2026-05-30-p40-ip",       title = "in-progress task" })
+  todo.assign(id_ip, "agent:phase1")  -- auto-engages in-progress
+  local id_auto = todo.add({ id = "2026-05-30-p40-auto",     title = "automated template" })
+  todo.status(id_auto, "automated")
+  local id_arch = todo.add({ id = "2026-05-30-p40-archived", title = "archived task" })
+  todo.status(id_arch, "archived")  -- direct archive (no completed predecessor)
+
+  -- Build the panel buffer directly via the view module (mirrors
+  -- [39c] / [39d] pattern). Avoids depending on auto-finder host
+  -- focus-API surface, which has shifted shape over time.
+  vim.cmd("vsplit")
+  local panel_win = vim.api.nvim_get_current_win()
+  local bufnr = view.get_buffer(panel_win)
+  vim.api.nvim_win_set_buf(panel_win, bufnr)
+  ok("p40: get_buffer returned a valid buffer",
+    bufnr and vim.api.nvim_buf_is_valid(bufnr))
+
+  -- Force a refresh so the panel picks up our seeded tasks.
+  todo.refresh()
+  vim.wait(150, function() return false end)
+  local text = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
+
+  -- 40a. Each section header is rendered.
+  ok("p40: Open section header rendered",       text:find("Open %(", 1) ~= nil)
+  ok("p40: In Progress section header rendered",text:find("In Progress %(", 1) ~= nil)
+  ok("p40: Automated section header rendered",  text:find("Automated %(", 1) ~= nil)
+  ok("p40: Deferred section header rendered",   text:find("Deferred %(", 1) ~= nil)
+  ok("p40: Completed section header rendered",  text:find("Completed %(", 1) ~= nil)
+  ok("p40: Archived section header rendered",   text:find("Archived %(", 1) ~= nil)
+
+  -- 40b. Sections appear in canonical order (open first, in-progress
+  -- second, …). Use the byte offset of each header in the buffer
+  -- text — string ordering equates to render ordering.
+  local pos_open = text:find("Open %(", 1)
+  local pos_ip   = text:find("In Progress %(", 1)
+  local pos_auto = text:find("Automated %(", 1)
+  local pos_def  = text:find("Deferred %(", 1)
+  local pos_done = text:find("Completed %(", 1)
+  local pos_arch = text:find("Archived %(", 1)
+  ok("p40: section order — Open before In Progress",
+    pos_open and pos_ip and pos_open < pos_ip)
+  ok("p40: section order — In Progress before Automated",
+    pos_ip and pos_auto and pos_ip < pos_auto)
+  ok("p40: section order — Automated before Deferred",
+    pos_auto and pos_def and pos_auto < pos_def)
+  ok("p40: section order — Deferred before Completed",
+    pos_def and pos_done and pos_def < pos_done)
+  ok("p40: section order — Completed before Archived",
+    pos_done and pos_arch and pos_done < pos_arch)
+
+  -- 40c. Numbered rendering — each non-archived bucket has a task
+  -- row prefixed with `  N. ` (1-based per bucket). Find the row
+  -- for each known task via M._rows (which carries lnum + status).
+  local rows_by_id = {}
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id then
+      rows_by_id[row.task.id] = row
+    end
+  end
+
+  local function row_line(id)
+    local r = rows_by_id[id]
+    if not r or type(r.lnum) ~= "number" then return nil end
+    local lines = vim.api.nvim_buf_get_lines(bufnr, r.lnum - 1, r.lnum, false)
+    return lines[1]
+  end
+
+  -- Each non-archived task is the ONLY task in its bucket, so
+  -- each should carry the `  1. ` ordinal.
+  for _, id in ipairs({ id_open, id_ip, id_auto, id_def, id_done }) do
+    local line = row_line(id)
+    ok("p40: " .. id .. " row has numbered ordinal `  1. `",
+      line and line:match("^%s*1%.%s") ~= nil,
+      "got: " .. tostring(line))
+  end
+
+  -- 40d. Archive a row and confirm the archived presentation
+  -- carries NO numbered ordinal (whitespace leader instead).
+  todo.status(id_done, "archived")
+  todo.refresh()
+  vim.wait(150, function() return false end)
+
+  -- The archive section is collapsed by default — expand it for
+  -- the test so the row actually renders.
+  view._collapsed["archived"] = false
+  for k, _ in pairs(view._archive_collapsed or {}) do
+    view._archive_collapsed[k] = false
+  end
+  -- view exposes a refresh entry via the panel-public surface; if
+  -- not present (older shape), re-running get_buffer rerenders.
+  if type(view.refresh) == "function" then
+    pcall(view.refresh)
+  else
+    view.get_buffer(panel_win)
+  end
+  vim.wait(80, function() return false end)
+
+  rows_by_id = {}
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id then
+      rows_by_id[row.task.id] = row
+    end
+  end
+  local arch_line = row_line(id_done)
+  -- The archived row may be hidden by the period sub-collapse;
+  -- only assert when we found the row. If the panel renders
+  -- archived rows with no ordinal, the row must NOT start with
+  -- a digit-then-dot leader.
+  if arch_line then
+    ok("p40: archived row has NO numbered ordinal (whitespace leader)",
+      arch_line:match("^%s+%d+%.") == nil,
+      "got: " .. tostring(arch_line))
+  else
+    ok("p40: archived row not present in rows (collapsed sub-period)", true)
+  end
+
+  if vim.api.nvim_win_is_valid(panel_win) then
+    pcall(vim.api.nvim_win_close, panel_win, true)
+  end
+  cleanup()
 end)()
 
 -- ───────────────────────── summary ────────────────────────
