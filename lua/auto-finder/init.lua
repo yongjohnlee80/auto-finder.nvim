@@ -126,6 +126,17 @@ function M.setup(user_opts)
   -- arbitrary require paths; see `config.lua` for the shape.
   require("auto-finder.views").setup(cfg.sections, cfg.view_modules or cfg.section_modules)
 
+  -- ADR-0035 Phase 3: install the buffer-attach diagnostic
+  -- validator for `.todo-list/automated/*.md` files. The validator
+  -- runs on BufRead/BufNewFile/BufEnter and revalidates on
+  -- BufWritePost + TextChanged* (debounced 200ms). Does NOT require
+  -- the auto-finder panel to be open — it's a buffer-level
+  -- attachment, decoupled from the panel surface (same model as
+  -- the cron engine itself starting on auto-agents load).
+  pcall(function()
+    require("auto-finder.views.todos.automation_diagnostics").install()
+  end)
+
   -- Translate `cfg.files.follow` (per-section convenience flag) into
   -- neo-tree's native `filesystem.follow_current_file = { enabled }`
   -- so the filesystem source reveals the active buffer on BufEnter.

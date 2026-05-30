@@ -5724,6 +5724,226 @@ print("\n[40] ADR-0035 Phase 1 — six-bucket panel + numbered non-archived rend
   cleanup()
 end)()
 
+-- ─────────────────────── 41. ADR-0035 Phase 3 — diagnostics ──────────
+-- Real-time vim.diagnostic validator for `.todo-list/automated/*.md`
+-- buffers + bash-disabled panel row indicator.
+print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indicator")
+;(function()
+  local ok_diag, diag = pcall(require, "auto-finder.views.todos.automation_diagnostics")
+  if not ok_diag then
+    ok("p41: automation_diagnostics module loads", false,
+      "load failed: " .. tostring(diag))
+    return
+  end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+  local ok_a, automation = pcall(require, "auto-core.todo.automation")
+  if not ok_a then return end
+
+  -- Isolate workspace + state.
+  local tmp_root  = vim.fn.tempname()
+  local state_tmp = vim.fn.tempname() .. "_p41-state"
+  vim.fn.mkdir(tmp_root, "p")
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup()
+    diag.uninstall()
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root, "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- 41a. install + uninstall round-trip.
+  diag.install()
+  diag.install()  -- idempotent — second call a no-op
+  ok("p41: install is idempotent (no crash)", true)
+  diag.uninstall()
+  ok("p41: uninstall returns cleanly", true)
+  diag.install()
+
+  -- 41b. Open a malformed automated file → buffer-attach emits a
+  -- diagnostic entry pointing at the offending condition[i] line.
+  --
+  -- Use `vim.cmd("edit")` so the autocmd path fires the same way
+  -- it would in real use.
+  local todo_dir = tmp_root .. "/.todo-list/automated"
+  vim.fn.mkdir(todo_dir, "p")
+  local bad_path = todo_dir .. "/2026-05-30-p41-malformed.md"
+  local bad_src = table.concat({
+    "---",
+    'id: "2026-05-30-p41-malformed"',
+    "version: 1",
+    'status: automated',
+    'title: malformed cron test',
+    "description: test fixture",
+    "created: \"2026-05-30T00:00:00Z\"",
+    "updated: \"2026-05-30T00:00:00Z\"",
+    "status_changed: \"2026-05-30T00:00:00Z\"",
+    "condition:",
+    "  - this is not a cron expression",
+    "execute:",
+    "  - assign agent:lector",
+    "---",
+    "",
+    "body",
+  }, "\n")
+  local f = io.open(bad_path, "w"); f:write(bad_src); f:close()
+
+  vim.cmd("edit " .. vim.fn.fnameescape(bad_path))
+  local bufnr_bad = vim.api.nvim_get_current_buf()
+  -- Synchronous validate runs on attach; no need to wait the
+  -- debounce window for the initial entry.
+  vim.wait(80, function() return false end)
+  local diags = vim.diagnostic.get(bufnr_bad, { namespace = diag.NS })
+  ok("p41: malformed cron emits a diagnostic",
+    #diags >= 1, "got " .. #diags .. " diagnostics")
+  local saw_cron_code = false
+  for _, d in ipairs(diags) do
+    if d.code == "automation-condition-malformed" then saw_cron_code = true end
+  end
+  ok("p41: diagnostic carries code automation-condition-malformed",
+    saw_cron_code)
+  -- The diagnostic's lnum should point at the line WITH the
+  -- offending entry (`  - this is not a cron expression`). That's
+  -- 0-based line index 10 (1-indexed line 11 in the source above).
+  local at_offending_line = false
+  for _, d in ipairs(diags) do
+    if d.code == "automation-condition-malformed" then
+      at_offending_line = d.lnum == 10
+    end
+  end
+  ok("p41: diagnostic points at the offending `- this is not a cron...` line",
+    at_offending_line,
+    "got diags: " .. vim.inspect(diags))
+
+  -- 41c. Fix the buffer in place → debounced revalidate clears
+  -- the diagnostic.
+  vim.api.nvim_buf_set_lines(bufnr_bad, 10, 11, false,
+    { "  - 0 8 * * *" })  -- valid cron now
+  -- Trigger TextChanged manually (the debouncer's autocmd is what
+  -- normally fires; here we just call _validate via the attach
+  -- path by re-attaching, which runs a synchronous validate).
+  diag.attach(bufnr_bad)
+  vim.wait(40, function() return false end)
+  local diags_after = vim.diagnostic.get(bufnr_bad, { namespace = diag.NS })
+  ok("p41: diagnostic clears after fix",
+    #diags_after == 0, "got " .. #diags_after .. " diagnostics")
+
+  -- 41d. Non-automated buffer → no diagnostics, even after
+  -- attach.
+  vim.api.nvim_buf_set_lines(bufnr_bad, 3, 4, false,
+    { 'status: open' })
+  vim.api.nvim_buf_set_lines(bufnr_bad, 9, 12, false, {})  -- drop condition/execute
+  diag.attach(bufnr_bad)
+  vim.wait(40, function() return false end)
+  local diags_nonauto = vim.diagnostic.get(bufnr_bad, { namespace = diag.NS })
+  ok("p41: non-automated status clears all diagnostics",
+    #diags_nonauto == 0)
+
+  -- 41e. Refresh-side wiring (Phase 3 wires automation.validate
+  -- into compute_errors). Create a malformed automated template
+  -- via direct file write, call todo.refresh, assert the task's
+  -- errors[] now carries the validator entry.
+  local refresh_path = todo_dir .. "/2026-05-30-p41-refresh-test.md"
+  local refresh_src = table.concat({
+    "---",
+    'id: "2026-05-30-p41-refresh-test"',
+    "version: 1",
+    'status: automated',
+    'title: refresh-side validation',
+    "description: test fixture",
+    "created: \"2026-05-30T00:00:00Z\"",
+    "updated: \"2026-05-30T00:00:00Z\"",
+    "status_changed: \"2026-05-30T00:00:00Z\"",
+    "condition:",
+    "  - 0 0 * * *",
+    "execute:",
+    "  - do-magic now",  -- no built-in / hook / executor matches
+    "---",
+    "",
+    "body",
+  }, "\n")
+  local g = io.open(refresh_path, "w"); g:write(refresh_src); g:close()
+
+  todo.refresh()
+  local task = todo.get("2026-05-30-p41-refresh-test")
+  ok("p41: refresh-side errors[] populated for malformed automated template",
+    task and type(task.errors) == "table" and #task.errors >= 1,
+    "got errors: " .. vim.inspect(task and task.errors))
+  local has_exec_err = false
+  for _, e in ipairs((task or {}).errors or {}) do
+    if e.code == "automation-execute-malformed" then has_exec_err = true end
+  end
+  ok("p41: refresh-side error carries automation-execute-malformed code",
+    has_exec_err)
+
+  -- 41f. Bash-disabled panel indicator. Create an automated
+  -- template with a bash step, render the panel, assert the
+  -- panel buffer contains the `[bash:disabled]` marker.
+  local bash_tpl = todo.add({
+    id          = "2026-05-30-p41-bash-template",
+    title       = "bash template",
+    description = "uses bash",
+  })
+  todo.status(bash_tpl, "automated")
+  -- Patch condition/execute via direct file mutation (same
+  -- pattern Phase 2 smoke uses).
+  local paths_p41 = require("auto-core.todo.paths")
+  local md_p41    = require("auto-core.todo.md")
+  local bash_tpl_path = paths_p41.task_file_path(
+    paths_p41.resolve_todo_dir(), bash_tpl, "automated", nil)
+  do
+    local h = io.open(bash_tpl_path, "r"); local txt = h:read("*a"); h:close()
+    local dec = md_p41.decode(txt)
+    dec.value.condition = { "0 8 * * *" }
+    dec.value.execute   = { "bash echo hi" }
+    local enc = md_p41.encode(dec.value)
+    local i = io.open(bash_tpl_path .. ".tmp", "w"); i:write(enc); i:close()
+    os.rename(bash_tpl_path .. ".tmp", bash_tpl_path)
+  end
+
+  -- Reset trust state to default (bash_enabled=false).
+  local state = require("auto-core.state")
+  local ns_p41 = state.namespace("auto-core.todo.automation")
+  ns_p41:set("bash_enabled", false)
+  ns_p41:set("bash_first_run_acknowledged", false)
+
+  vim.cmd("vsplit")
+  local panel_win = vim.api.nvim_get_current_win()
+  local view = require("auto-finder.views.todos")
+  local b = view.get_buffer(panel_win)
+  vim.api.nvim_win_set_buf(panel_win, b)
+  todo.refresh()
+  vim.wait(150, function() return false end)
+  local panel_text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("p41: [bash:disabled] indicator visible when bash_enabled=false",
+    panel_text:find("[bash:disabled]", 1, true) ~= nil)
+
+  -- Enable bash → indicator disappears on re-render.
+  automation.acknowledge_first_run()
+  automation.set_trust({ bash_enabled = true })
+  -- view.get_buffer is cached after first render; force a fresh
+  -- render via on_focus (also the path BufEnter takes when the
+  -- user navigates back to the panel).
+  view.on_focus(panel_win, b)
+  vim.wait(80, function() return false end)
+  local panel_text2 = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("p41: [bash:disabled] indicator absent when bash_enabled=true",
+    panel_text2:find("[bash:disabled]", 1, true) == nil)
+
+  -- Reset trust for downstream tests.
+  ns_p41:set("bash_enabled", false)
+
+  if vim.api.nvim_win_is_valid(panel_win) then
+    pcall(vim.api.nvim_win_close, panel_win, true)
+  end
+  pcall(vim.api.nvim_buf_delete, bufnr_bad, { force = true })
+  cleanup()
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

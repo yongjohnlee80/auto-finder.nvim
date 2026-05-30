@@ -56,6 +56,7 @@ local HL = {
   header_open        = "AutoFinderTodosHeaderOpen",
   header_in_progress = "AutoFinderTodosHeaderInProgress", -- ADR-0035 Phase 1
   header_automated   = "AutoFinderTodosHeaderAutomated",  -- ADR-0035 Phase 1
+  bash_disabled      = "AutoFinderTodosBashDisabled",     -- ADR-0035 Phase 3
   header_deferred    = "AutoFinderTodosHeaderDeferred",
   header_completed   = "AutoFinderTodosHeaderCompleted",
   header_archived    = "AutoFinderTodosHeaderArchived",
@@ -114,6 +115,11 @@ local function _apply_default_highlights()
   vim.api.nvim_set_hl(0, HL.header_deferred,     { link = "DiagnosticWarn", default = true })
   vim.api.nvim_set_hl(0, HL.header_completed,    { link = "DiagnosticOk",   default = true })
   vim.api.nvim_set_hl(0, HL.header_archived,     { link = "NonText",        default = true })
+  -- ADR-0035 Phase 3: bash-disabled indicator on automated rows.
+  -- `WarningMsg` reads as "this template won't fully run" without
+  -- being as loud as `DiagnosticError` (an automated template can
+  -- still partially execute its non-bash steps).
+  vim.api.nvim_set_hl(0, HL.bash_disabled,       { link = "WarningMsg",     default = true })
   vim.api.nvim_set_hl(0, HL.header_malformed,  { link = "DiagnosticError",default = true })
   vim.api.nvim_set_hl(0, HL.malformed_filename,{ link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.malformed_err,     { link = "Comment",        default = true })
@@ -624,6 +630,38 @@ local function _render(bufnr)
       parts[#parts + 1] = "  due:" .. task.due
     end
 
+    -- 3.5. ADR-0035 Phase 3: bash-disabled indicator. Automated
+    -- templates whose `execute:` list contains any bash form
+    -- (`bash …` / `bash:<sec> …` / `bash -t=<N> …`) light up an
+    -- inline `[bash:disabled]` marker when the workspace's
+    -- `bash_enabled` trust flag is false. Tells the user at a
+    -- glance "this template's bash steps will refuse to run until
+    -- you `:AutoAgentsTodosAutomationEnable`". Only computed for
+    -- the `automated` bucket — non-template tasks don't have
+    -- execute[] and the check is wasted work.
+    local bash_disabled_indicator = false
+    if bucket_name == "automated" and type(task.execute) == "table" then
+      local has_bash = false
+      for _, step in ipairs(task.execute) do
+        if type(step) == "string" and step:sub(1, 5) == "bash " then
+          has_bash = true; break
+        end
+        if type(step) == "string" and step:sub(1, 5) == "bash:" then
+          has_bash = true; break
+        end
+      end
+      if has_bash then
+        local ok_a, automation = pcall(require, "auto-core.todo.automation")
+        if ok_a and type(automation.trust_state) == "function" then
+          local ts_ok, ts = pcall(automation.trust_state)
+          if ts_ok and type(ts) == "table" and ts.bash_enabled == false then
+            bash_disabled_indicator = true
+            parts[#parts + 1] = "  [bash:disabled]"
+          end
+        end
+      end
+    end
+
     -- 4. The id in parens at the end as a stable reference.
     parts[#parts + 1] = "  (" .. tostring(task.id or "?") .. ")"
 
@@ -661,6 +699,14 @@ local function _render(bufnr)
     if type(task.due) == "string" and task.due ~= "" then
       local len = #parts[i]
       mark(lnum0, cursor, cursor + len, HL.due)
+      cursor = cursor + len
+      i = i + 1
+    end
+    -- ADR-0035 Phase 3: highlight the `[bash:disabled]` indicator
+    -- when it was emitted above.
+    if bash_disabled_indicator then
+      local len = #parts[i]
+      mark(lnum0, cursor, cursor + len, HL.bash_disabled)
       cursor = cursor + len
       i = i + 1
     end
