@@ -1768,10 +1768,23 @@ local function _set_status(row)
     end,
   }, function(choice)
     if not choice or choice == current then return end
-    local ok, err = pcall(todo.status, row.task.id, choice)
-    if not ok then
+    -- ADR-0035 post-ship Lector finding (2026-05-31): `todo.status`
+    -- returns `(task | nil, err_string?)` — pcall wraps that into
+    -- `(success_bool, ret1, ret2)`. The prior `local ok, err =
+    -- pcall(...)` only caught actual Lua errors (ret1 became
+    -- `err`, the actual err_string in ret2 was discarded); when
+    -- `todo.status` returned `(nil, "schema: ...")` the modal
+    -- treated it as success and the panel re-rendered against a
+    -- task that hadn't actually moved.
+    local pcall_ok, task_or_err, err_str = pcall(todo.status, row.task.id, choice)
+    if not pcall_ok then
       require("auto-finder.log").error("view.todos",
-        "status failed: " .. tostring(err))
+        "status crashed: " .. tostring(task_or_err))
+      return
+    end
+    if not task_or_err then
+      require("auto-finder.log").error("view.todos",
+        "status failed: " .. tostring(err_str))
       return
     end
     -- ADR-0035 post-ship UX: on first promotion to automated,
