@@ -364,6 +364,24 @@ per-event-source detection + processing walkthrough,
 auto-core dependency surface, lifecycle, pointers for new
 work — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
+## Automation (`.todo-list/automated/`)
+
+The todos view doubles as a scheduled-task engine: drop a
+`status: automated` template under
+`<workspace>/.todo-list/automated/<id>.md`, declare cron or
+event conditions + an execute plan, and the engine clones it
+into a fresh task on every condition match. Each clone goes
+through the normal `open → in-progress → completed` lifecycle
+so every fire leaves an audit trail.
+
+Author templates with cron + event conditions, plain `bash` /
+`bash -t=<N>` (floating-terminal-routed) / `assign agent:<name>`
+execute primitives, a workspace-scoped bash trust gate, and
+real-time `vim.diagnostic` validation as you type — full
+how-to with examples, the cron grammar, the trust-gate flow,
+debugging recipes, and the manual-fire / inspection commands
+is in **[`AUTOMATION.md`](./AUTOMATION.md)**.
+
 ## Development
 
 - Smoke suite: `nvim --headless -u NONE -l tests/smoke.lua`.
