@@ -5342,25 +5342,28 @@ print("\n[39c] views.todos — Vars section + numbered status modal")
       type(s_cb) == "function")
     if s_cb then s_cb() end
   end
-  -- ADR-0035 Phase 1: modal lists 5 user-cyclable statuses in
-  -- canonical order (open → in-progress → completed → deferred →
-  -- archived). `automated` is INTENTIONALLY EXCLUDED — templates
-  -- aren't cycled by the panel `s` action.
-  ok("status-modal: vim.ui.select invoked with 5 statuses in canonical order",
-    captured_choices and #captured_choices == 5
+  -- ADR-0035 post-ship UX amendment (2026-05-31): the modal lists
+  -- 6 user-cyclable statuses in canonical bucket order. `automated`
+  -- joined the cycle so users can promote a regular task to a
+  -- template via the panel `s` action; auto-finder scaffolds the
+  -- task body + populates `condition:` / `execute:` defaults on
+  -- the promotion (covered separately in section [42]).
+  ok("status-modal: vim.ui.select invoked with 6 statuses in canonical order",
+    captured_choices and #captured_choices == 6
       and captured_choices[1] == "open"
       and captured_choices[2] == "in-progress"
-      and captured_choices[3] == "completed"
-      and captured_choices[4] == "deferred"
-      and captured_choices[5] == "archived",
+      and captured_choices[3] == "automated"
+      and captured_choices[4] == "completed"
+      and captured_choices[5] == "deferred"
+      and captured_choices[6] == "archived",
     "got: " .. vim.inspect(captured_choices))
-  ok("status-modal: `automated` is excluded from the user cycle",
+  ok("status-modal: `automated` is INCLUDED in the user cycle (post-ship UX)",
     (function()
       if not captured_choices then return false end
       for _, item in ipairs(captured_choices) do
-        if item == "automated" then return false end
+        if item == "automated" then return true end
       end
-      return true
+      return false
     end)(),
     "got: " .. vim.inspect(captured_choices))
   vim.wait(120, function() return false end)
@@ -5941,6 +5944,199 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
     pcall(vim.api.nvim_win_close, panel_win, true)
   end
   pcall(vim.api.nvim_buf_delete, bufnr_bad, { force = true })
+  cleanup()
+end)()
+
+-- ─────────────────── 42. ADR-0035 post-ship: scaffold-on-promote ────
+-- When the user selects `automated` from the panel `s` modal on
+-- a non-automated task, auto-finder appends a usage-instructions
+-- section to the body AND populates `condition:` / `execute:`
+-- with working defaults (daily-at-midnight cron + an inline-bash
+-- `bash -t=1 "echo hello world"` step). Idempotent: re-cycling
+-- automated → open → automated doesn't double-append.
+print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` modal")
+;(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  if not ok_v then return end
+  local ok_t, todo = pcall(require, "auto-core.todo")
+  if not ok_t then return end
+
+  -- Isolate workspace + state.
+  local tmp_root  = vim.fn.tempname()
+  local state_tmp = vim.fn.tempname() .. "_p42-state"
+  vim.fn.mkdir(tmp_root, "p")
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(tmp_root)
+  local function cleanup()
+    worktree.set_workspace_root(nil)
+    require("auto-core.state").configure({ persist_dir = nil })
+    vim.fn.delete(tmp_root,  "rf")
+    vim.fn.delete(state_tmp, "rf")
+  end
+
+  -- Build the panel via the view module (mirrors [39c] / [40]
+  -- pattern). The `s` modal callback is exercised through the
+  -- buffer's keymap.
+  --
+  -- IMPORTANT: invalidate view._bufnr / _rows from any prior
+  -- section ([41]'s buffer outlives its cleanup since it was a
+  -- nofile/hide buffer, not :bw'd). get_buffer's cache returns
+  -- the stale buffer otherwise, which still carries [41]'s row
+  -- list, and our task_id lookup fails.
+  view._bufnr = nil
+  view._rows  = nil
+  local id = todo.add({ id = "2026-05-31-p42-promote-target",
+    title = "to promote", description = "starting body" })
+  todo.refresh()
+  vim.cmd("vsplit")
+  local panel_win = vim.api.nvim_get_current_win()
+  local bufnr = view.get_buffer(panel_win)
+  vim.api.nvim_win_set_buf(panel_win, bufnr)
+
+  -- Find the row + cursor onto it.
+  local task_lnum
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id == id then
+      task_lnum = row.lnum; break
+    end
+  end
+  ok("p42: task row found in panel rows", type(task_lnum) == "number")
+  vim.api.nvim_win_set_cursor(panel_win, { task_lnum, 0 })
+
+  -- Stub vim.ui.select to pick "automated" by name (matches the
+  -- [39c] pattern that picks by string match). Don't stub
+  -- vim.cmd — the scaffold helper's `edit` call is fine to run
+  -- in headless (it loads the buffer; we don't care about the
+  -- side effect for this assertion).
+  local captured_choices
+  local orig_select = vim.ui.select
+  vim.ui.select = function(items, _opts, on_choice)
+    captured_choices = items
+    for _, item in ipairs(items) do
+      if item == "automated" then on_choice(item); return end
+    end
+    on_choice(items[1])
+  end
+
+  -- Fire the `s` keymap.
+  local maps = vim.api.nvim_buf_get_keymap(bufnr, "n")
+  local s_cb
+  for _, mp in ipairs(maps) do
+    if mp.lhs == "s" then s_cb = mp.callback; break end
+  end
+  if s_cb then s_cb() end
+  vim.wait(150, function() return false end)
+
+  ok("p42: modal listed 6 statuses including `automated`",
+    captured_choices and #captured_choices == 6
+      and (function()
+        for _, item in ipairs(captured_choices) do
+          if item == "automated" then return true end
+        end
+        return false
+      end)())
+
+  local promoted = todo.get(id)
+  ok("p42: task status flipped to automated",
+    promoted and promoted.status == "automated",
+    "got: " .. tostring(promoted and promoted.status))
+
+  -- Defaults populated.
+  ok("p42: condition defaulted to daily-at-midnight cron",
+    promoted and type(promoted.condition) == "table"
+      and #promoted.condition == 1
+      and promoted.condition[1] == "0 0 * * *",
+    "got: " .. vim.inspect(promoted and promoted.condition))
+  ok("p42: execute defaulted to inline-bash `bash -t=1 \"echo hello world\"`",
+    promoted and type(promoted.execute) == "table"
+      and #promoted.execute == 1
+      and promoted.execute[1] == 'bash -t=1 "echo hello world"',
+    "got: " .. vim.inspect(promoted and promoted.execute))
+
+  -- Body scaffold appended.
+  ok("p42: body carries the `## How to author this template` scaffold",
+    promoted and type(promoted.description) == "string"
+      and promoted.description:find("How to author this template", 1, true) ~= nil)
+  ok("p42: prior body content preserved (not clobbered)",
+    promoted and promoted.description:find("starting body", 1, true) ~= nil)
+
+  -- The scaffold schedules an `edit <file>` via vim.schedule —
+  -- assert the file ends up loaded into a buffer (a vim.wait gives
+  -- the scheduled callback a chance to run). We don't assert it's
+  -- the CURRENT buffer because the panel render also schedules
+  -- focus restoration that may run after the edit.
+  vim.wait(200, function()
+    for _, b in ipairs(vim.api.nvim_list_bufs()) do
+      local name = vim.api.nvim_buf_get_name(b)
+      if name and name:find(id, 1, true) then return true end
+    end
+    return false
+  end)
+  local loaded_into_buffer = false
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    local name = vim.api.nvim_buf_get_name(b)
+    if name and name:find(id, 1, true) then loaded_into_buffer = true; break end
+  end
+  ok("p42: scaffold opened the task file in a buffer (scheduled edit)",
+    loaded_into_buffer)
+
+  -- Validator does NOT flag the empty-list rule (the scaffold
+  -- populated working defaults). It WILL flag
+  -- `automation-bash-t-no-resolver` because the auto-finder smoke
+  -- runs without auto-agents loaded, so the `bash -t=` executor
+  -- isn't registered — that's expected for this context. The
+  -- assertion specifically guards against the empty-condition /
+  -- empty-execute case the scaffold was designed to prevent.
+  local automation = require("auto-core.todo.automation")
+  local errs = automation.validate(promoted)
+  local has_empty_err = false
+  for _, e in ipairs(errs) do
+    if (e.field == "condition" or e.field == "execute")
+        and type(e.message) == "string"
+        and e.message:find("empty or missing", 1, true)
+    then
+      has_empty_err = true; break
+    end
+  end
+  ok("p42: scaffolded template does NOT trigger empty-list validator errors",
+    not has_empty_err,
+    "got: " .. vim.inspect(errs))
+
+  -- Idempotency: cycle automated → open → automated and assert
+  -- the scaffold is NOT re-appended (the marker guard fires).
+  todo.status(id, "open")
+  vim.wait(50, function() return false end)
+  vim.api.nvim_win_set_cursor(panel_win, { task_lnum, 0 })
+  edit_cmd = nil
+  -- Refresh the row reference since the task moved buckets.
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id == id then
+      task_lnum = row.lnum; break
+    end
+  end
+  vim.api.nvim_win_set_cursor(panel_win, { task_lnum, 0 })
+  s_cb = nil
+  local maps2 = vim.api.nvim_buf_get_keymap(bufnr, "n")
+  for _, mp in ipairs(maps2) do
+    if mp.lhs == "s" then s_cb = mp.callback; break end
+  end
+  if s_cb then s_cb() end
+  vim.wait(150, function() return false end)
+
+  local re_promoted = todo.get(id)
+  -- The body should still have exactly ONE scaffold section.
+  local _, count = (re_promoted.description or ""):gsub(
+    "## How to author this template", "")
+  ok("p42: idempotent — re-cycling automated→open→automated doesn't double-append",
+    count == 1, "got " .. count .. " scaffold sections")
+
+  -- Restore + cleanup.
+  vim.ui.select = orig_select
+  if vim.api.nvim_win_is_valid(panel_win) then
+    pcall(vim.api.nvim_win_close, panel_win, true)
+  end
   cleanup()
 end)()
 
