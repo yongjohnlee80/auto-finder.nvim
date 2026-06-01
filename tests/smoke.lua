@@ -5946,9 +5946,11 @@ end)()
 -- When the user selects `automated` from the panel `s` modal on
 -- a non-automated task, auto-finder appends a usage-instructions
 -- section to the body AND populates `condition:` / `execute:`
--- with working defaults (daily-at-midnight cron + an inline-bash
--- `bash -t=1 "echo hello world"` step). Idempotent: re-cycling
--- automated → open → automated doesn't double-append.
+-- with working defaults (daily-at-midnight cron + a CAPTURED
+-- `bash echo hello world` step — 2026-06-01, switched from the
+-- terminal-routed `bash -t=1` default so a fresh template records
+-- an exit_code and auto-completes on success). Idempotent:
+-- re-cycling automated → open → automated doesn't double-append.
 print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` modal")
 ;(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
@@ -6044,10 +6046,10 @@ print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` m
       and #promoted.condition == 1
       and promoted.condition[1] == "0 0 * * *",
     "got: " .. vim.inspect(promoted and promoted.condition))
-  ok("p42: execute defaulted to inline-bash `bash -t=1 \"echo hello world\"`",
+  ok("p42: execute defaulted to captured-bash `bash echo hello world`",
     promoted and type(promoted.execute) == "table"
       and #promoted.execute == 1
-      and promoted.execute[1] == 'bash -t=1 "echo hello world"',
+      and promoted.execute[1] == "bash echo hello world",
     "got: " .. vim.inspect(promoted and promoted.execute))
 
   -- Body scaffold appended.
@@ -6078,12 +6080,12 @@ print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` m
     loaded_into_buffer)
 
   -- Validator does NOT flag the empty-list rule (the scaffold
-  -- populated working defaults). It WILL flag
-  -- `automation-bash-t-no-resolver` because the auto-finder smoke
-  -- runs without auto-agents loaded, so the `bash -t=` executor
-  -- isn't registered — that's expected for this context. The
-  -- assertion specifically guards against the empty-condition /
-  -- empty-execute case the scaffold was designed to prevent.
+  -- populated working defaults). The default is now a plain
+  -- captured `bash echo hello world` step (a built-in primitive),
+  -- so unlike the old `bash -t=1` default it doesn't even need the
+  -- auto-agents executor registered — no `automation-bash-t-no-resolver`
+  -- here. The assertion specifically guards against the
+  -- empty-condition / empty-execute case the scaffold prevents.
   local automation = require("auto-core.todo.automation")
   local errs = automation.validate(promoted)
   local has_empty_err = false

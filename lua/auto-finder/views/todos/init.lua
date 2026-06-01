@@ -1675,8 +1675,12 @@ passes the validator (empty `condition:` / `execute:` would flag
 as `automation-condition-malformed` / `automation-execute-malformed`):
 
   - `condition: ["0 0 * * *"]` — fires at midnight every day.
-  - `execute: ['bash -t=1 "echo hello world"']` — sends an inline
-    echo to floating terminal T1.
+  - `execute: ["bash echo hello world"]` — runs a CAPTURED bash
+    step. The clone records the command's `exit_code:` and is
+    marked `completed` on success (exit 0). Swap in
+    `'bash -t=1 "echo hello world"'` if you'd rather watch it run
+    in floating terminal T1 — terminal-routed steps record no
+    exit code and just complete on successful dispatch.
 
 **Before midnight rolls around**, enable the bash trust gate (it's
 disabled by default so checked-in templates can't auto-run shell
@@ -1702,16 +1706,14 @@ the scaffold auto-finder appended on first `status → automated`.)_
 ---Promote-to-automated scaffold helper. Idempotent; only fires
 ---when the task is currently automated AND the scaffold marker
 ---isn't already in the body. Populates `condition:` / `execute:`
----with working defaults (daily-at-midnight cron + an inline-bash
----`bash -t=1 "echo hello world"` step) ONLY when both fields are
+---with working defaults (daily-at-midnight cron + a captured
+---`bash echo hello world` step) ONLY when both fields are
 ---absent — don't clobber a re-cycled template's existing values.
 ---Returns the file path so the caller can open the file (we don't
 ---auto-edit here: opening the file from inside a scheduled-render
 ---callback context triggers buffer-swap autocmds that can hang
 ---headless smoke, and a buffer switch mid-render is jumpy in
 ---interactive use too).
----@param task_id string
----@return string? file_path  the scaffolded file, or nil on failure
 ---@param task_id string
 ---@param with_body boolean  append the instructional body + signal the caller to open the file (panel `s`-modal path only)
 ---@return string? file_path  the scaffolded file when a write happened, else nil
@@ -1746,7 +1748,12 @@ local function _scaffold_automated_template(task_id, with_body)
   -- — don't clobber a template that already declares either.
   if task.condition == nil and task.execute == nil then
     task.condition = { "0 0 * * *" }
-    task.execute   = { 'bash -t=1 "echo hello world"' }
+    -- (2026-06-01) Default to a CAPTURED bash step (`bash <cmd>`),
+    -- not terminal-routed `bash -t=N`. Captured steps record the
+    -- clone's `exit_code` and complete it on success — the richer
+    -- default for a brand-new template. Switch to `bash -t=N` only
+    -- when you actually want the command in a live floating term.
+    task.execute   = { "bash echo hello world" }
     wrote = true
   end
 
