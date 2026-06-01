@@ -86,6 +86,7 @@ The scheduler picks it up on the next 30-second tick and fires when the cron mat
 | `execute`       | `status == automated`   | yes          | List of step strings. Run sequentially; if a step fails, subsequent steps are skipped. |
 | `origin`        | clones only (auto-set)  | NO           | Managed backref to the template id. The schema rejects `origin:` on automated templates. |
 | `last_fired_at` | auto-set at fire-start  | NO           | Managed. Stamped BEFORE the chain runs so the debounce gate is durable while async work is in flight. |
+| `exit_code`     | clones only (auto-set)  | NO           | Managed. Integer exit status of the fire's captured `bash` / `bash:<sec>` step (`0` on success, real code on failure). Absent when the fire had no captured bash step — terminal-routed `bash -t=N` records none. |
 
 **Top-level `assignee:` on an automated template is REJECTED** with code `automation-template-assignee`. Templates are inert. To assign on every fire, use `execute: - assign agent:<name>` so the assignment runs on each clone instead of the template itself.
 
@@ -146,7 +147,7 @@ Each step is a string matching one of the recognized primitives. Auto-core handl
 |----------------------------|-------------|-------------------------------------------------------------|---------------|
 | `assign agent:<name>`      | auto-core   | `todo.assign(clone, "agent:<name>")` — fires notification   | n/a           |
 | `assign user`              | auto-core   | `todo.assign(clone, "user")` — local-human sentinel; no mailbox | n/a       |
-| `bash <cmd>`               | auto-core   | `vim.system` async, exit code observed                      | 1h default    |
+| `bash <cmd>`               | auto-core   | `vim.system` async, exit code captured into `exit_code`     | 1h default    |
 | `bash:<sec> <cmd>`         | auto-core   | `vim.system` async, custom timeout in seconds               | `<sec>`s      |
 | `assign slot:<N>`          | auto-agents | rewrite hook → resolves slot N → live agent name, then auto-core assign | n/a |
 | `bash -t=<N> <cmd>` (1..4) | auto-agents | sends `<cmd>` to floating terminal T<N> via `auto-agents.term.send` | **none** (terminal owns lifecycle) |
@@ -155,8 +156,8 @@ Steps run **sequentially in declared order**. If any step fails, subsequent step
 
 ### `bash <cmd>` vs `bash -t=<N> <cmd>` — when to pick which
 
-- **`bash <cmd>`** — unattended background scripts. Stdout/stderr captured into the clone's `errors[]` on failure. Success means the command exited 0. The clone auto-completes if the bash step is the last successful step.
-- **`bash -t=<N>`** (N ∈ 1..4) — when the command should run in a **visible terminal window** under your eye. The text is injected + submitted via the floating-terminal stack; no timeout (the terminal session owns execution lifecycle). **Delivery success ≠ command exit** — the clone stays `in-progress` after a `-t=` step succeeds; you close the clone manually once you've observed the terminal output.
+- **`bash <cmd>`** — unattended background scripts. Run via `vim.system`, so the process result is **captured**: the exit code lands in the clone's managed `exit_code:` field (`0` on success, the real code on failure), and stderr is folded into the clone's `errors[]` on a non-zero exit. On success the clone **auto-completes** (unless an earlier step assigned it to an agent — then the agent owns closing it). This is the default for a fresh scaffolded template.
+- **`bash -t=<N>`** (N ∈ 1..4) — when the command should run in a **visible terminal window** under your eye. The text is injected + submitted via the floating-terminal stack; no timeout (the terminal session owns execution lifecycle). Because it runs in a live terminal the engine never reaps, there is **nothing to capture**: a `-t=` step records **no** `exit_code`, and "success" means the text was delivered to the terminal. The clone **completes on successful dispatch** (delivery accepted) — it does *not* wait for, or report, the eventual shell-command exit. If you need the actual command result recorded, use a captured `bash <cmd>` step instead.
 
 ---
 
@@ -231,7 +232,7 @@ The `clone_id` is the canonical `<origin-id>--YYYYMMDDTHHMMSSZ` per-fire id.
 In the auto-finder todos panel:
 
 - The **Automated** section lists every template. Rows for templates with bash steps show a `[bash:disabled]` indicator when `bash_enabled = false` for the workspace.
-- On each fire, the clone shows up in **Open** (briefly) → **In Progress** (during async work) → **Completed** (on success), or stays in **In Progress** with an `⚠ <N>` errors badge on failure.
+- On each fire, the clone shows up in **Open** (briefly) → **In Progress** (bumped at fire-start) → **Completed** (on success), or stays in **In Progress** with an `⚠ <N>` errors badge on failure. A clone that an `assign agent:` / `assign slot:` step handed to an agent stays **In Progress** for that agent to close. Clones whose fire ran a captured `bash` step also carry the recorded `exit_code` in their frontmatter.
 - Per-bucket numbered indexes apply everywhere except `Archived` — so you can say "redo #3 in Completed" the same way you'd say "do #3 in Open".
 
 The clone's body carries an automation trace section:
@@ -292,10 +293,10 @@ Returns `{running, hooks, executors, events_satisfied}`. `running == false` mean
 - **Scheduler tick**: 30 seconds. Sub-minute cron precision isn't supported.
 - **Cron debounce**: same-minute re-fires are suppressed via `last_fired_at` (stamped at fire-START, durable while async work is in flight).
 - **Clone lifecycle**:
-  - Plain `bash <cmd>` exits 0 + is the last step → clone auto-completes.
-  - `bash -t=N` succeeds → clone stays `in-progress` (delivery ≠ exit; close manually).
-  - Any step fails → clone stays at its current bucket with `errors[]` populated.
-  - Agent-assigned clones leave completion to the assignee.
+  - Every fire bumps its clone `open → in-progress` at fire-start (before any step runs).
+  - On success → clone **auto-completes**, UNLESS a step assigned it to an agent (`assign agent:` / `assign slot:`) — then it stays `in-progress` for that agent to close. (`assign user` does not block completion.)
+  - Captured `bash <cmd>` / `bash:<sec>` steps record their `exit_code` (`0` on success, real code on failure). `bash -t=N` records none and completes on successful dispatch.
+  - Any step fails → clone stays `in-progress` with `errors[]` populated (and the failing captured-bash step's `exit_code`).
 - **Audit trail**: when `$AUTO_AGENTS_KB_ROOT` is set, every fire writes a `## [<ts>] automation-fire | origin=... clone=... outcome=...` line to `<kb>/log.md`. No-op when the env isn't set (auto-core stays KB-neutral).
 
 ---
