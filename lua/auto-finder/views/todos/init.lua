@@ -1712,35 +1712,57 @@ the scaffold auto-finder appended on first `status → automated`.)_
 ---interactive use too).
 ---@param task_id string
 ---@return string? file_path  the scaffolded file, or nil on failure
-local function _scaffold_automated_template(task_id)
+---@param task_id string
+---@param with_body boolean  append the instructional body + signal the caller to open the file (panel `s`-modal path only)
+---@return string? file_path  the scaffolded file when a write happened, else nil
+local function _scaffold_automated_template(task_id, with_body)
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return nil end
   local t = todo.get(task_id)
   if not (t and t.status == "automated") then return nil end
 
-  if type(t.description) == "string"
-      and t.description:find(AUTOMATED_SCAFFOLD_MARKER, 1, true)
-  then
-    return nil  -- already scaffolded; idempotent
-  end
-
   local ok_paths, paths_mod = pcall(require, "auto-core.todo.paths")
   local ok_md,    md         = pcall(require, "auto-core.todo.md")
   if not (ok_paths and ok_md) then return nil end
-  local file = paths_mod.task_file_path(paths_mod.resolve_todo_dir(), task_id, "automated", nil)
+  -- BUG FIX (2026-06-01): use auto-core's OVERRIDE-AWARE dir
+  -- resolver, NOT `paths.resolve_todo_dir(nil)`. The latter falls
+  -- back to `<workspace>/.todo-list` and ignores the
+  -- `todo.dir_overrides` state — so on a KB-rooted store (set via
+  -- `todos.set_dir`) it computes a path that doesn't hold the
+  -- file, `io.open` returns nil, and the scaffold silently
+  -- no-ops. `todo.get_todo_dir()` is the same resolver
+  -- todo.get/status/add use internally.
+  local file = paths_mod.task_file_path(todo.get_todo_dir(), task_id, "automated", nil)
 
   local f = io.open(file, "r"); if not f then return nil end
   local txt = f:read("*a"); f:close()
   local dec = md.decode(txt)
   if not (dec and dec.ok and type(dec.value) == "table") then return nil end
 
-  if dec.value.condition == nil and dec.value.execute == nil then
-    dec.value.condition = { "0 0 * * *" }
-    dec.value.execute   = { 'bash -t=1 "echo hello world"' }
-  end
-  dec.value.description = (dec.value.description or "") .. AUTOMATED_SCAFFOLD_BODY
+  local task = dec.value
+  local wrote = false
 
-  local enc_ok, enc = pcall(md.encode, dec.value)
+  -- Populate frontmatter defaults ONLY when BOTH fields are absent
+  -- — don't clobber a template that already declares either.
+  if task.condition == nil and task.execute == nil then
+    task.condition = { "0 0 * * *" }
+    task.execute   = { 'bash -t=1 "echo hello world"' }
+    wrote = true
+  end
+
+  -- Append the instructional body only on the rich (panel-modal)
+  -- path, and only once (marker guard makes re-cycling idempotent).
+  if with_body
+      and not (type(task.description) == "string"
+        and task.description:find(AUTOMATED_SCAFFOLD_MARKER, 1, true))
+  then
+    task.description = (task.description or "") .. AUTOMATED_SCAFFOLD_BODY
+    wrote = true
+  end
+
+  if not wrote then return nil end  -- nothing to do; idempotent no-op
+
+  local enc_ok, enc = pcall(md.encode, task)
   if not enc_ok then return nil end
   local tmp = file .. ".tmp"
   local g = io.open(tmp, "w"); if not g then return nil end
@@ -1748,6 +1770,42 @@ local function _scaffold_automated_template(task_id)
   os.rename(tmp, file)
 
   return file
+end
+
+-- Setup-time subscriber handle (panel-independent — installed from
+-- auto-finder.setup, NOT gated on the panel being open, so the
+-- mailbox-verb path is covered even before the panel is first
+-- focused).
+M._auto_default_sub = nil
+
+---Install the universal promote-to-automated default-populator.
+---Idempotent. Subscribes to `core.todo.status:changed` and, when
+---a task transitions INTO automated, populates the frontmatter
+---defaults (no body — `with_body = false`) via the shared
+---`_scaffold_automated_template`. Covers the panel `s`-modal AND
+---the `todos.status` mailbox-verb paths (both fire the event).
+---Pure direct-YAML edits don't fire the event and aren't covered —
+---a hand-author writing `status: automated` can write
+---condition/execute in the same edit.
+function M.install_automated_default_hook()
+  if M._auto_default_sub then return end
+  local ok_ev, ev = pcall(require, "auto-core.events")
+  if not (ok_ev and ev and type(ev.subscribe) == "function") then return end
+  M._auto_default_sub = ev.subscribe("core.todo.status:changed", function(payload)
+    if type(payload) == "table" and payload.to == "automated" and payload.id then
+      pcall(_scaffold_automated_template, payload.id, false)
+    end
+  end)
+end
+
+---Symmetric teardown for tests / re-arm.
+function M.uninstall_automated_default_hook()
+  if not M._auto_default_sub then return end
+  local ok_ev, ev = pcall(require, "auto-core.events")
+  if ok_ev and ev and type(ev.unsubscribe) == "function" then
+    pcall(ev.unsubscribe, M._auto_default_sub)
+  end
+  M._auto_default_sub = nil
 end
 
 ---`s` action: open a numbered-options modal listing the four
@@ -1803,7 +1861,13 @@ local function _set_status(row)
     -- auto-core's worktree resolver) can recurse into the
     -- in-progress modal and hang in headless smoke.
     if choice == "automated" and current ~= "automated" then
-      local scaffolded_path = _scaffold_automated_template(row.task.id)
+      -- with_body = true: the panel path gets the full treatment
+      -- (defaults + instructional body + file-open). The setup-
+      -- time status:changed subscriber ALSO fires for this same
+      -- promote with with_body = false; the shared helper's
+      -- guards make the double-invocation idempotent (defaults
+      -- populated once, body appended once).
+      local scaffolded_path = _scaffold_automated_template(row.task.id, true)
       if scaffolded_path then
         vim.schedule(function()
           pcall(vim.cmd, "edit " .. vim.fn.fnameescape(scaffolded_path))

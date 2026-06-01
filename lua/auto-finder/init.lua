@@ -137,6 +137,20 @@ function M.setup(user_opts)
     require("auto-finder.views.todos.automation_diagnostics").install()
   end)
 
+  -- ADR-0035 post-ship (2026-06-01): install the universal
+  -- promote-to-automated default-populator. Subscribes to
+  -- core.todo.status:changed (panel-independent — fires for the
+  -- mailbox-verb path too, not just the panel `s` modal). When a
+  -- task transitions INTO automated with no condition/execute, it
+  -- populates working defaults so the new template doesn't trip
+  -- auto-core's "empty condition/execute = malformed" rule. The
+  -- panel `s` modal additionally appends the instructional body +
+  -- opens the file; this subscriber is the frontmatter-only floor
+  -- that every todo.status-driven promote gets.
+  pcall(function()
+    require("auto-finder.views.todos").install_automated_default_hook()
+  end)
+
   -- Translate `cfg.files.follow` (per-section convenience flag) into
   -- neo-tree's native `filesystem.follow_current_file = { enabled }`
   -- so the filesystem source reveals the active buffer on BufEnter.
