@@ -2,6 +2,45 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.56] — 2026-06-13 — ADR-0040 Batches C+D: async git commands, test hygiene
+
+**Batch C — UI-blocking git mutations are now async** *(UX change)*:
+`git_commit`, `git_commit_and_push`, `git_push`, and `git_undo_last_commit`
+in the tree previously ran through blocking `vim.fn.systemlist` — a
+network-bound push froze the entire editor for its duration. They now run
+through a shared `vim.system`-based async runner (`_git_async`, callback
+rescheduled onto the main loop). **User-visible difference:** the editor
+stays responsive during the operation and the result popup arrives on
+completion instead of the UI freezing until it appears. Error handling
+preserved (`fatal:` detection on commit, non-zero exit alerts). Fast local
+ops (`git_add_*`, `git_revert_file`) intentionally stay sync. Smoke `44a`.
+
+**Batch D — test hygiene.**
+- **A11 meta-assertion → informational print.** The "zero failed
+  assertions" `ok()` double-counted every failure (each real/env failure
+  tripped its own assertion AND A11 — macOS reported 5 where 4 were real)
+  while adding no diagnostic signal. The ≥263 count floor stays asserted;
+  the failures line is now `INFO`. macOS env baseline drops 5 → 4.
+- **Orphaned suites wired into a runner.** New `tests/run-all.sh` runs
+  smoke + `dbase_spike.lua` (101 asserts) + `encrypted_vault_smoke.lua`
+  (54 asserts) — both had been wired into nothing and silently bit-rotting.
+  Counts are parsed from output; `AF_KNOWN_ENV_FAILS=N` tolerates the
+  documented env failures (macOS: 4); the known `[41b]` smoke segfault is
+  tolerated-but-reported until its bug task closes.
+- **Marks render no longer re-opens files per mark.** `_read_line` gains a
+  per-render file-line cache (one open per distinct file per paint,
+  line-capped at 20k; unreadable files cached as no-retry within the
+  render). Large global-mark sets pointing at unloaded files previously did
+  one blocking filesystem round-trip per mark. Smoke `44b`.
+
+**Tests.** Smoke `[44]` (+12 assertions; placed before `[41]` with `[43]`
+per the segfault note). Full `run-all`: smoke **617 passed / 4 failed**
+(the 4 known macOS symlink failures; A11 echo gone), dbase_spike 101/0,
+encrypted_vault 54/0 — **772 assertions now executing** where 588 ran
+before this release pair. One flaky one-off observed and triaged
+(`pre-reset: translated payload` — 0/3 recurrence, the known
+translator-timing class; not a regression).
+
 ## [v0.2.55] — 2026-06-13 — ADR-0040 Batches A+B+E: live vim.wo pollution fix, durable writes, docs honesty
 
 *(v0.2.48–v0.2.54 were released without changelog entries — see `git log

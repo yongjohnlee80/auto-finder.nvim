@@ -357,6 +357,30 @@ M.git_add_all = function(state)
   events.fire_event(events.GIT_EVENT)
 end
 
+---ADR-0040 Batch C: run a git mutation OFF the UI thread. The
+---commit/push/reset commands previously went through blocking
+---`vim.fn.systemlist` — a network-bound `git push` froze the whole
+---editor for its duration. `vim.system` runs the subprocess async;
+---the callback is rescheduled onto the main loop so popups/events
+---stay main-thread-safe. Test hook: `M._git_async_count`.
+---@param cmd string[]
+---@param cb fun(ok: boolean, lines: string[])
+local function git_async(cmd, cb)
+  M._git_async_count = (M._git_async_count or 0) + 1
+  vim.system(cmd, { text = true }, function(out)
+    vim.schedule(function()
+      local lines = {}
+      for _, chunk in ipairs({ out.stdout or "", out.stderr or "" }) do
+        for line in chunk:gmatch("[^\n]+") do
+          lines[#lines + 1] = line
+        end
+      end
+      cb(out.code == 0, lines)
+    end)
+  end)
+end
+M._git_async = git_async -- test hook
+
 ---@param state neotree.State
 M.git_commit = function(state, and_push)
   local width = vim.fn.winwidth(0) - 2
@@ -371,24 +395,25 @@ M.git_commit = function(state, and_push)
   }
 
   inputs.input("Commit message: ", "", function(msg)
-    local cmd = { "git", "commit", "-m", msg }
-    local title = "git commit"
-    local result = vim.fn.systemlist(cmd)
-    if vim.v.shell_error ~= 0 or (#result > 0 and vim.startswith(result[1], "fatal:")) then
-      popups.alert("ERROR: git commit", result)
-      return
-    end
-    if and_push then
-      title = "git commit && git push"
-      cmd = { "git", "push" }
-      local result2 = vim.fn.systemlist(cmd)
-      table.insert(result, "")
-      for i = 1, #result2 do
-        table.insert(result, result2[i])
+    git_async({ "git", "commit", "-m", msg }, function(commit_ok, result)
+      if not commit_ok or (#result > 0 and vim.startswith(result[1], "fatal:")) then
+        popups.alert("ERROR: git commit", result)
+        return
       end
-    end
-    events.fire_event(events.GIT_EVENT)
-    popups.alert(title, result)
+      if and_push then
+        git_async({ "git", "push" }, function(_, result2)
+          table.insert(result, "")
+          for i = 1, #result2 do
+            table.insert(result, result2[i])
+          end
+          events.fire_event(events.GIT_EVENT)
+          popups.alert("git commit && git push", result)
+        end)
+        return
+      end
+      events.fire_event(events.GIT_EVENT)
+      popups.alert("git commit", result)
+    end)
   end, popup_options)
 end
 
@@ -399,9 +424,10 @@ end
 M.git_push = function(state)
   inputs.confirm("Are you sure you want to push your changes?", function(yes)
     if yes then
-      local result = vim.fn.systemlist({ "git", "push" })
-      events.fire_event(events.GIT_EVENT)
-      popups.alert("git push", result)
+      git_async({ "git", "push" }, function(_, result)
+        events.fire_event(events.GIT_EVENT)
+        popups.alert("git push", result)
+      end)
     end
   end)
 end
@@ -409,17 +435,17 @@ end
 M.git_undo_last_commit = function(state)
   inputs.confirm("Are you sure you want to undo the last commit? (keeps changes)", function(yes)
     if yes then
-      local cmd = { "git", "reset", "--soft", "HEAD~1" }
-      local result = vim.fn.systemlist(cmd)
-      if vim.v.shell_error ~= 0 then
-        popups.alert("ERROR: git reset --soft HEAD~1", result)
-        return
-      end
-      events.fire_event(events.GIT_EVENT)
-      popups.alert(
-        "git reset --soft HEAD~1",
-        { "Last commit undone successfully", "Changes kept in staging area" }
-      )
+      git_async({ "git", "reset", "--soft", "HEAD~1" }, function(reset_ok, result)
+        if not reset_ok then
+          popups.alert("ERROR: git reset --soft HEAD~1", result)
+          return
+        end
+        events.fire_event(events.GIT_EVENT)
+        popups.alert(
+          "git reset --soft HEAD~1",
+          { "Last commit undone successfully", "Changes kept in staging area" }
+        )
+      end)
     end
   end)
 end

@@ -4455,13 +4455,20 @@ print("\n[37] ADR 0026 Phase 9 — acceptance audit (closeout)")
 -- A11: total assertion count vs. the v0.2.23 baseline (263/1).
 -- Use pass_count + fail_count as a proxy for "total smoke
 -- assertions" — they're the running counters this file maintains.
+--
+-- ADR-0040 Batch D (S2): A11 is INFORMATIONAL now, not an ok()
+-- assertion. The old `fail_count == 0` form double-counted every
+-- failure (each real/env failure tripped its own assertion AND
+-- A11, inflating the reported count — macOS read 5 where 4 were
+-- real) while adding zero diagnostic signal. The count floor stays
+-- asserted; the zero-failures meta-check is a print.
 local total = pass_count + fail_count
 ok("A11: total smoke assertions ≥ 263 (pre-refactor v0.2.23 baseline)",
   total >= 263,
   "total=" .. tostring(total))
-ok("A11: zero failed assertions across the full suite (no regression)",
-  fail_count == 0,
-  "fail_count=" .. tostring(fail_count))
+print(string.format(
+  "  INFO  A11: failures so far: %d (meta-check is informational — "
+  .. "individual assertions are the signal)", fail_count))
 
 -- A5 instrumentation proxy: the metrics:paint emit point is
 -- wired into shared/neotree.lua's schedule_refresh. Subscribe,
@@ -5851,6 +5858,69 @@ print("\n[43] ADR-0040 A+B+E — scope-safe restore, handle close, surfaced fail
     raw43:sub(1, 60))
   local strays43 = vim.fn.glob(ddir43 .. "/.tmp-*", false, true)
   ok("43e: no atomic-write temp strays", #strays43 == 0, vim.inspect(strays43))
+end)()
+
+-- ─────────── [44] ADR-0040 Batches C+D ───────────
+print("\n[44] ADR-0040 C+D — async git runner + marks per-render read cache")
+;(function()
+  -- 44a. Batch C: the async git runner executes off the UI thread
+  -- and delivers (ok, lines) on the main loop.
+  local nt_commands = require("auto-finder.neotree.sources.common.commands")
+  ok("44a: _git_async test hook exported",
+    type(nt_commands._git_async) == "function")
+  local async_before = nt_commands._git_async_count or 0
+  local got_ok, got_lines = nil, nil
+  nt_commands._git_async({ "git", "--version" }, function(g_ok, g_lines)
+    got_ok, got_lines = g_ok, g_lines
+  end)
+  vim.wait(4000, function() return got_ok ~= nil end, 10)
+  ok("44a: async git callback fired with success",
+    got_ok == true, "got_ok=" .. tostring(got_ok))
+  ok("44a: async git captured output lines",
+    type(got_lines) == "table" and #got_lines >= 1
+    and tostring(got_lines[1]):find("git version", 1, true) ~= nil,
+    vim.inspect(got_lines))
+  ok("44a: spawn counter incremented",
+    (nt_commands._git_async_count or 0) == async_before + 1)
+  -- failure shape: bogus subcommand → ok=false, stderr captured
+  local fail_ok = nil
+  nt_commands._git_async({ "git", "definitely-not-a-verb-p44" }, function(g_ok)
+    fail_ok = g_ok
+  end)
+  vim.wait(4000, function() return fail_ok ~= nil end, 10)
+  ok("44a: failing git command reports ok=false", fail_ok == false)
+
+  -- 44b. Batch D: marks _read_line serves repeat reads of the same
+  -- file from the per-render cache (one open per file per render).
+  local marks_view = require("auto-finder.views.marks")
+  ok("44b: read-cache test hooks exported",
+    type(marks_view._read_line) == "function"
+    and type(marks_view._reset_read_cache) == "function")
+  local mdir = vim.fn.tempname() .. "_p44-marks"
+  vim.fn.mkdir(mdir, "p")
+  local mfile = mdir .. "/probe.txt"
+  local mf = assert(io.open(mfile, "w"))
+  mf:write("alpha\nbravo\ncharlie\n")
+  mf:close()
+  marks_view._reset_read_cache()
+  local opens_before = marks_view._read_cache_opens or 0
+  ok("44b: line 1 read correctly", marks_view._read_line(mfile, 1) == "alpha")
+  ok("44b: line 3 read correctly", marks_view._read_line(mfile, 3) == "charlie")
+  ok("44b: two reads of the same file = ONE open",
+    (marks_view._read_cache_opens or 0) == opens_before + 1,
+    "opens=" .. tostring(marks_view._read_cache_opens))
+  marks_view._reset_read_cache()
+  ok("44b: after reset the next read re-opens",
+    marks_view._read_line(mfile, 2) == "bravo"
+    and (marks_view._read_cache_opens or 0) == opens_before + 2)
+  -- unreadable path: cached as false, no retry within the render
+  local ghost = mdir .. "/missing.txt"
+  local g_opens = marks_view._read_cache_opens or 0
+  ok("44b: unreadable file yields empty string",
+    marks_view._read_line(ghost, 1) == "")
+  ok("44b: unreadable result cached (no second open attempt)",
+    marks_view._read_line(ghost, 2) == ""
+    and (marks_view._read_cache_opens or 0) == g_opens + 1)
 end)()
 
 -- NOTE (ADR-0040): section [43] is placed BEFORE [41] on purpose.

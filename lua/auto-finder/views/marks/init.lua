@@ -147,9 +147,24 @@ local function _parent_and_basename(path)
   return parent .. "/" .. basename
 end
 
+-- ADR-0040 Batch D (P2): per-render file-line cache. Rendering a
+-- global mark whose buffer isn't loaded used to open + stream the
+-- file PER MARK — large mark sets pointing at unloaded files
+-- blocked the UI with one filesystem round-trip each. Now the
+-- first access in a render reads the file once (line-capped) and
+-- every other mark in the same file is served from the table. The
+-- cache is reset at the top of `_render`, so staleness is bounded
+-- by a single paint. `false` = unreadable, don't retry this render.
+local READ_CACHE_MAX_LINES = 20000
+local _file_line_cache = {}
+local function _reset_read_cache()
+  _file_line_cache = {}
+end
+
 -- Read line `line` (1-indexed) from `bufnr_or_file`. Prefers the
 -- bufnr when valid (avoids touching the filesystem); falls back to
--- streaming the file for global marks whose buffer isn't loaded.
+-- the per-render file cache for global marks whose buffer isn't
+-- loaded.
 local function _read_line(bufnr_or_file, line)
   if type(line) ~= "number" or line < 1 then return "" end
   if type(bufnr_or_file) == "number"
@@ -158,15 +173,26 @@ local function _read_line(bufnr_or_file, line)
     return ls[1] or ""
   end
   if type(bufnr_or_file) == "string" and bufnr_or_file ~= "" then
-    local f = io.open(bufnr_or_file, "r")
-    if not f then return "" end
-    local n, txt = 1, ""
-    for l in f:lines() do
-      if n == line then txt = l; break end
-      n = n + 1
+    local cached = _file_line_cache[bufnr_or_file]
+    if cached == false then return "" end
+    if not cached then
+      M._read_cache_opens = (M._read_cache_opens or 0) + 1 -- test hook
+      local f = io.open(bufnr_or_file, "r")
+      if not f then
+        _file_line_cache[bufnr_or_file] = false
+        return ""
+      end
+      cached = {}
+      local n = 1
+      for l in f:lines() do
+        cached[n] = l
+        n = n + 1
+        if n > READ_CACHE_MAX_LINES then break end
+      end
+      f:close()
+      _file_line_cache[bufnr_or_file] = cached
     end
-    f:close()
-    return txt
+    return cached[line] or ""
   end
   return ""
 end
@@ -247,6 +273,7 @@ end
 
 local function _render(bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  _reset_read_cache()  -- ADR-0040 D: staleness bounded by one paint
   _ensure_highlights()
   local globals, locals = _collect()
   local lines, lookup = {}, {}
@@ -603,5 +630,9 @@ end
 function M._reset_for_tests()
   M.on_close()
 end
+
+-- ADR-0040 Batch D test hooks (per-render read cache).
+M._read_line = _read_line
+M._reset_read_cache = _reset_read_cache
 
 return M
