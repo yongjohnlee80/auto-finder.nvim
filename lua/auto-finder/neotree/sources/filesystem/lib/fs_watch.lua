@@ -54,6 +54,19 @@ function Watcher:stop()
   end
 end
 
+---Stop AND close the underlying libuv handle. ADR-0040 C2: `stop()`
+---alone leaves the uv_fs_event handle open — every
+---teardown/restart cycle leaked a handle (libuv keeps closed-over
+---resources alive until close). Call this when the watcher is being
+---discarded, not merely paused.
+function Watcher:destroy()
+  self:stop()
+  if self.handle and not self.handle:is_closing() then
+    self.handle:close()
+  end
+  self.handle = nil
+end
+
 ---Watch a directory for changes to it's children. Not recursive.
 ---@param path string The directory to watch.
 ---@param callback fun(err: string?, fname: string) The callback to call when a change is detected.
@@ -111,7 +124,9 @@ end
 ---sources.
 M.stop_watching = function()
   for _, h in pairs(watchers) do
-    h:stop()
+    -- ADR-0040 C2: the table is wiped below, so these watchers are
+    -- gone for good — close the uv handles, don't just stop them.
+    h:destroy()
   end
   watchers = {}
 end

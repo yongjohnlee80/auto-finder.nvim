@@ -79,9 +79,11 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 - **Neovim ≥ 0.10**
 - [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
-  `^0.1.0` — foundation library (panel singleton, state
+  `^0.1.58` — foundation library (panel singleton, state
   namespace, event bus, `fs.watch`, `git.watch`, `git.status`,
-  centralized log). **Hard dep.**
+  centralized log, and the `fs.atomic` write primitive that
+  auto-finder's dbase/todos persistence delegates to as of
+  v0.2.55 / ADR-0040 Batch B). **Hard dep.**
 - [`MunifTanjim/nui.nvim`](https://github.com/MunifTanjim/nui.nvim),
   [`nvim-lua/plenary.nvim`](https://github.com/nvim-lua/plenary.nvim),
   [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)

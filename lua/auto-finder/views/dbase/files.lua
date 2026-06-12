@@ -432,10 +432,14 @@ function M._write_json(path, value)
     end
     encoded = json
   end
-  local f, ferr = io.open(path, "w+")
-  if not f then return false, "could not open for write: " .. (ferr or path) end
-  f:write(encoded)
-  f:close()
+  -- ADR-0040 Batch B: connection configs are durable user state — a
+  -- crash between open and close previously truncated the file.
+  -- Delegate to the canonical temp→fsync→rename primitive
+  -- (auto-core >= 0.1.58).
+  local wok, werr = require("auto-core.fs.atomic").write(path, encoded, { mkdir = true })
+  if not wok then
+    return false, "could not write " .. path .. ": " .. tostring(werr)
+  end
   return true, nil
 end
 

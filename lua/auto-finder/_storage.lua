@@ -78,7 +78,16 @@ function M.write_json(filename, data)
     :gsub('%]}', '\n  ]\n}')
     :gsub('{"', '{\n  "')
   local path = M.dir_path() .. "/" .. filename
-  pcall(vim.fn.writefile, vim.split(encoded, "\n"), path)
+  -- ADR-0040 C5: the write was a swallowed pcall — disk-full /
+  -- permission failures left the user's prefs unsaved with zero
+  -- signal. Capture + log (writefile also returns -1 on failure
+  -- without raising, so check the return value too).
+  local wok, ret = pcall(vim.fn.writefile, vim.split(encoded, "\n"), path)
+  if not wok or ret == -1 then
+    require("auto-finder.log").warn("_storage",
+      "failed to persist " .. path
+      .. (wok and " (writefile returned -1)" or (": " .. tostring(ret))))
+  end
 end
 
 return M

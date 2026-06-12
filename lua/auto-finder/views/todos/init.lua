@@ -1583,12 +1583,23 @@ local function _remove_task(row)
     "Remove task '" .. (row.task.title or row.task.id or "?") .. "'?",
     "&Yes\n&No", 2)
   if choice ~= 1 then return end
-  local ok, err = pcall(todo.remove, row.task.id)
-  if not ok or not err then
-    if err and err ~= true then
-      require("auto-finder.log").error("view.todos",
-        "remove failed: " .. tostring(err))
-    end
+  -- ADR-0040 C3: `todo.remove` returns `(ok_bool, err_string?)` —
+  -- pcall wraps that into `(success, ret1, ret2)`. The prior
+  -- `local ok, err = pcall(...)` put the API's ok-flag into `err`,
+  -- so an API failure (`false, "reason"`) hit the `err ~= true`
+  -- guard as `false` and vanished silently — the reason string in
+  -- ret2 was never even captured. Same class as the v0.2.51
+  -- status-modal blocker; this mirrors `_set_status`'s shape.
+  local pcall_ok, removed, err_str = pcall(todo.remove, row.task.id)
+  if not pcall_ok then
+    require("auto-finder.log").error("view.todos",
+      "remove crashed: " .. tostring(removed))
+    return
+  end
+  if not removed then
+    require("auto-finder.log").error("view.todos",
+      "remove failed: " .. tostring(err_str))
+    return
   end
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     _render(M._bufnr)
@@ -1771,10 +1782,15 @@ local function _scaffold_automated_template(task_id, with_body)
 
   local enc_ok, enc = pcall(md.encode, task)
   if not enc_ok then return nil end
-  local tmp = file .. ".tmp"
-  local g = io.open(tmp, "w"); if not g then return nil end
-  g:write(enc); g:close()
-  os.rename(tmp, file)
+  -- ADR-0040 C5/B: delegate to the canonical atomic primitive (the
+  -- hand-rolled temp+rename here skipped fsync AND ignored the
+  -- os.rename return — a failed rename silently reported success).
+  local wok, werr = require("auto-core.fs.atomic").write(file, enc)
+  if not wok then
+    require("auto-finder.log").error("view.todos",
+      "scaffold write failed for " .. file .. ": " .. tostring(werr))
+    return nil
+  end
 
   return file
 end
@@ -2349,5 +2365,6 @@ M._NS           = NS
 M._BUCKETS      = BUCKETS
 M._BUCKET_ORDER = BUCKET_ORDER
 M._row_under_cursor = _row_under_cursor
+M._remove_task  = _remove_task  -- ADR-0040 C3 smoke hook
 
 return M

@@ -37,6 +37,12 @@ function Backend:save(state)
   -- return true
 end
 
+---Release any OS resources the backend holds (uv handles, fds).
+---ADR-0040 C2: called by clipboard.setup() before a backend is
+---replaced so re-setup doesn't orphan live fs_event handles.
+---Default: no-op (stateless backends).
+function Backend:teardown() end
+
 ---Given a state, determines what clipboard (if any), should be loaded.
 ---Automatically called when other states' clipboards saved successfully.
 ---Returns nil if the clipboard should not be changed.

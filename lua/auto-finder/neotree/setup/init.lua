@@ -110,7 +110,26 @@ end
 
 local prior_window_options = {}
 
---- Store the current window options so we can restore them when we close the tree.
+--- The window options the tree mutates and must save/restore.
+--- ADR-0040 C1: the previous implementation read AND wrote these via
+--- the unindexed `vim.wo.x` form, which on nvim 0.10+ uses `:set`
+--- semantics — every restore overwrote the GLOBAL default for all
+--- nine options (the family's vim.wo scope bug class). It also
+--- ignored the `winid` parameter entirely. Both are fixed by going
+--- through nvim_get/set_option_value with explicit win + local scope.
+local SAVED_WINDOW_OPTIONS = {
+  "cursorline",
+  "cursorlineopt",
+  "foldcolumn",
+  "wrap",
+  "list",
+  "spell",
+  "number",
+  "relativenumber",
+  "winhighlight",
+}
+
+--- Store the window options so we can restore them when we close the tree.
 --- @param winid number | nil The window id to store the options for, defaults to current window
 local store_local_window_settings = function(winid)
   winid = winid or vim.api.nvim_get_current_win()
@@ -120,41 +139,37 @@ local store_local_window_settings = function(winid)
     -- don't store our own window settings
     return
   end
-  prior_window_options[tostring(winid)] = {
-    cursorline = vim.wo.cursorline,
-    cursorlineopt = vim.wo.cursorlineopt,
-    foldcolumn = vim.wo.foldcolumn,
-    wrap = vim.wo.wrap,
-    list = vim.wo.list,
-    spell = vim.wo.spell,
-    number = vim.wo.number,
-    relativenumber = vim.wo.relativenumber,
-    winhighlight = vim.wo.winhighlight,
-  }
+  local saved = {}
+  for _, name in ipairs(SAVED_WINDOW_OPTIONS) do
+    saved[name] = vim.api.nvim_get_option_value(name, { win = winid })
+  end
+  prior_window_options[tostring(winid)] = saved
 end
 
---- Restore the window options for the current window
+--- Restore the window options for the window.
 --- @param winid number | nil The window id to restore the options for, defaults to current window
 local restore_local_window_settings = function(winid)
   winid = winid or vim.api.nvim_get_current_win()
   -- return local window settings to their prior values
   local wo = prior_window_options[tostring(winid)]
   if wo then
-    vim.wo.cursorline = wo.cursorline
-    vim.wo.cursorlineopt = wo.cursorlineopt
-    vim.wo.foldcolumn = wo.foldcolumn
-    vim.wo.wrap = wo.wrap
-    vim.wo.list = wo.list
-    vim.wo.spell = wo.spell
-    vim.wo.number = wo.number
-    vim.wo.relativenumber = wo.relativenumber
-    vim.wo.winhighlight = wo.winhighlight
+    for _, name in ipairs(SAVED_WINDOW_OPTIONS) do
+      if wo[name] ~= nil then
+        vim.api.nvim_set_option_value(name, wo[name], { win = winid, scope = "local" })
+      end
+    end
     log.debug("Window settings restored")
-    vim.api.nvim_win_set_var(0, "neo_tree_settings_applied", false)
+    vim.api.nvim_win_set_var(winid, "neo_tree_settings_applied", false)
   else
     log.debug("No window settings to restore")
   end
 end
+
+-- ADR-0040 C1 test hooks: the store/restore pair is exercised
+-- directly by the smoke suite (fail-before/pass-after for the
+-- unindexed-vim.wo global-pollution fix). Internal — not API.
+M._store_local_window_settings = store_local_window_settings
+M._restore_local_window_settings = restore_local_window_settings
 
 local last_buffer_enter_filetype = nil
 M.buffer_enter_event = function()
@@ -457,7 +472,10 @@ M.merge_config = function(user_config)
   -- Setup autocmd for neo-tree BufLeave, to restore window settings.
   -- This is set to happen just before leaving the window.
   -- The patterns used should ensure it only runs in neo-tree windows where position = "current"
-  local augroup = vim.api.nvim_create_augroup("NeoTree_BufLeave", { clear = true })
+  -- ADR-0040 E/S4: renamed from the upstream "NeoTree_BufLeave" —
+  -- augroup names are internal (unlike the NeoTree* highlight groups,
+  -- which stay: user colorschemes target those).
+  local augroup = vim.api.nvim_create_augroup("AutoFinder_BufLeave", { clear = true })
   local bufleave = function(data)
     -- Vim patterns in autocmds are not quite precise enough
     -- so we are doing a second stage filter in lua

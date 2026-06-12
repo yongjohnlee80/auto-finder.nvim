@@ -59,6 +59,11 @@ M.setup = function(opts)
     log.error("invalid clipboard sync method, disabling sync")
     selected_backend = builtins.none()
   end
+  -- ADR-0040 C2: release the outgoing backend's uv handles before
+  -- replacing it — re-running setup() previously orphaned them.
+  if M.current_backend and type(M.current_backend.teardown) == "function" then
+    pcall(M.current_backend.teardown, M.current_backend)
+  end
   M.current_backend = log.assert(selected_backend:new())
   events.subscribe({
     event = events.STATE_CREATED,

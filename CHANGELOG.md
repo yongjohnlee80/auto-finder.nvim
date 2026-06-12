@@ -2,6 +2,91 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.55] — 2026-06-13 — ADR-0040 Batches A+B+E: live vim.wo pollution fix, durable writes, docs honesty
+
+*(v0.2.48–v0.2.54 were released without changelog entries — see `git log
+v0.2.47..v0.2.54` for those.)*
+
+Implements the recommended batches from ADR-0040 (the auto-finder instalment
+of the family enhancement programme; full audit in the KB at
+`shared/adrs/0040-auto-finder-structural-and-performance-enhancements.md`;
+lector-reviewed, approved with 4 amendments — all applied). Public API,
+highlight groups, and event topics unchanged.
+
+**Batch A — correctness.**
+- **C1 (HIGH, live bug):** the fork's window-settings save/restore
+  (`neotree/setup/init.lua`) read AND wrote all nine saved options
+  (`cursorline cursorlineopt foldcolumn wrap list spell number
+  relativenumber winhighlight`) via the *unindexed* `vim.wo.x` form — on
+  nvim 0.10+ that is `:set`-like, so **every restore overwrote the user's
+  GLOBAL defaults** for those options (trigger: any non-tree buffer entering
+  a window that previously hosted the tree). Now `nvim_get/set_option_value`
+  with `{win, scope="local"}`; the previously-ignored `winid` parameter is
+  honored (incl. the `neo_tree_settings_applied` var write, lector
+  amendment 1). Fail-before/pass-after smoke `43a` proves global defaults
+  survive a restore.
+- **C2:** libuv `fs_event` handles were stopped but never closed —
+  `fs_watch` gains `Watcher:destroy()` (stop+close) used by
+  `stop_watching()`; the universal clipboard backend gains `teardown()`
+  (closes all watch handles) called by `clipboard.setup()` before backend
+  replacement, plus a `Backend:teardown()` no-op default. Bonus: the
+  clipboard `save()` success path never closed its file handle — one
+  leaked fd per save.
+- **C3:** todos `_remove_task` used the broken `local ok, err = pcall(...)`
+  shape — an API-level `todo.remove` failure (`false, "reason"`) was
+  silently swallowed and the panel re-rendered as if removal succeeded
+  (same class as the v0.2.51 status-modal blocker). Now the 3-value unpack
+  mirroring `_set_status`; failures log + early-return. Smoke `43c`.
+- **C4:** neo-tree-backed sections' `on_close` never disposed their
+  `_live_subs`/`_core_subs` subscription sets — callbacks stayed registered
+  on the bus while the section was closed. Now disposed symmetrically;
+  reopen re-arms via the existing `view_subs:replace` path
+  (lector-verified reopen-safe; close/reopen smoke `43d` per amendment 2).
+- **C5:** `_storage.lua`'s pref write was a swallowed `pcall(writefile)`
+  (disk-full/permission failures invisible — now checked incl. the `-1`
+  return, logged); the todos scaffold's hand-rolled temp+rename ignored the
+  `os.rename` result — now delegates to `auto-core.fs.atomic.write`.
+
+**Batch B — durable writes (min auto-core floor → `0.1.58`).**
+- dbase connection-config JSON (`views/dbase/files.lua _write_json`) now
+  writes via `auto-core.fs.atomic.write` (temp→fsync→rename) — a crash
+  mid-write previously truncated the file. Smoke `43e`.
+- Deliberate non-conversion: the universal clipboard sync file keeps
+  in-place writes ON PURPOSE — peer nvim instances watch that exact path
+  with `uv_fs_event`, and an atomic rename swaps the inode and kills their
+  watchers (documented at the call site).
+- README dependency floor updated: `auto-core.nvim ^0.1.58` (lector
+  amendment 3).
+
+**Batch E — docs honesty + severance cosmetics.**
+- ADR-0026 amended (revision 5, in the KB): the stale-dir cache is
+  **metrics/event-sink only** — rendering still does full `fs_scan` walks
+  (render-from-cache is future work), and the A5 "paint ≤ 50% baseline"
+  criterion was never measured (no baseline captured). Per the
+  auto-family-plugin-refactors convention rules 5/6.
+- `NeoTree_BufLeave` augroup renamed to `AutoFinder_BufLeave` (internal).
+  The `NeoTree*` **highlight groups deliberately stay** — they are
+  user-facing surface (colorscheme overrides target them); renaming is a
+  breaking change reserved for a major bump.
+
+**Test-infrastructure discovery (tracked bug, not fixed here):** the smoke
+suite has been **silently truncating at section [41b]** on macOS/nvim
+0.12.2 — `vim.cmd("edit")` of the malformed-template fixture segfaults
+headless nvim with the suite's accumulated attach state (pre-existing on
+main; bare-edit repro survives). Everything after [41b] — including all of
+[42] — never ran, and the printed totals hid it: the "588/5 baseline" was a
+truncated run. New section `[43]` is therefore placed BEFORE `[41]` with a
+warning comment; tracked as todo task
+`2026-06-13-bug-auto-finder-smoke-suite-silently-truncates-at-41b-…`.
+
+**Tests.** Smoke `[43]` (+17 assertions): fail-before/pass-after scope-safe
+restore (locals restored, globals survive), watcher destroy closes handles,
+remove-failure surfaces to the log, close/reopen subscription lifecycle,
+atomic dbase write with no temp strays. Suite: **605 passed / 5 failed** —
+the same 4 pre-existing macOS `/tmp` symlink failures + the `A11`
+meta-assert echo (A11 fix is Batch D, deferred), with the pre-existing
+[41b] truncation unchanged.
+
 ## [v0.2.47] — 2026-05-27 — Fix width pin reverting on restart + `review` list render
 
 **Bug fix — panel width pin reverted to the old value after restart.**

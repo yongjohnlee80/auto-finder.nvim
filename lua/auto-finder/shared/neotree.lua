@@ -598,7 +598,21 @@ function M.build_section(opts)
   ---`attempt to index local 'tree' (a nil value)`. Also clears
   ---the owned-bufs table so future generations can't accidentally
   ---collide.
+  ---
+  ---ADR-0040 C4: also dispose the live-refresh / core-refresh
+  ---subscription sets. The replace-on-rearm pattern masked the
+  ---asymmetry (reopen re-armed cleanly), but while a section was
+  ---closed its callbacks stayed registered on the bus, firing
+  ---against a deleted buffer and surviving only on downstream
+  ---guards. on_focus's _arm_* calls re-subscribe on reopen
+  ---(lector-verified: dispose-on-close is reopen-safe).
   function section.on_close()
+    if section._live_subs then
+      pcall(function() section._live_subs:dispose_all() end)
+    end
+    if section._core_subs then
+      pcall(function() section._core_subs:dispose_all() end)
+    end
     if section._bufnr and vim.api.nvim_buf_is_valid(section._bufnr) then
       pcall(vim.api.nvim_buf_delete, section._bufnr, { force = true })
     end

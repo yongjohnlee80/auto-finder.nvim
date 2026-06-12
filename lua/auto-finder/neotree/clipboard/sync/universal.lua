@@ -99,6 +99,19 @@ function UniversalBackend:_watch_file(filename)
   return handle
 end
 
+---Close every live fs_event handle. ADR-0040 C2: without this,
+---replacing the backend (clipboard.setup re-run) orphaned the
+---handles — stopped-but-never-closed uv resources.
+function UniversalBackend:teardown()
+  for filename, handle in pairs(self.handles or {}) do
+    if handle and not handle:is_closing() then
+      handle:stop()
+      handle:close()
+    end
+    self.handles[filename] = nil
+  end
+end
+
 do
   local cache = {}
   function UniversalBackend:get_filename(state)
@@ -142,6 +155,12 @@ function UniversalBackend:save(state)
   self.saving = true
   local _, write_err = file:write(str)
   file:flush()
+  -- ADR-0040 C2 bonus: the success path previously never closed this
+  -- handle — one leaked fd per clipboard save until GC got around to
+  -- it. (The write stays in-place rather than atomic-rename ON
+  -- PURPOSE: peer nvim instances watch this exact path with
+  -- uv_fs_event; a rename swaps the inode and kills their watchers.)
+  file:close()
   if write_err then
     self.saving = false
     return false, "Couldn't write to " .. filename .. ": " .. write_err

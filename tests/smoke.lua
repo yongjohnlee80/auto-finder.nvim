@@ -5725,6 +5725,141 @@ end)()
 -- ─────────────────────── 41. ADR-0035 Phase 3 — diagnostics ──────────
 -- Real-time vim.diagnostic validator for `.todo-list/automated/*.md`
 -- buffers + bash-disabled panel row indicator.
+-- ─────────── [43] ADR-0040 Batches A+B+E ───────────
+print("\n[43] ADR-0040 A+B+E — scope-safe restore, handle close, surfaced failures, atomic dbase writes")
+-- IIFE: the main chunk is near Lua's 200-active-locals limit; a
+-- function scope gets its own budget (same pattern as [42]).
+;(function()
+  -- 43a. C1 (fail-before/pass-after): the tree's window-settings
+  -- restore must be scope-local. Pre-fix, restore wrote 9 options
+  -- via unindexed `vim.wo.x` (:set-like) — the GLOBAL defaults
+  -- changed on every restore. This is the family's vim.wo bug class.
+  local nt_setup = require("auto-finder.neotree.setup")
+  if type(nt_setup._store_local_window_settings) == "function" then
+    local function gopt(name)
+      return vim.api.nvim_get_option_value(name, { scope = "global" })
+    end
+    local g_before = {
+      number = gopt("number"), wrap = gopt("wrap"),
+      foldcolumn = gopt("foldcolumn"), spell = gopt("spell"),
+      cursorline = gopt("cursorline"),
+    }
+    local buf43 = vim.api.nvim_create_buf(false, true)
+    local win43 = vim.api.nvim_open_win(buf43, false,
+      { relative = "editor", row = 1, col = 1, width = 20, height = 5 })
+    -- give the window distinctive LOCAL values (opposite of defaults)
+    vim.api.nvim_set_option_value("number", not g_before.number,
+      { win = win43, scope = "local" })
+    vim.api.nvim_set_option_value("wrap", not g_before.wrap,
+      { win = win43, scope = "local" })
+    nt_setup._store_local_window_settings(win43)
+    -- simulate the tree flipping the options...
+    vim.api.nvim_set_option_value("number", g_before.number,
+      { win = win43, scope = "local" })
+    vim.api.nvim_set_option_value("wrap", g_before.wrap,
+      { win = win43, scope = "local" })
+    -- ...and the restore putting them back
+    nt_setup._restore_local_window_settings(win43)
+    ok("43a: restore puts the window's LOCAL number back",
+      vim.api.nvim_get_option_value("number", { win = win43 }) == (not g_before.number))
+    ok("43a: restore puts the window's LOCAL wrap back",
+      vim.api.nvim_get_option_value("wrap", { win = win43 }) == (not g_before.wrap))
+    for name, before in pairs(g_before) do
+      ok("43a: GLOBAL '" .. name .. "' default survived the restore",
+        gopt(name) == before,
+        string.format("before=%s after=%s", tostring(before), tostring(gopt(name))))
+    end
+    pcall(vim.api.nvim_win_close, win43, true)
+  else
+    ok("43a: store/restore test hooks exported", false, "hooks missing")
+  end
+
+  -- 43b. C2: discarding watchers closes the libuv handles (stop()
+  -- alone leaked them pre-fix).
+  local fs_watch = require("auto-finder.neotree.sources.filesystem.lib.fs_watch")
+  local dir43 = vim.fn.tempname() .. "_p43-watch"
+  vim.fn.mkdir(dir43, "p")
+  local w43 = fs_watch.watch_folder(dir43, function() end)
+  ok("43b: watcher created with a live handle",
+    w43 ~= nil and w43.handle ~= nil)
+  fs_watch.updated_watched()
+  ok("43b: watcher active after updated_watched", w43 and w43.active == true)
+  fs_watch.stop_watching()
+  ok("43b: stop_watching destroys the uv handle (closed + cleared)",
+    w43 and w43.handle == nil and w43.active == false,
+    "handle=" .. tostring(w43 and w43.handle))
+
+  -- 43c. C3 (fail-before/pass-after): a todo.remove API failure must
+  -- surface. Pre-fix, `local ok, err = pcall(todo.remove, id)` put
+  -- the API's ok-flag into `err`, and the failure (plus its reason)
+  -- vanished silently.
+  local todos_view = require("auto-finder.views.todos")
+  local af_log = require("auto-finder.log")
+  local todo_mod = require("auto-core.todo")
+  local orig_remove = todo_mod.remove
+  local orig_log_error = af_log.error
+  local orig_confirm = vim.fn.confirm
+  local captured43 = nil
+  todo_mod.remove = function() return false, "boom (p43 stub)" end
+  af_log.error = function(_, msg) captured43 = tostring(msg) end
+  vim.fn.confirm = function() return 1 end
+  pcall(todos_view._remove_task, { task = { id = "p43-x", title = "p43" } })
+  todo_mod.remove = orig_remove
+  af_log.error = orig_log_error
+  vim.fn.confirm = orig_confirm
+  ok("43c: API-level remove failure is surfaced to the log",
+    type(captured43) == "string" and captured43:find("boom (p43 stub)", 1, true) ~= nil,
+    "captured=" .. tostring(captured43))
+
+  -- 43d. C4 (lector amendment 2): on_close disposes the live-refresh
+  -- subscription sets; re-arm after close works (reopen-safe).
+  local sections = require("auto-finder.sections")
+  local files_idx = sections._by_name and sections._by_name["files"]
+  local files_sec = files_idx and sections._by_number[files_idx]
+  if files_sec and files_sec._live_subs and files_sec._arm_live_refresh_subs then
+    files_sec._arm_live_refresh_subs()
+    ok("43d: live subs armed (count ≥ 1)", files_sec._live_subs:count() >= 1,
+      "count=" .. tostring(files_sec._live_subs:count()))
+    files_sec.on_close()
+    ok("43d: on_close disposes every live-refresh subscription",
+      files_sec._live_subs:count() == 0,
+      "count=" .. tostring(files_sec._live_subs:count()))
+    files_sec._arm_live_refresh_subs()
+    ok("43d: re-arm after close succeeds (reopen-safe)",
+      files_sec._live_subs:count() >= 1,
+      "count=" .. tostring(files_sec._live_subs:count()))
+    files_sec.on_close()
+  else
+    ok("43d: files section with _live_subs available", false,
+      "files_sec=" .. tostring(files_sec ~= nil))
+  end
+
+  -- 43e. Batch B: dbase connection-config writes are atomic — valid
+  -- JSON on disk, no temp strays.
+  local dbase_files = require("auto-finder.views.dbase.files")
+  local ddir43 = vim.fn.tempname() .. "_p43-dbase"
+  local dpath43 = ddir43 .. "/persistence.json"
+  local w_ok, w_err = dbase_files._write_json(dpath43,
+    { { name = "p43", url = "sqlite://tmp" } })
+  ok("43e: _write_json succeeds (mkdir included)", w_ok == true, tostring(w_err))
+  local fh43 = io.open(dpath43, "r")
+  local raw43 = fh43 and fh43:read("*a") or ""
+  if fh43 then fh43:close() end
+  local dec_ok43, dec43 = pcall(vim.fn.json_decode, raw43)
+  ok("43e: persisted JSON round-trips",
+    dec_ok43 and type(dec43) == "table" and dec43[1] and dec43[1].name == "p43",
+    raw43:sub(1, 60))
+  local strays43 = vim.fn.glob(ddir43 .. "/.tmp-*", false, true)
+  ok("43e: no atomic-write temp strays", #strays43 == 0, vim.inspect(strays43))
+end)()
+
+-- NOTE (ADR-0040): section [43] is placed BEFORE [41] on purpose.
+-- [41b]'s `vim.cmd("edit")` of the malformed-template fixture
+-- SEGFAULTS headless nvim 0.12.2 on macOS with the suite's
+-- accumulated attach state (pre-existing on main; bare-edit repro
+-- survives) — everything after it, [41b]+[42], silently never ran,
+-- and the printed totals hid the truncation. Tracked as a bug task;
+-- do not add new sections after [41] until it is fixed.
 print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indicator")
 ;(function()
   local ok_diag, diag = pcall(require, "auto-finder.views.todos.automation_diagnostics")
@@ -6149,6 +6284,7 @@ print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` m
   end
   cleanup()
 end)()
+
 
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
