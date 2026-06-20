@@ -2,6 +2,34 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.57] — 2026-06-20 — ADR-0033: dbase remount regression smoke (A16b)
+
+Test-only patch. Adds the per-consumer integration smoke that ADR-0033
+pairs with auto-core's `[21b]` unit (needs `auto-core@v0.1.25+` for the
+`section_did_remount` hook; the production fix shipped in `v0.2.27`).
+
+- **`tests/smoke.lua` `A16b`** drives the dbase deferred mount to its
+  dbee-unavailable terminal branch — forced by monkey-patching
+  `views/dbase/setup.lua::ensure_setup` → false, so the smoke stays
+  headless/CI-portable without nvim-dbee on the rtp — and asserts the
+  registry repair after `_notify_remount`:
+  - `_registry._bufs[dbase]` reseats to the real post-swap buffer (the
+    load-bearing production-bug assertion);
+  - buffer-local `0` (section-hop) and `q` (close) on the real buffer;
+  - the winbar shows dbase as the active section;
+  - the real buffer is the static dbee-unavailable placeholder, distinct
+    from the `shared.loading` cold placeholder;
+  - re-mount idempotency: the fallback placeholder is `bufhidden=wipe`, so
+    leaving and re-entering dbase is a fresh cold mount — the hook
+    re-repairs the cache + keymaps consistently each time.
+
+  The harness restores the prior section registry in an `xpcall` finally
+  arm so the rest of the suite is unaffected. 10 new assertions; suite
+  655 passed / 0 failed.
+
+Also catches up `M.version`, the informational constant — it had lagged at
+`0.2.47` since v0.2.48 (releases v0.2.48–v0.2.56 bumped only the git tag).
+
 ## [v0.2.56] — 2026-06-13 — ADR-0040 Batches C+D: async git commands, test hygiene
 
 **Batch C — UI-blocking git mutations are now async** *(UX change)*:

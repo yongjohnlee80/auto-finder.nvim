@@ -4247,6 +4247,130 @@ do
   dbase._owned_bufs = {}
 end
 
+-- ── A16b: dbase post-_notify_remount registry repair (ADR-0033) ──
+-- A16 above stops at get_buffer (the cold placeholder). This block
+-- drives the *deferred* mount to its dbee-unavailable terminal
+-- branch (views/dbase/init.lua:259-267) and asserts the three
+-- side-effects `_notify_remount` → `Registry:section_did_remount`
+-- repairs — the regression the production bug shipped without
+-- ([[2026-05-20-auto-finder-dbase-winbar-remount-bug-analysis]]):
+--   1. `_bufs[dbase]` reseats to the real (post-swap) buffer,
+--   2. buffer-local `0..9` / `q` rebind on that real buffer,
+--   3. the winbar refreshes with dbase active.
+-- dbee is NOT on the headless rtp, so we force the unavailable
+-- branch by monkey-patching `setup_mod.ensure_setup` → false. The
+-- registry side-effects are identical whether `real_bufnr` is the
+-- dbee drawer or the fallback placeholder (ADR-0033 §"Headless
+-- feasibility"). Restore is non-negotiable: the patch + the
+-- temporary section-list mutation are undone in an xpcall finally
+-- arm so the rest of the suite is unaffected (ADR-0033 §Decision.2).
+do
+  local dbase     = require("auto-finder.views.dbase")
+  local setup_mod = require("auto-finder.views.dbase.setup")
+
+  -- Window-independent buffer-local keymap probe (the panel may not
+  -- be the current window, and section_did_remount does not swap it).
+  local function has_map(bufnr, lhs, needle)
+    if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return false end
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+      if m.lhs == lhs and (m.desc or ""):find(needle, 1, true) then
+        return true
+      end
+    end
+    return false
+  end
+
+  -- Snapshot the LIVE section-name list. The field _rebuild_section_
+  -- registry consumes is `state.config.sections` (a string[]), not
+  -- `state.sections`; mirror the restore pattern used elsewhere in
+  -- this suite (vim.deepcopy + rebuild on the finally arm).
+  local prior = vim.deepcopy(af.state.config.sections)
+  setup_mod.reset()
+  local orig_ensure = setup_mod.ensure_setup
+
+  local function run()
+    -- Force the dbee-unavailable terminal branch of on_focus.
+    setup_mod.ensure_setup = function()
+      return false, "dbee unavailable: forced for smoke"
+    end
+
+    -- Rebuild with dbase enabled, focusing config (0) so the next
+    -- focus(dbase) is a genuine cold mount.
+    af._rebuild_section_registry({ "config", "files", "dbase" },
+      { focus_after = 0 })
+
+    local dbnum = dbase.number
+    ok("A16b: dbase registered with a section number",
+      type(dbnum) == "number", "number=" .. tostring(dbnum))
+
+    -- Cold-focus dbase; let the vim.schedule-deferred mount run.
+    af.focus(dbnum)
+    vim.wait(200)
+
+    -- (1) THE load-bearing production-bug assertion: the registry
+    --     cache points at the real (post-remount) buffer, not the
+    --     discarded shared.loading placeholder.
+    ok("A16b: _bufs[dbase] reseated to dbase._bufnr after remount",
+      af._registry._bufs[dbnum] == dbase._bufnr,
+      "_bufs=" .. tostring(af._registry._bufs[dbnum]) ..
+      " _bufnr=" .. tostring(dbase._bufnr))
+
+    -- (2) buffer-local section-hop (0) + close (q) on the real buffer
+    ok("A16b: 0 (section-hop) bound buffer-locally on the real buffer",
+      has_map(dbase._bufnr, "0", "focus section"))
+    ok("A16b: q (close panel) bound buffer-locally on the real buffer",
+      has_map(dbase._bufnr, "q", "close panel"))
+
+    -- (3) winbar refreshed with dbase as the active marker
+    local wb = vim.api.nvim_get_option_value("winbar",
+      { win = af.state.panel_winid })
+    ok("A16b: winbar shows dbase as the active section after remount",
+      type(wb) == "string"
+        and wb:find("AutoCoreSectionActive#%[" .. dbnum) ~= nil,
+      "winbar=" .. tostring(wb))
+
+    -- (4) the real buffer is the static dbee-unavailable placeholder,
+    --     distinct from the shared.loading cold placeholder.
+    ok("A16b: real buffer is the dbee-unavailable placeholder",
+      vim.api.nvim_buf_is_valid(dbase._bufnr)
+        and vim.api.nvim_buf_get_name(dbase._bufnr)
+          :find("auto-finder-dbase://placeholder", 1, true) ~= nil)
+    ok("A16b: real buffer is NOT a shared.loading cold placeholder",
+      loading.is_placeholder(dbase._bufnr) == false)
+
+    -- (5) re-mount idempotency. The dbee-unavailable fallback
+    --     placeholder is `bufhidden=wipe` (views/dbase/init.lua), so
+    --     focusing away wipes it and the return is a fresh cold mount
+    --     — a SECOND trip through _notify_remount. (The real dbee
+    --     drawer is persistent, so it would warm-reuse; this branch
+    --     can only exercise the fallback.) Assert the hook stays
+    --     idempotent: the registry cache + keymaps are re-repaired and
+    --     stay consistent with the view's current buffer.
+    af.focus(0)
+    vim.wait(50)
+    af.focus(dbnum)
+    vim.wait(200)
+    ok("A16b: re-focus keeps _bufs[dbase] consistent with dbase._bufnr",
+      af._registry._bufs[dbnum] == dbase._bufnr
+        and vim.api.nvim_buf_is_valid(dbase._bufnr),
+      "_bufs=" .. tostring(af._registry._bufs[dbnum]) ..
+      " _bufnr=" .. tostring(dbase._bufnr))
+    ok("A16b: re-focus keeps q bound on the current dbase buffer",
+      has_map(dbase._bufnr, "q", "close panel"))
+  end
+
+  -- Finally arm — runs even if an assertion path errors, so the
+  -- patch + section list never leak into later smoke sections.
+  local okrun, errrun = xpcall(run, debug.traceback)
+  setup_mod.ensure_setup = orig_ensure
+  setup_mod.reset()
+  dbase._bufnr = nil
+  dbase._owned_bufs = {}
+  af._rebuild_section_registry(prior, { focus_after = 0 })
+  ok("A16b: harness restored prior section registry without error",
+    okrun, okrun and "" or tostring(errrun))
+end
+
 -- Restore: focus the config view so later sections don't fight
 -- the panel state created here.
 local config_idx = require("auto-finder.sections")._by_name["config"]
