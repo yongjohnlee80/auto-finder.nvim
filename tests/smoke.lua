@@ -6480,6 +6480,154 @@ print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` m
 end)()
 
 
+-- ───────────────────────── [45] ADR-0044 — worktree:switched must not displace a non-panel editor window ─────────────────────────
+--
+-- Regression PIN for ADR-0044 (which closed ADR-0027 "Deferred Fix C"
+-- as obviated). The "auto-finder claimed the editor space" displacement
+-- on a worktree switch was fixed at the auto-finder layer in v0.2.3:
+-- `shared/neotree.lua reanchor_to_cwd` mutates the filesystem state's
+-- `path` and calls `manager.refresh(source)` instead of re-mounting via
+-- `position="current"` (which used to grab whatever window had focus).
+-- This pins that invariant: a `worktree:switched` re-anchors the panel's
+-- tree to the new cwd WITHOUT replacing the buffer in a non-panel editor
+-- split.
+--
+-- Per the ADR-0044 follow-up todo + lector's review: this is a
+-- GREEN-on-current-code regression pin, NOT a bug-fix pair — the fix
+-- shipped in v0.2.3, so there is no failing-pre-fix half (rule #4's
+-- bug-fix-pair clause does not apply). Rule #11: assert the EFFECT
+-- (reanchor RAN → fs state.path moved to the new cwd; the editor split's
+-- buffer is unchanged), not merely that the event was published.
+print("\n[45] ADR-0044 — worktree:switched does not displace a non-panel editor window")
+;(function()
+  local _af   = require("auto-finder")
+  local _core = require("auto-core")
+  local _mgr  = require("auto-finder.neotree.sources.manager")
+
+  -- Fresh setup → clean panel carrying the default sections. setup()
+  -- configures; open(true) actually mounts + focuses the panel window.
+  _af.setup({ sections = { "config", "files", "repos" } })
+  _af.open(true)
+  local panel = _af.state.panel_winid
+  ok("p45: panel open + carries w:auto_finder_panel",
+    panel ~= nil and vim.api.nvim_win_is_valid(panel)
+      and vim.w[panel].auto_finder_panel == 1)
+
+  -- Focus files (filesystem). on_focus arms the worktree:switched →
+  -- reanchor_to_cwd subscription (files is built live_refresh=true) and
+  -- mounts synchronously, so section._bufnr is valid → the reanchor guard
+  -- passes.
+  local _files_idx = require("auto-finder.sections")._by_name["files"]
+  _af.focus(_files_idx)
+
+  -- The panel-bound filesystem state (winid == panel) is what reanchor
+  -- retargets; reanchor only touches filesystem states that carry a winid.
+  local function _fs_state()
+    for _, s in ipairs(_mgr._get_all_states()) do
+      if s.name == "filesystem" and s.winid == panel then return s end
+    end
+    return nil
+  end
+  local _old_cwd = vim.fn.getcwd()
+  vim.wait(500, function()
+    local s = _fs_state(); return s ~= nil and s.path == _old_cwd
+  end, 20)
+  local _fs = _fs_state()
+  ok("p45: filesystem state bound to panel, anchored at cwd (pre-switch)",
+    _fs ~= nil and _fs.winid == panel and _fs.path == _old_cwd,
+    string.format("fs=%s winid=%s path=%s cwd=%s",
+      tostring(_fs ~= nil), tostring(_fs and _fs.winid),
+      tostring(_fs and _fs.path), _old_cwd))
+
+  -- Load a real file into a FOCUSED non-panel editor window — the exact
+  -- scenario the old position="current" re-anchor displaced (it would mount
+  -- the tree into the focused editor window). After af.open the panel (a left
+  -- vsplit) coexists with a normal editor window; reuse it (or make one) and
+  -- leave focus there before the switch fires. Probe lives under cwd/tests so
+  -- it's a real path the filesystem source can resolve.
+  local _probe = _old_cwd .. "/tests/_adr0044_reanchor_probe.txt"
+  do local fh = io.open(_probe, "w"); if fh then fh:write("adr-0044 probe"); fh:close() end end
+  local function _nonpanel_win()
+    for _, w in ipairs(vim.api.nvim_list_wins()) do
+      if w ~= panel and vim.w[w].auto_finder_panel ~= 1 then return w end
+    end
+    return nil
+  end
+  local _editor_win = _nonpanel_win()
+  if not _editor_win then
+    vim.cmd("botright vsplit")
+    _editor_win = vim.api.nvim_get_current_win()
+  end
+  vim.api.nvim_set_current_win(_editor_win)
+  vim.cmd("edit " .. vim.fn.fnameescape(_probe))
+  local _editor_buf = vim.api.nvim_win_get_buf(_editor_win)
+  ok("p45: probe loaded into a focused non-panel editor window",
+    _editor_win ~= panel
+      and vim.w[_editor_win].auto_finder_panel ~= 1
+      and vim.api.nvim_buf_get_name(_editor_buf) == _probe,
+    string.format("editor_win=%s panel=%s name=%s",
+      tostring(_editor_win), tostring(panel),
+      vim.api.nvim_buf_get_name(_editor_buf)))
+
+  -- Simulate the worktree switch faithfully: worktree.switch_to :cd's to the
+  -- new root, THEN fires `worktree:switched`. reanchor_to_cwd reads
+  -- vim.fn.getcwd(), so we cd first. Use a fresh real tempdir as the new
+  -- root (re-read getcwd() for the canonical form — handles macOS /private).
+  local _new_cwd = vim.fn.tempname()
+  vim.fn.mkdir(_new_cwd, "p")
+  vim.cmd("cd " .. vim.fn.fnameescape(_new_cwd))
+  _new_cwd = vim.fn.getcwd()
+  _core.events.publish("worktree:switched", { from = _old_cwd, to = _new_cwd })
+
+  -- reanchor is vim.schedule'd off the subscription; wait until the fs
+  -- state.path re-anchors to the new cwd (the observable EFFECT).
+  vim.wait(500, function()
+    local s = _fs_state(); return s ~= nil and s.path == _new_cwd
+  end, 20)
+  local _fs_after = _fs_state()
+
+  -- A — EFFECT: reanchor actually ran (state.path moved to the new cwd).
+  -- Proves the worktree:switched handler fired; guards against a vacuous
+  -- "nothing happened, so nothing was displaced" pass.
+  ok("p45: filesystem state re-anchored to new cwd after worktree:switched",
+    _fs_after ~= nil and _fs_after.path == _new_cwd,
+    string.format("path=%s new_cwd=%s",
+      tostring(_fs_after and _fs_after.path), _new_cwd))
+
+  -- B — SAFETY (the regression this pins): the non-panel editor split STILL
+  -- holds the probe buffer; the tree did NOT mount into it.
+  ok("p45: editor split NOT displaced (still holds the probe buffer)",
+    vim.api.nvim_win_is_valid(_editor_win)
+      and vim.api.nvim_win_get_buf(_editor_win) == _editor_buf,
+    string.format("valid=%s buf=%s expected=%s",
+      tostring(vim.api.nvim_win_is_valid(_editor_win)),
+      tostring(vim.api.nvim_win_is_valid(_editor_win)
+        and vim.api.nvim_win_get_buf(_editor_win)), tostring(_editor_buf)))
+
+  -- C — RENDER TARGET: the panel remained the tree's home (an auto-finder
+  -- buffer) — the refresh stayed in the panel.
+  local _panel_buf = (panel and vim.api.nvim_win_is_valid(panel)
+    and vim.api.nvim_win_get_buf(panel)) or -1
+  ok("p45: panel still holds an auto-finder tree buffer",
+    _panel_buf ~= -1 and vim.bo[_panel_buf].filetype:match("^auto.finder") ~= nil,
+    "panel ft=" .. (_panel_buf ~= -1 and vim.bo[_panel_buf].filetype or "<invalid>"))
+
+  -- Cleanup: restore cwd, close the editor split, delete probe buffer + file,
+  -- remove the temp dir.
+  pcall(vim.cmd, "cd " .. vim.fn.fnameescape(_old_cwd))
+  if vim.api.nvim_win_is_valid(_editor_win) then
+    pcall(vim.api.nvim_win_close, _editor_win, true)
+  end
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_get_name(b) == _probe then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
+  pcall(os.remove, _probe)
+  pcall(vim.fn.delete, _new_cwd, "rf")
+end)()
+
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

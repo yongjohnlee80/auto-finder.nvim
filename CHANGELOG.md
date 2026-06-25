@@ -2,6 +2,35 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.58] — 2026-06-25 — ADR-0044: worktree:switched no-displacement regression smoke (p45)
+
+Test-only patch. Adds the regression pin ADR-0044 calls for — the follow-up
+to closing ADR-0027 "Deferred Fix C" as obviated. The "auto-finder claimed the
+editor space" displacement on a worktree switch was fixed at the auto-finder
+layer in `v0.2.3` (`shared/neotree.lua::reanchor_to_cwd` mutates the filesystem
+state's `path` + calls `manager.refresh(source)` instead of re-mounting via
+`position="current"`, which used to grab whatever window had focus). This pins
+that invariant so it can't silently regress.
+
+- **`tests/smoke.lua` `[45]`** opens the panel + files section, loads a probe
+  file into a focused NON-panel editor window, `:cd`s to a fresh dir and
+  publishes `worktree:switched` (the faithful switch sequence), then asserts:
+  - the filesystem state re-anchored to the new cwd — proves the handler RAN,
+    guarding against a vacuous "nothing happened" pass;
+  - the focused editor window STILL holds the probe buffer — no displacement,
+    the load-bearing safety property;
+  - the panel still holds an `auto-finder` tree buffer — render target intact.
+
+  Green-on-current-code regression pin, NOT a bug-fix pair (the fix shipped in
+  v0.2.3, so there is no failing-pre-fix half — per ADR-0044 + lector). 6 new
+  assertions.
+
+  NOTE: the full headless suite still aborts at the unrelated, tracked `[41b]`
+  grid.c assertion on debug-build Neovim (an env artifact, not auto-finder),
+  before reaching [45]. This section was verified via a standalone runner that
+  replicates the smoke's rtp setup — 6 passed / 0 failed — and the full suite
+  reaches 631 passed / 0 failed up to the [41b] abort.
+
 ## [v0.2.57] — 2026-06-20 — ADR-0033: dbase remount regression smoke (A16b)
 
 Test-only patch. Adds the per-consumer integration smoke that ADR-0033
