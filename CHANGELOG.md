@@ -2,6 +2,15 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.59] — 2026-06-25 — ADR-0045: shorten the `todos.assign` instruction prompt
+
+The `A` (assign-task-to-agent) action's `vim.ui.input` prompt was the verbose
+`"Notes / direction for <name> (optional, e.g. 'create ADR', 'open a PR'): "`.
+Shortened to the terse `"Instructions: "` — the same label the new auto-agents
+`<leader>ab` send-buffer-to-agent picker uses, for cross-surface UX parity
+(ADR-0045 objective 3). Behaviour unchanged: empty input still allowed, `nil`
+still cancels.
+
 ## [v0.2.58] — 2026-06-25 — ADR-0044: worktree:switched no-displacement regression smoke (p45)
 
 Test-only patch. Adds the regression pin ADR-0044 calls for — the follow-up

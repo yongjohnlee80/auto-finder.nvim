@@ -1958,8 +1958,9 @@ local function _assign_task(row)
   }, function(choice)
     if not choice then return end
     vim.ui.input({
-      prompt = "Notes / direction for " .. choice.name
-        .. " (optional, e.g. 'create ADR', 'open a PR'): ",
+      -- ADR-0045: terse, shared label (the auto-agents `<leader>ab`
+      -- buffer-send picker uses the same "Instructions:" prompt).
+      prompt = "Instructions: ",
     }, function(notes)
       if notes == nil then return end  -- user cancelled the input
       local ok_todo, todo = pcall(require, "auto-core.todo")
