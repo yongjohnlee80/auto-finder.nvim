@@ -1915,11 +1915,11 @@ end
 ---     registry.list()` when auto-agents isn't loaded.
 ---  2. Show a `vim.ui.select` picker of agent names.
 ---  3. After selection, prompt for an optional one-line directive
----     via `vim.ui.input`. Empty input is fine — the deliberate
----     commit point is the agent selection, not this prompt — so an
----     empty/cancelled directive still assigns, falling back to a
----     default "Task assigned to you." reason so the recipient is
----     always pinged with a meaningful message.
+---     via `vim.ui.input`. `<Esc>` (nil) cancels — the task is left
+---     untouched. An empty line + `<CR>` ("") proceeds, falling back
+---     to a default "Task assigned to you." reason so an
+---     instruction-less assignment still pings the recipient with a
+---     meaningful message.
 ---  4. Call `auto-core.todo.assign(id, mailbox_id, reason)` —
 ---     fires `core.todo.assignee:changed`; auto-agents'
 ---     subscriber routes a one-shot mailbox message into the
@@ -1966,19 +1966,20 @@ local function _assign_task(row)
       -- buffer-send picker uses the same "Instructions:" prompt).
       prompt = "Instructions: ",
     }, function(notes)
-      -- The directive is OPTIONAL. The deliberate commit point is the
-      -- agent selection above — NOT this prompt — so we proceed on any
-      -- outcome here. We used to `return` on `notes == nil` treating it
-      -- as a cancel, but several `vim.ui.input` backends (e.g. snacks
-      -- with a live cmp/blink `<CR>` interception) deliver `nil` on an
-      -- *empty* confirm, not just on cancel. That silently dropped the
-      -- whole assignment: `todo.assign` never ran, so the task never
-      -- moved open → in-progress and the recipient was never notified.
-      -- Normalise empty/nil to a default directive so an
-      -- instruction-less assignment still lands the bucket move AND
-      -- pings the recipient with a meaningful message body.
-      local instruction = (type(notes) == "string" and vim.trim(notes) ~= "")
-        and notes or nil
+      -- Cancel vs. empty-submit are distinct here and treated
+      -- differently on purpose:
+      --   `<Esc>`         → notes == nil → abort the assignment.
+      --   empty line + CR → notes == ""  → proceed with a DEFAULT
+      --                                     directive.
+      -- snacks (the active `vim.ui.input` backend) delivers `nil` only
+      -- on cancel and `""` on an empty confirm, so an instruction-less
+      -- ENTER still lands the open → in-progress move AND pings the
+      -- recipient with a meaningful message, while ESC backs out
+      -- cleanly without touching the task. (The earlier variant that
+      -- `return`ed on BOTH nil and "" made an instruction-less
+      -- assignment a silent no-op — no bucket move, no notification.)
+      if notes == nil then return end  -- ESC / cancel — leave task untouched
+      local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
       local ok_todo, todo = pcall(require, "auto-core.todo")
       if not ok_todo then return end
