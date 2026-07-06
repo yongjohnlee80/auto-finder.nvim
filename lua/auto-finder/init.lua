@@ -1059,6 +1059,9 @@ local _EDITOR_BUFTYPES = {
 ---first match that:
 ---  * isn't floating,
 ---  * isn't winfixbuf,
+---  * isn't an auto-core panel of ANY plugin (the broad
+---    `w:auto_core_panel_name` exclusion + legacy
+---    `w:auto_finder_panel` — [[auto-core-panel-ownership]]),
 ---  * has a buftype in `_EDITOR_BUFTYPES`,
 ---  * has a filetype NOT in `_PANEL_FILETYPES`.
 ---
@@ -1069,6 +1072,16 @@ function M._editor_target_winid()
     if vim.wo[w].winfixbuf then goto continue end
     local cfg = vim.api.nvim_win_get_config(w)
     if cfg.relative ~= nil and cfg.relative ~= "" then goto continue end
+    -- Broad panel exclusion (auto-core-panel-ownership convention):
+    -- any window stamped with a non-empty `auto_core_panel_name` is
+    -- some family plugin's panel — never an editor target — even
+    -- when its buffer would otherwise pass the buftype/filetype
+    -- checks below. Legacy `auto_finder_panel = 1` accepted too.
+    if vim.w[w].auto_finder_panel == 1 then goto continue end
+    do
+      local pname = vim.w[w].auto_core_panel_name
+      if type(pname) == "string" and pname ~= "" then goto continue end
+    end
     local b = vim.api.nvim_win_get_buf(w)
     if not _EDITOR_BUFTYPES[vim.bo[b].buftype] then goto continue end
     if _PANEL_FILETYPES[vim.bo[b].filetype] then goto continue end

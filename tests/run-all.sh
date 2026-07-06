@@ -7,7 +7,7 @@
 # green-when-written, wired into nothing, silently bit-rotting.
 #
 # Usage:
-#   tests/run-all.sh                      # run all three suites
+#   tests/run-all.sh                      # run all four suites
 #   AF_KNOWN_ENV_FAILS=4 tests/run-all.sh # tolerate N known env failures
 #                                         # (macOS: 4 — the /tmp symlink
 #                                         # buffers-tree family)
@@ -20,6 +20,12 @@
 # tolerated (AF_TOLERATE_SMOKE_CRASH=1, default). Counts are parsed
 # from the captured output either way, so real assertion failures
 # still fail this runner.
+#
+# The same [41b] crash means smoke.lua sections [42]–[47] never
+# execute under `-u NONE -l`. The ADR-0048 Phase 3 sections [46]+[47]
+# therefore run as their own standalone suite (tests/smoke-adr0048.lua,
+# section bodies verbatim from smoke.lua) so they are actually
+# exercised until the [41b] bug is fixed.
 set -u
 cd "$(dirname "$0")/.."
 
@@ -51,6 +57,7 @@ run_suite() {
 run_suite "smoke"           tests/smoke.lua                 "$TOLERATE_SMOKE_CRASH"
 run_suite "dbase_spike"     tests/dbase_spike.lua           0
 run_suite "encrypted_vault" tests/encrypted_vault_smoke.lua 0
+run_suite "adr0048"         tests/smoke-adr0048.lua         0
 
 echo "──────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then

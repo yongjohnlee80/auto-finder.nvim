@@ -44,6 +44,15 @@ Five views in the box:
 | 3 | **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. Tracked via Buf* autocmds through the core's buffer cache. |
 | 4 | **dbase** | [`nvim-dbee`](https://github.com/kndndrj/nvim-dbee) drawer mounted inside the panel. Soft dep — renders a placeholder buffer if dbee isn't installed. Connection vaults are at-rest encrypted (via `age` / `gpg`) and managed from the config REPL. |
 
+More registrable views ship in the box but aren't in the default
+slot list — add them with `slot add <name>` from the config REPL
+(or list them in `opts.sections`): **marks** (nvim marks browser),
+**todos** (the auto-core task store — see
+[Automation](#automation-todo-listautomated)), and the ADR-0048
+pair **tests** / **debug** consuming
+[`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)
+(see [Tests & Debug views](#tests--debug-views-auto-run)).
+
 Plus the foundations behind the views, all centralized in
 `lua/auto-finder/core/`:
 
@@ -100,6 +109,13 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 - [`yongjohnlee80/worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim)
   — required by the **repos** view. When absent, the repos
   view renders empty.
+- [`yongjohnlee80/auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)
+  `^0.1.0` — soft dep for the **tests** and **debug** views
+  (ADR-0048 Phase 3). When absent, both views render a
+  one-line hint; the rest of the panel is unaffected. The
+  debug view's session/breakpoint sections additionally use
+  [`mfussenegger/nvim-dap`](https://github.com/mfussenegger/nvim-dap)
+  when it is installed.
 
 ## Install (lazy.nvim)
 
@@ -333,6 +349,67 @@ auto-finder's `buffers` view, in autovim's editor-area winbar,
 and in any other surface that filters by `vim.fn.buflisted(b) == 1`.
 Override via `opts.dbase.extra.editor.buffer_options.buflisted = false`
 if you want dbee's original behavior.
+
+## Tests & Debug views (auto-run)
+
+Two flat scratch-buffer views (ADR-0048 Phase 3) consuming
+[`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)'s
+public API — pure renderers over auto-run's discovery tree, config
+store, and breakpoint persistence, refreshed by the `run.*` event
+topics. Register with `slot add tests` / `slot add debug`.
+
+### tests
+
+The discovered test-position tree (`dir → file → namespace →
+test`) with per-row status glyphs from the last run
+(✓ passed · ✗ failed · ○ skipped · ● running), live-updated on
+`run.results:changed`. Folder collapse persists across sessions.
+The header shows the discovery root, counts, and the scan state —
+including auto-run's structured cap report when a bounded full
+scan aborts.
+
+| Key | Action |
+|---|---|
+| `<CR>` | jump to position (editor-routed); toggle collapse on a folder |
+| `r` | run position under cursor (test / file / namespace / folder = suite) |
+| `R` | re-run the last position run from this panel |
+| `d` | debug the test under cursor (dap strategy) |
+| `o` | toggle details on a test row (status / duration / output path — `<CR>` on the path opens it); collapse on containers |
+| `i` | output preview float |
+| `S` | full worktree scan (bounded; `S` again cancels) |
+| `x` | stop running test jobs |
+| `?` | help overlay |
+
+### debug
+
+Three sections: **Entry Points** (store configs `kind=debug|run`,
+grouped by kind, provenance/tier annotated), **Active Sessions**
+(live nvim-dap sessions), and **Breakpoints** (the persisted
+per-repo store merged with live dap state, grouped by file —
+orphaned persisted entries render dimmed).
+
+`o` on an entry point expands the resolved config inline with
+**env values masked** — keys and `${VAR}` / `cmd:` refs only,
+literal values never reach the buffer.
+
+Breakpoint clearing mirrors the marks view (`d` = immediate):
+`d` on a breakpoint row deletes it from nvim-dap's live registry
+AND the persisted store in one action; `d` on a file group header
+clears that file; `d` on the Breakpoints section header clears
+everything (this one confirms — bulk destructive).
+
+| Key | Action |
+|---|---|
+| `<CR>` | launch entry point / focus session / jump to breakpoint |
+| `o` | expand details (resolved config, session state, breakpoint condition) |
+| `d` | delete breakpoint (row) / clear file (file header) / clear all with confirm (section header) |
+| `e` | edit the entry point's config file |
+| `a` | scaffold a new config (auto-run `store.add` flow) |
+| `x` | terminate the session under cursor |
+| `p` | pause / continue the session under cursor |
+| `i` | info popup |
+| `R` | refresh |
+| `?` | help overlay |
 
 ## Architecture
 

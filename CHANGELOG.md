@@ -2,6 +2,88 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — ADR-0048 Phase 3 (auto-finder half): tests + debug views
+
+<!-- Retitle to the next patch tag at release time (v0.2.60 shipped
+     without a CHANGELOG entry and sibling work is in flight, so the
+     number is the tagger's call). -->
+
+Two new registrable views consuming [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)'s
+public API (soft dep — both render a one-line hint and no-op when auto-run
+isn't installed, the dbase-without-dbee precedent). Both are flat
+scratch-buffer views on the todos/marks pattern: typed `M._rows` +
+`_row_under_cursor` dispatch, persisted collapse via
+`auto-core.state.namespace("auto-run.ui")`, event-driven no-hijack refresh
+(ADR-0009 — re-render only when visible, `vim.schedule`d, buffer-scoped),
+`?` help overlay from keymap descs, editor routing via
+`_editor_target_winid`. Pure renderers: all data flows through
+`require("auto-run")` (`discovery` / `store` / `exec` / `dap.breakpoints`)
+plus the `run.*` event topics — no watchers, no direct store-file reads.
+
+- **`views/tests/`** (ADR-0048 §8.1) — the discovered position tree
+  (dir → file → namespace → test) with per-row status glyphs
+  (✓ / ✗ / ○ / ●) from the last results, updated on `run.results:changed`;
+  folder collapse persisted per-dir. Header shows the discovery root,
+  counts, and scan state — a capped bounded scan renders auto-run's
+  structured cap report (cap / limit / "scope narrowed?" hint) instead of
+  degrading silently. Keymaps: `<CR>` jump (editor-routed) / collapse,
+  `r` run position under cursor (folder = suite), `R` re-run last,
+  `d` debug test (dap), `o` details expansion (status, duration, run-output
+  path — `emit_frontmatter`-style child rows; `<CR>` on the path row opens
+  it), `i` output preview float, `S` bounded full scan (`S` again cancels),
+  `x` stop running test jobs, `?` help.
+- **`views/debug/`** (ADR-0048 §8.2) — three BUCKET sections: Entry Points
+  (store configs `kind=debug|run`, grouped by kind, provenance/tier
+  annotated from `store.list()` layers + origin), Active Sessions (live
+  nvim-dap sessions, state tracked via `run.session:changed`), Breakpoints
+  (persisted store merged with live dap state, grouped by file,
+  condition/log markers; orphaned persisted-vs-live entries render dimmed
+  with a `d`-to-clean affordance per §9). `o` on an entry expands the
+  resolved config with **env values masked** — keys + pure `${VAR}` /
+  `cmd:` refs only; literal values never reach the buffer. Keymaps:
+  `<CR>` launch / focus session / jump to breakpoint, `e` edit config file,
+  `a` scaffold via auto-run's `store.add` flow, `x` terminate, `p`
+  pause/continue, `i` info popup, `R` refresh, `?` help.
+- **§8.3 marks-parity breakpoint clearing** — `d` on a breakpoint row
+  deletes it IMMEDIATELY (no confirmation): removed from nvim-dap's live
+  registry and the persisted store in one action (buffer is loaded first so
+  the restore path flushes before the removal; persistence goes through
+  auto-run's public `reconcile()`, never a direct file write). `d` on a
+  file group header clears that file's breakpoints; `d` on the Breakpoints
+  section header clears ALL — this one confirms (bulk destructive; the
+  confirm is stubbed in smoke via the `M._confirm` seam).
+- **`_editor_target_winid` now applies the broad panel exclusion** from the
+  auto-core-panel-ownership convention: any window carrying a non-empty
+  `w:auto_core_panel_name` (or the legacy `w:auto_finder_panel = 1`) is
+  never picked as an editor-routing target — previously only the
+  filetype/buftype checks guarded this, so a sibling plugin's panel whose
+  buffer passed those checks could be selected.
+- **`tests/smoke.lua` `[46]`/`[47]`** — 101 new assertions: registration +
+  `slot_add` for both views; tests-view rendering from a REAL auto-run
+  discovery tree (go fixture repo, treesitter parse, bounded scan); typed-row
+  dispatch (`r` → `discovery.run_position` with the exec job layer stubbed —
+  the spawned argv is asserted as a `go test -json` invocation); running-glyph
+  paint from the real `run.results:changed` publish plus glyph updates from a
+  stubbed results seam; `o` details + persisted folder collapse (asserted in
+  the `auto-run.ui` state namespace); the no-hijack probe + hidden-buffer
+  gate; the non-vacuous SECOND-PANEL exclusion probe (unstamped window IS
+  picked, stamped `w:auto_core_panel_name="auto-agents"` window is NOT);
+  debug-view three-section render against real nvim-dap breakpoints, the full
+  §8.3 `d` matrix (row / file header / section header with declined-then-
+  accepted confirm), orphaned-entry rendering + cleanup, env-value masking
+  (a secret-looking literal is asserted absent from the buffer), and the
+  auto-run-absent hint for both views (package.preload gymnastics). The
+  smoke prelude adds the auto-run sibling + real nvim-dap to the rtp the
+  same way it already rtp's auto-core.
+
+  NOTE: the full headless suite still aborts at the unrelated, tracked
+  `[41b]` grid.c assertion (631 passed / 0 failed up to the abort;
+  `tests/run-all.sh` tolerates it). `[46]`/`[47]` were verified via a
+  standalone runner replicating the smoke prelude — 106 passed / 0 failed
+  — the same approach `[45]` documented. auto-run's own suite re-run
+  green after this change (441 passed / 0 failed) — no cross-repo
+  regression; auto-run itself is untouched.
+
 ## [v0.2.59] — 2026-06-25 — ADR-0045: shorten the `todos.assign` instruction prompt
 
 The `A` (assign-task-to-agent) action's `vim.ui.input` prompt was the verbose
