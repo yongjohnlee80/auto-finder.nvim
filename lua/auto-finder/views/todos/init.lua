@@ -1914,9 +1914,13 @@ end
 ---     bootstrap slots). Falls back to `auto-core.mailbox.
 ---     registry.list()` when auto-agents isn't loaded.
 ---  2. Show a `vim.ui.select` picker of agent names.
----  3. After selection, prompt for notes via `vim.ui.input`.
----     Empty input is fine (assignee set without notes).
----  4. Call `auto-core.todo.assign(id, mailbox_id, notes)` —
+---  3. After selection, prompt for an optional one-line directive
+---     via `vim.ui.input`. Empty input is fine — the deliberate
+---     commit point is the agent selection, not this prompt — so an
+---     empty/cancelled directive still assigns, falling back to a
+---     default "Task assigned to you." reason so the recipient is
+---     always pinged with a meaningful message.
+---  4. Call `auto-core.todo.assign(id, mailbox_id, reason)` —
 ---     fires `core.todo.assignee:changed`; auto-agents'
 ---     subscriber routes a one-shot mailbox message into the
 ---     recipient's inbox carrying title, id, file path, and
@@ -1962,11 +1966,23 @@ local function _assign_task(row)
       -- buffer-send picker uses the same "Instructions:" prompt).
       prompt = "Instructions: ",
     }, function(notes)
-      if notes == nil then return end  -- user cancelled the input
+      -- The directive is OPTIONAL. The deliberate commit point is the
+      -- agent selection above — NOT this prompt — so we proceed on any
+      -- outcome here. We used to `return` on `notes == nil` treating it
+      -- as a cancel, but several `vim.ui.input` backends (e.g. snacks
+      -- with a live cmp/blink `<CR>` interception) deliver `nil` on an
+      -- *empty* confirm, not just on cancel. That silently dropped the
+      -- whole assignment: `todo.assign` never ran, so the task never
+      -- moved open → in-progress and the recipient was never notified.
+      -- Normalise empty/nil to a default directive so an
+      -- instruction-less assignment still lands the bucket move AND
+      -- pings the recipient with a meaningful message body.
+      local instruction = (type(notes) == "string" and vim.trim(notes) ~= "")
+        and notes or nil
+      local reason = instruction or "Task assigned to you."
       local ok_todo, todo = pcall(require, "auto-core.todo")
       if not ok_todo then return end
-      local _, err = todo.assign(row.task.id, choice.mailbox_id,
-        notes ~= "" and notes or nil)
+      local _, err = todo.assign(row.task.id, choice.mailbox_id, reason)
       if err then
         require("auto-finder.log").error("view.todos",
           "assign failed: " .. tostring(err))
@@ -1976,7 +1992,7 @@ local function _assign_task(row)
         string.format("assigned '%s' to %s%s",
           row.task.title or row.task.id,
           choice.name,
-          notes ~= "" and (" — " .. notes) or ""),
+          instruction and (" — " .. instruction) or ""),
         { component = "view.todos", level = "info", notify = true })
       if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
         _render(M._bufnr)
