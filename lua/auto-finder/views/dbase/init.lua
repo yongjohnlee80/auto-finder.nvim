@@ -105,6 +105,11 @@ local function placeholder_buffer(panel_winid, reason)
   vim.bo[bufnr].buftype = "nofile"
   vim.bo[bufnr].bufhidden = "wipe"
   vim.bo[bufnr].swapfile = false
+  -- Canonical panel filetype so bufferline offsets reserve the column
+  -- for this fallback screen too (dbee-unavailable path), matching the
+  -- real-drawer stamp below and every other section.
+  vim.bo[bufnr].filetype = "auto-finder"
+  vim.b[bufnr].auto_finder_view = "dbase"
   vim.api.nvim_buf_set_name(bufnr, "auto-finder-dbase://placeholder")
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, {
     "  dbase section (Phase 0a spike)",
@@ -170,6 +175,24 @@ local function mount_drawer(panel_winid)
   -- write. Idempotent on subsequent get_buffer calls because
   -- `vim.keymap.set` overwrites.
   if vim.api.nvim_buf_is_valid(bufnr) then
+    -- Present the dbee drawer to bufferline-style plugins as part of
+    -- the auto-finder panel. dbee stamps its drawer buffer
+    -- `filetype = "dbee"`; left as-is, a consumer's
+    -- `offsets = { filetype = "auto-finder" }` doesn't match the dbase
+    -- section, so buffer tabs paint edge-to-edge over the panel winbar
+    -- instead of reserving the column (the "auto-finder heading" bug).
+    -- Every OTHER view renders into an `auto-finder`-filetype buffer
+    -- and is covered by that single offset (cf. views/marks v0.2.31,
+    -- which switched off `auto-finder-marks` for exactly this reason);
+    -- dbase is the only section that hosts a FOREIGN plugin's buffer.
+    -- Re-stamp the canonical filetype and carry per-view identity in
+    -- `b:auto_finder_view`, mirroring the other sections. Safe: dbee
+    -- ships no ftplugin/syntax/ftdetect keyed to its filetype, its
+    -- drawer keymaps are buffer-local (installed at mount), and it
+    -- tracks the drawer by stored bufnr — never by filetype.
+    pcall(function() vim.bo[bufnr].filetype = "auto-finder" end)
+    pcall(function() vim.b[bufnr].auto_finder_view = "dbase" end)
+
     pcall(vim.keymap.set, "n", "<CR>", function()
       -- Mount the companion panes (no-op if already mounted).
       layout_mod.ensure_editor()

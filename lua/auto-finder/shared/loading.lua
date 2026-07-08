@@ -57,6 +57,11 @@ function M.buffer(opts)
   vim.bo[bufnr].buftype   = "nofile"
   vim.bo[bufnr].bufhidden = "wipe"
   vim.bo[bufnr].swapfile  = false
+  -- Canonical panel filetype so bufferline-style offsets
+  -- (`offsets = { filetype = "auto-finder" }`) keep reserving the panel
+  -- column during the async loading phase instead of letting buffer
+  -- tabs flicker over the winbar until the real view swaps in.
+  vim.bo[bufnr].filetype  = "auto-finder"
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_name(bufnr, "auto-finder://loading/" .. opts.view
     .. "/" .. opts.generation)
