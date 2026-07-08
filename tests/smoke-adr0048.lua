@@ -1,5 +1,7 @@
--- ADR-0048 Phase 3 standalone smoke — sections [46] (views.tests) and
--- [47] (views.debug) only. Run with:
+-- ADR-0048 standalone smoke — sections [46] (views.tests), [47]
+-- (views.debug), and [48] (r5 Env section, this file only — the
+-- section postdates smoke.lua's [41b] truncation and has no
+-- smoke.lua counterpart). Run with:
 --   nvim --headless -u NONE -l tests/smoke-adr0048.lua
 --
 -- Exits 0 on PASS, 1 on FAIL. Each test prints its own line.
@@ -787,6 +789,394 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
   pcall(vim.api.nvim_buf_delete, src_buf, { force = true })
   worktree.set_active(prev_active)
   require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
+-- ───────────────────────── [48] ADR-0048 r5 — Env section (both views) ─────────────────────────
+--
+-- The §8.4 Env section: candidate env files with the `*` selection
+-- marker in BOTH the debug view (new "Env" bucket) and the tests
+-- view (header section above the position tree), rendered by the
+-- shared views/_env_section.lua helper. Coverage: rendering from a
+-- REAL env-file fixture (comments, quoting styles, a parse error),
+-- `s` select/deselect round-trip through auto-run + marker movement
+-- on run.env:changed, `o` inline KEY=VALUE expansion (values are
+-- interactive display — §4.2 r5 boundary) + parse-error child rows
+-- + sticky expansion across event re-renders, `e` edit round-trip
+-- (vim.ui.input prefill, quote style + comments preserved
+-- byte-for-byte), `a` add flow incl. the already_exists→overwrite
+-- confirm branch, `<CR>` editor-routing (file for env-file rows,
+-- file:lnum for env-var rows), the synthetic unreferenced-selected
+-- row, the no-hijack probe for run.env:changed, the tests-view
+-- collapse persistence, and the env-API-absent hints.
+print("\n[48] ADR-0048 r5 — Env section (tests + debug views)")
+;(function()
+  local ev = require("auto-core.events")
+  local debug_view = require("auto-finder.views.debug")
+  local tests_view = require("auto-finder.views.tests")
+  local env_section = require("auto-finder.views._env_section")
+  debug_view._reset_for_tests()
+  tests_view._reset_for_tests()
+
+  -- ── fixture repo + env files ───────────────────────────────────
+  local worktree = require("auto-core.git.worktree")
+  local repo = vim.fn.tempname() .. "-af-envfix"
+  vim.fn.mkdir(repo, "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s",
+    "commit", "-q", "--allow-empty", "-m", "init" }, { text = true }):wait()
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+
+  local lm = repo .. "/lm-test.env"
+  local LM_LINES = {
+    "# lm test env — top comment",   -- 1
+    "FOO=bar",                        -- 2
+    'QUOTED="hello world"',           -- 3
+    "SINGLE='sq value'",              -- 4
+    "",                               -- 5
+    "# section comment",              -- 6
+    "THIS IS NOT PARSEABLE",          -- 7 → parse-error row
+    "BAZ=qux",                        -- 8
+  }
+  vim.fn.writefile(LM_LINES, lm)
+  vim.fn.writefile({ "PORT=8080" }, repo .. "/.env")
+
+  -- A config referencing lm-test.env → source "config:api".
+  local store = require("auto-run.store")
+  local pa, ea = store.add({
+    name = "api", kind = "run", program = "sh",
+    env_files = { "${worktree}/lm-test.env" },
+  })
+  ok("p48: config with env_files added", pa ~= nil, tostring(ea))
+  local env = require("auto-run.env")
+
+  -- ── debug view: Env bucket renders from files_list ─────────────
+  vim.cmd("topleft 60vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function buf_text()
+    return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  end
+  local txt = buf_text()
+  ok("p48: Env bucket renders with count (referenced + discovered)",
+    txt:find("Env (2)", 1, true) ~= nil, "got:\n" .. txt)
+  ok("p48: referenced file row annotated with its config source",
+    txt:find("lm-test.env  [config:api]", 1, true) ~= nil, "got:\n" .. txt)
+  ok("p48: discovered file row annotated [discovered]",
+    txt:find(".env  [discovered]", 1, true) ~= nil)
+  ok("p48: no selection marker before any `s`",
+    txt:find("%* lm%-test%.env") == nil and txt:find("%* %.env") == nil)
+
+  local seen_maps = {}
+  for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+    seen_maps[k.lhs] = k
+  end
+  ok("p48: debug view registers the `s` env keymap", seen_maps["s"] ~= nil)
+
+  local function find_row(view, pred)
+    for _, r in ipairs(view._rows or {}) do
+      if pred(r) then return r end
+    end
+    return nil
+  end
+
+  -- ── `s`: select round-trip through auto-run + marker on event ──
+  local lm_row = find_row(debug_view, function(r)
+    return r.kind == "env-file" and r.path == lm
+  end)
+  ok("p48: typed env-file row present for lm-test.env", lm_row ~= nil,
+    vim.inspect(debug_view._rows))
+  vim.api.nvim_win_set_cursor(w, { lm_row.lnum, 0 })
+  seen_maps["s"].callback()
+  vim.wait(100, function() return false end)
+  ok("p48: `s` round-trips the selection through auto-run",
+    env.get_selected() == lm, tostring(env.get_selected()))
+  txt = buf_text()
+  ok("p48: `*` marker painted on the selected row (event re-render)",
+    txt:find("* lm-test.env", 1, true) ~= nil, "got:\n" .. txt)
+
+  -- ── `o`: inline expansion — entries + parse-error child rows ───
+  lm_row = find_row(debug_view, function(r)
+    return r.kind == "env-file" and r.path == lm
+  end)
+  vim.api.nvim_win_set_cursor(w, { lm_row.lnum, 0 })
+  seen_maps["o"].callback()
+  txt = buf_text()
+  ok("p48: expansion shows bare entry", txt:find("FOO=bar", 1, true) ~= nil,
+    "got:\n" .. txt)
+  ok("p48: expansion shows double-quoted entry (quotes stripped)",
+    txt:find("QUOTED=hello world", 1, true) ~= nil)
+  ok("p48: expansion shows single-quoted entry (quotes stripped)",
+    txt:find("SINGLE=sq value", 1, true) ~= nil)
+  ok("p48: parse-error child row rendered with its lnum",
+    txt:find("! line 7: unparseable entry", 1, true) ~= nil)
+  local var_row = find_row(debug_view, function(r)
+    return r.kind == "env-var" and r.key == "QUOTED"
+  end)
+  ok("p48: typed env-var row carries the file lnum",
+    var_row ~= nil and var_row.file_lnum == 3 and var_row.path == lm,
+    vim.inspect(var_row))
+  -- Sticky across an event-driven re-render.
+  ev.publish("run.env:changed", { action = "selected", path = lm })
+  vim.wait(100, function() return false end)
+  ok("p48: expansion sticky across the event re-render",
+    buf_text():find("FOO=bar", 1, true) ~= nil)
+
+  -- ── `e`: edit round-trip (stubbed vim.ui.input) + byte checks ──
+  local orig_input = vim.ui.input
+  local seen_prefill
+  vim.ui.input = function(opts, cb)
+    seen_prefill = opts and opts.default
+    cb("brave new world")
+  end
+  var_row = find_row(debug_view, function(r)
+    return r.kind == "env-var" and r.key == "QUOTED"
+  end)
+  vim.api.nvim_win_set_cursor(w, { var_row.lnum, 0 })
+  seen_maps["e"].callback()
+  vim.ui.input = orig_input
+  ok("p48: `e` prefills the CURRENT value",
+    seen_prefill == "hello world", tostring(seen_prefill))
+  local after = vim.fn.readfile(lm)
+  ok("p48: update preserved the entry's double-quote style in place",
+    after[3] == 'QUOTED="brave new world"', tostring(after[3]))
+  ok("p48: comments + blank + unparseable lines preserved byte-for-byte",
+    after[1] == LM_LINES[1] and after[5] == LM_LINES[5]
+      and after[6] == LM_LINES[6] and after[7] == LM_LINES[7],
+    vim.inspect(after))
+  ok("p48: sibling entries untouched by the edit",
+    after[2] == "FOO=bar" and after[8] == "BAZ=qux")
+  vim.wait(100, function() return false end)
+  ok("p48: edited value repainted via run.env:changed",
+    buf_text():find("QUOTED=brave new world", 1, true) ~= nil)
+
+  -- ── `a`: add flow + already_exists → overwrite branch ──────────
+  local function stub_inputs(seq)
+    local i = 0
+    vim.ui.input = function(_, cb)
+      i = i + 1
+      cb(seq[i])
+    end
+  end
+  lm_row = find_row(debug_view, function(r)
+    return r.kind == "env-file" and r.path == lm
+  end)
+  stub_inputs({ "NEWKEY", "addval" })
+  vim.api.nvim_win_set_cursor(w, { lm_row.lnum, 0 })
+  seen_maps["a"].callback()
+  vim.ui.input = orig_input
+  after = vim.fn.readfile(lm)
+  ok("p48: `a` appended the new entry",
+    after[#after] == "NEWKEY=addval", vim.inspect(after))
+
+  local orig_confirm = env_section._confirm
+  local confirm_calls = 0
+  env_section._confirm = function() confirm_calls = confirm_calls + 1; return 1 end
+  stub_inputs({ "FOO", "overwritten" })
+  lm_row = find_row(debug_view, function(r)
+    return r.kind == "env-file" and r.path == lm
+  end)
+  vim.api.nvim_win_set_cursor(w, { lm_row.lnum, 0 })
+  seen_maps["a"].callback()
+  vim.ui.input = orig_input
+  after = vim.fn.readfile(lm)
+  ok("p48: already_exists prompts for overwrite (confirm called)",
+    confirm_calls == 1, "calls=" .. confirm_calls)
+  ok("p48: accepted overwrite updates the EXISTING entry in place",
+    after[2] == "FOO=overwritten", tostring(after[2]))
+  -- Declined overwrite → file untouched.
+  env_section._confirm = function() confirm_calls = confirm_calls + 1; return 2 end
+  stub_inputs({ "BAZ", "nope" })
+  vim.api.nvim_win_set_cursor(w, { lm_row.lnum, 0 })
+  seen_maps["a"].callback()
+  vim.ui.input = orig_input
+  env_section._confirm = orig_confirm
+  after = vim.fn.readfile(lm)
+  ok("p48: declined overwrite leaves the entry untouched",
+    after[8] == "BAZ=qux", tostring(after[8]))
+
+  -- ── `<CR>`: editor-routed open, var rows jump to their lnum ────
+  vim.cmd("botright vsplit")
+  local editor_win = vim.api.nvim_get_current_win()
+  vim.wo[editor_win].winfixbuf = false
+  vim.api.nvim_win_set_buf(editor_win, vim.api.nvim_create_buf(true, false))
+  vim.api.nvim_set_current_win(w)
+  debug_view.on_focus(w, b)
+  local baz_row = find_row(debug_view, function(r)
+    return r.kind == "env-var" and r.key == "BAZ"
+  end)
+  ok("p48: BAZ env-var row present for the CR probe", baz_row ~= nil)
+  vim.api.nvim_win_set_cursor(w, { baz_row.lnum, 0 })
+  seen_maps["<CR>"].callback()
+  local routed_win
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    local wb = vim.api.nvim_win_get_buf(win)
+    if vim.api.nvim_buf_get_name(wb):find("lm%-test%.env$") then
+      routed_win = win
+      break
+    end
+  end
+  ok("p48: `<CR>` on a var row opened the env file in an editor window",
+    routed_win ~= nil and routed_win ~= w)
+  ok("p48: `<CR>` jumped to the entry's lnum",
+    routed_win ~= nil
+      and vim.api.nvim_win_get_cursor(routed_win)[1] == baz_row.file_lnum,
+    routed_win and vim.inspect(vim.api.nvim_win_get_cursor(routed_win)))
+
+  -- ── synthetic unreferenced-selected row (deviation #3) ─────────
+  local outside = vim.fn.tempname() .. "-outside.env"
+  vim.fn.mkdir(vim.fn.fnamemodify(outside, ":h"), "p")
+  vim.fn.writefile({ "X=1" }, outside)
+  env.set_selected(outside)
+  vim.wait(100, function() return false end)
+  txt = buf_text()
+  ok("p48: unlisted selection renders the synthetic row",
+    txt:find("(selected — unreferenced)", 1, true) ~= nil, "got:\n" .. txt)
+  local ghost_row = find_row(debug_view, function(r)
+    return r.kind == "env-file" and r.synthetic == true
+  end)
+  ok("p48: synthetic row typed + marked selected",
+    ghost_row ~= nil and ghost_row.selected == true
+      and ghost_row.path == outside, vim.inspect(ghost_row))
+  -- `s` on the synthetic row deselects.
+  vim.api.nvim_set_current_win(w)
+  vim.api.nvim_win_set_cursor(w, { ghost_row.lnum, 0 })
+  seen_maps["s"].callback()
+  vim.wait(100, function() return false end)
+  ok("p48: `s` on the synthetic row deselects through auto-run",
+    env.get_selected() == nil, tostring(env.get_selected()))
+  ok("p48: synthetic row gone after deselect",
+    buf_text():find("(selected — unreferenced)", 1, true) == nil)
+
+  -- ── no-hijack probe for run.env:changed (ADR-0009) ─────────────
+  local editor_buf = vim.api.nvim_win_get_buf(editor_win)
+  vim.api.nvim_set_current_win(editor_win)
+  ev.publish("run.env:changed", { action = "selected", path = nil })
+  vim.wait(100, function() return false end)
+  ok("p48: no-hijack — current window unchanged after run.env:changed",
+    vim.api.nvim_get_current_win() == editor_win)
+  ok("p48: no-hijack — editor window still holds its own buffer",
+    vim.api.nvim_win_get_buf(editor_win) == editor_buf)
+  ok("p48: no-hijack — panel window still holds the debug buffer",
+    vim.api.nvim_win_get_buf(w) == b)
+
+  -- ── tests view: same section via the shared helper ─────────────
+  vim.cmd("topleft 45vnew")
+  local w2 = vim.api.nvim_get_current_win()
+  vim.wo[w2].winfixbuf = false
+  local b2 = tests_view.get_buffer(w2)
+  vim.api.nvim_win_set_buf(w2, b2)
+  tests_view.on_focus(w2, b2)
+  local function buf2_text()
+    return table.concat(vim.api.nvim_buf_get_lines(b2, 0, -1, false), "\n")
+  end
+  local t2 = buf2_text()
+  ok("p48: tests view renders the Env header section",
+    t2:find("Env (2)", 1, true) ~= nil, "got:\n" .. t2)
+  ok("p48: tests view renders the env file rows",
+    t2:find("lm-test.env  [config:api]", 1, true) ~= nil)
+  ok("p48: env section sits ABOVE the position tree area",
+    (t2:find("Env (2)", 1, true) or math.huge)
+      > (t2:find("Tests —", 1, true) or 0))
+  local maps2 = {}
+  for _, k in ipairs(vim.api.nvim_buf_get_keymap(b2, "n")) do
+    maps2[k.lhs] = k
+  end
+  for _, lhs in ipairs({ "s", "e", "a" }) do
+    ok("p48: tests view env keymap registered: " .. lhs, maps2[lhs] ~= nil)
+  end
+
+  -- `o` expansion works through the tests view's dispatcher too.
+  local lm_row2 = find_row(tests_view, function(r)
+    return r.kind == "env-file" and r.path == lm
+  end)
+  ok("p48: tests view carries typed env-file rows", lm_row2 ~= nil)
+  vim.api.nvim_set_current_win(w2)
+  vim.api.nvim_win_set_cursor(w2, { lm_row2.lnum, 0 })
+  maps2["o"].callback()
+  ok("p48: tests view `o` expands KEY=VALUE child rows",
+    buf2_text():find("FOO=overwritten", 1, true) ~= nil,
+    "got:\n" .. buf2_text())
+
+  -- Env-header collapse persists via tests_collapsed (dir mechanism).
+  local hdr2 = find_row(tests_view, function(r) return r.kind == "env-header" end)
+  ok("p48: tests view env-header row typed", hdr2 ~= nil)
+  vim.api.nvim_win_set_cursor(w2, { hdr2.lnum, 0 })
+  maps2["o"].callback()
+  t2 = buf2_text()
+  ok("p48: collapsed env section hides its rows",
+    t2:find("lm-test.env", 1, true) == nil and t2:find("▶ Env (2)", 1, true) ~= nil,
+    "got:\n" .. t2)
+  local ui_ns = require("auto-core.state").namespace("auto-run.ui",
+    { persist = "json" })
+  local persisted = ui_ns:get("tests_collapsed")
+  ok("p48: env-section collapse persisted under tests_collapsed",
+    type(persisted) == "table"
+      and persisted[tests_view._ENV_SECTION_ID] == true,
+    vim.inspect(persisted))
+  hdr2 = find_row(tests_view, function(r) return r.kind == "env-header" end)
+  vim.api.nvim_win_set_cursor(w2, { hdr2.lnum, 0 })
+  maps2["o"].callback()
+  persisted = ui_ns:get("tests_collapsed")
+  ok("p48: re-expanding drops the persisted env-collapse key",
+    type(persisted) ~= "table"
+      or persisted[tests_view._ENV_SECTION_ID] == nil,
+    vim.inspect(persisted))
+
+  -- ── env API absent — section hint; plugin absent — view hint ───
+  do
+    -- Partial skew: facade present, env module missing → the section
+    -- renders its own one-line hint.
+    local saved_env = package.loaded["auto-run.env"]
+    package.loaded["auto-run.env"] = nil
+    package.preload["auto-run.env"] = function()
+      error("auto-run.env hidden for the API-absent probe")
+    end
+    debug_view.on_focus(w, b)
+    txt = buf_text()
+    ok("p48: env API unavailable → one-line section hint",
+      txt:find("Env (0)", 1, true) ~= nil
+        and txt:find("env API unavailable", 1, true) ~= nil,
+      "got:\n" .. txt)
+    package.preload["auto-run.env"] = nil
+    package.loaded["auto-run.env"] = saved_env
+
+    -- Full absence: the whole view is the standard hint (no Env
+    -- section at all) — same shape [46]/[47] assert.
+    local BLOCK = { "auto-run", "auto-run.store", "auto-run.env" }
+    local saved = {}
+    for _, m in ipairs(BLOCK) do
+      saved[m] = package.loaded[m]
+      package.loaded[m] = nil
+      package.preload[m] = function()
+        error(m .. " hidden for the absent-probe")
+      end
+    end
+    debug_view.on_focus(w, b)
+    txt = buf_text()
+    ok("p48: auto-run absent → view hint, no Env section",
+      txt:find("auto%-run%.nvim not installed") ~= nil
+        and txt:find("Env (", 1, true) == nil, "got:\n" .. txt)
+    for _, m in ipairs(BLOCK) do
+      package.preload[m] = nil
+      package.loaded[m] = saved[m]
+    end
+  end
+
+  -- ── cleanup ────────────────────────────────────────────────────
+  debug_view.on_close()
+  tests_view.on_close()
+  pcall(vim.api.nvim_win_close, w2, true)
+  pcall(vim.api.nvim_win_close, editor_win, true)
+  pcall(vim.api.nvim_win_close, w, true)
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(outside)
   vim.fn.delete(repo, "rf")
 end)()
 

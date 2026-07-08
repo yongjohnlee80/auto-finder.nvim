@@ -1,11 +1,15 @@
 ---View — auto-run debug surface (ADR-0048 §8.2 / §8.3).
 ---
----Flat scratch-buffer view on the todos BUCKETS pattern. Three
+---Flat scratch-buffer view on the todos BUCKETS pattern. Four
 ---sections, fixed order:
 ---
 ---  Entry Points   auto-run store configs (`kind = debug | run`),
 ---                 grouped by kind, provenance/tier annotated
 ---                 (merge layers + origin from `store.list()`).
+---  Env            candidate env files (§8.4, r5) with a `*` marker
+---                 on the per-repo selection; rows dim when the
+---                 file is missing. Shared renderer/actions in
+---                 `views/_env_section.lua` (tests view parity).
 ---  Active Sessions  live nvim-dap sessions (id · config · state),
 ---                 state kept fresh by `run.session:changed`.
 ---  Breakpoints    the persisted per-repo store merged with live
@@ -22,11 +26,14 @@
 ---  <CR>  entry point → launch (kind-appropriate strategy via
 ---        exec.start); session → focus (dap.set_session + dap-view);
 ---        breakpoint → jump to file:line (editor-routed);
+---        env file → open it; env var → open at its line;
 ---        header → toggle collapse; detail path row → open file
 ---  o     expand details — entry point: resolved config fields with
 ---        env VALUES MASKED (keys + `${...}`/`cmd:` refs only,
----        never literal values); session: state detail;
----        breakpoint: condition/hit/log detail; header: collapse
+---        never literal values); env file: inline KEY=VALUE rows
+---        (user-owned file — interactive display, §4.2 r5 boundary);
+---        session: state detail; breakpoint: condition/hit/log
+---        detail; header: collapse
 ---  d     §8.3 marks-parity clearing —
 ---          breakpoint row    delete IMMEDIATELY (no confirm):
 ---                            removed from nvim-dap's live registry
@@ -34,9 +41,14 @@
 ---          file group header clear that file's breakpoints
 ---          Breakpoints section header
 ---                            clear ALL (confirm — bulk destructive)
----  e     edit the entry point's config file (editor-routed)
----  a     scaffold a new config (auto-run store.add flow —
----        gobugger `new_*` parity)
+---  e     entry point → edit its config file (editor-routed);
+---        env var → edit the value (vim.ui.input, prefilled)
+---  a     env file row / Env header → add KEY=VALUE (two prompts;
+---        already-exists offers overwrite); elsewhere scaffold a
+---        new config (auto-run store.add flow — gobugger `new_*`
+---        parity)
+---  s     env file → select/deselect it (highest-precedence
+---        env_files entry for every subsequent launch, §4.2)
 ---  x     terminate the session under the cursor
 ---  p     pause / continue the session under the cursor
 ---  i     info popup for the row under the cursor
@@ -60,6 +72,7 @@ local FILETYPE = "auto-finder"
 
 local HL = {
   header_entries     = "AutoFinderDebugHeaderEntries",
+  header_env         = "AutoFinderDebugHeaderEnv",
   header_sessions    = "AutoFinderDebugHeaderSessions",
   header_breakpoints = "AutoFinderDebugHeaderBreakpoints",
   chevron      = "AutoFinderDebugChevron",
@@ -87,6 +100,7 @@ local function _apply_default_highlights()
     vim.api.nvim_set_hl(0, name, { default = true, link = link })
   end
   set(HL.header_entries,     "Title")
+  set(HL.header_env,         "Type")
   set(HL.header_sessions,    "Statement")
   set(HL.header_breakpoints, "DiagnosticWarn")
   set(HL.chevron,      "NonText")
@@ -117,13 +131,16 @@ do
   })
 end
 
--- Section buckets (todos BUCKETS/BUCKET_ORDER model).
+-- Section buckets (todos BUCKETS/BUCKET_ORDER model). "env" sits
+-- right after Entry Points (§8.4 r5) — the selection it displays
+-- feeds the launches the entries above it start.
 local BUCKETS = {
   entries     = { header = "Entry Points",    hl_header = HL.header_entries     },
+  env         = { header = "Env",             hl_header = HL.header_env         },
   sessions    = { header = "Active Sessions", hl_header = HL.header_sessions    },
   breakpoints = { header = "Breakpoints",     hl_header = HL.header_breakpoints },
 }
-local BUCKET_ORDER = { "entries", "sessions", "breakpoints" }
+local BUCKET_ORDER = { "entries", "env", "sessions", "breakpoints" }
 
 -- ─── module state ─────────────────────────────────────────────
 
@@ -133,10 +150,14 @@ M._bufnr = nil
 --   { kind="bucket-header",  lnum, section }
 --   { kind="kind-header",    lnum, cfg_kind }
 --   { kind="entry",          lnum, name, cfg }
+--   { kind="env-file",       lnum, path, source, exists, selected, synthetic? }
+--   { kind="env-var",        lnum, path, key, file_lnum }
+--   { kind="env-error",      lnum, path, file_lnum }
 --   { kind="session",        lnum, session, state }
 --   { kind="bp-file-header", lnum, path, abs, bps }
 --   { kind="breakpoint",     lnum, bp }
 --   { kind="detail",         lnum, parent, field, filepath? }
+-- (env-* rows are emitted by views/_env_section.lua — §8.4 r5.)
 M._rows = nil
 
 -- Per-section collapse, persisted (setup-once preference) via
@@ -165,6 +186,10 @@ local function _auto_run()
 end
 
 local log = function() return require("auto-finder.log") end
+
+-- Shared Env-section renderer/actions (§8.4 r5) — module-private to
+-- the views; the tests view consumes the same helper.
+local env_section = require("auto-finder.views._env_section")
 
 ---Confirm wrapper — module-level so tests can stub bulk-destructive
 ---confirmation without monkey-patching vim.fn.
@@ -604,6 +629,21 @@ local function _render(bufnr)
     end
   end
 
+  -- ── Env (§8.4, r5) ───────────────────────────────────────────
+  do
+    local env_list = env_section.collect()
+    emit_bucket_header("env", env_list and #env_list or 0)
+    if not M._collapsed.env then
+      env_section.emit({
+        list     = env_list,
+        lines    = lines,
+        mark     = mark,
+        rows     = rows,
+        expanded = M._expanded,
+      })
+    end
+  end
+
   -- ── Active Sessions ──────────────────────────────────────────
   do
     emit_bucket_header("sessions", #sessions)
@@ -823,6 +863,10 @@ local function _open(row)
     return
   end
 
+  -- Env rows: file opens the file, var/error opens at its line
+  -- (editor-routed — §8.4 r5).
+  if env_section.open(row, _open_file) then return end
+
   if row.kind == "entry" then
     local ar = _auto_run()
     if not ar then return end
@@ -861,13 +905,17 @@ local function _open(row)
   end
 end
 
----`o`: details expansion (entry / session / breakpoint), collapse
----toggle on section headers.
+---`o`: details expansion (entry / env file / session / breakpoint),
+---collapse toggle on section headers.
 ---@param row table?
 local function _toggle_expand(row)
   if not row then return end
   if row.kind == "bucket-header" then
     _toggle_collapsed(row.section)
+    _rerender()
+    return
+  end
+  if env_section.toggle_expand(row, M._expanded) then
     _rerender()
     return
   end
@@ -889,10 +937,12 @@ local function _toggle_expand(row)
   _rerender()
 end
 
----`e`: edit the entry point's config file (editor-routed).
+---`e`: edit the entry point's config file (editor-routed); on an
+---env-var row, edit that value in place (§8.4 r5).
 ---@param row table?
 local function _edit_config(row)
   if not row then return end
+  if env_section.edit_var(row) then return end
   local name = row.kind == "entry" and row.name
     or (row.kind == "detail" and row.parent and row.parent.kind == "entry"
         and row.parent.name)
@@ -1051,9 +1101,19 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("d", function() _delete(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: delete breakpoint (immediate, live+store); file header clears file; section header clears ALL (confirm)")
   set("e", function() _edit_config(_row_under_cursor(panel_winid)) end,
-    "auto-finder.debug: edit the entry point's config file")
-  set("a", function() _scaffold() end,
-    "auto-finder.debug: scaffold a new run/test/debug config (store.add flow)")
+    "auto-finder.debug: edit the entry point's config file; on an env var, edit its value")
+  set("a", function()
+    local row = _row_under_cursor(panel_winid)
+    if row and (row.kind == "env-file"
+        or (row.kind == "bucket-header" and row.section == "env")) then
+      env_section.add(row.kind == "env-file" and row or nil)
+      return
+    end
+    _scaffold()
+  end,
+    "auto-finder.debug: on an env row/header add KEY=VALUE to the env file; elsewhere scaffold a new run/test/debug config (store.add flow)")
+  set("s", function() env_section.select(_row_under_cursor(panel_winid)) end,
+    "auto-finder.debug: select/deselect the env file under cursor (applied to every launch)")
   set("x", function() _terminate(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: terminate the session under cursor")
   set("p", function() _pause_continue(_row_under_cursor(panel_winid)) end,
@@ -1100,6 +1160,7 @@ local function _ensure_subscriptions()
     end),
     ev.subscribe("run.breakpoints:changed", _on_event),
     ev.subscribe("run.config:changed",      _on_event),
+    ev.subscribe("run.env:changed",         _on_event),
     ev.subscribe("run.job:started",         _on_event),
     ev.subscribe("run.job:exited",          _on_event),
   }

@@ -2,7 +2,22 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — ADR-0048 Phase 3 (auto-finder half): tests + debug views
+## [Unreleased] — ADR-0048 r5: Env section in the tests + debug views
+
+An "Env" section in both views manages the env files applied to
+auto-run launches: candidate rows (config/profile-referenced +
+discovered) with a `*` marker on the per-repo selected file
+(`s` select/deselect), `o` inline expansion of KEY=VALUE contents
+(interactive display only — values never reach logs/events), `<CR>`
+open file / jump to entry line, `e` edit a value in place, `a` add an
+entry (with an overwrite-on-exists branch). Shared row/action logic in
+`views/_env_section.lua` (module-private). Requires auto-run ≥
+main@889b282 (`env.files_list`/`set_selected`/`read_file`/
+`update_var`/`add_var` + `run.env:changed`); graceful hints on plugin
+absence or version skew. Smoke: `smoke-adr0048.lua` section [48]
+(61 assertions).
+
+## [v0.2.61] — 2026-07-06 — ADR-0048 Phase 3 (auto-finder half): tests + debug views
 
 <!-- Retitle to the next patch tag at release time (v0.2.60 shipped
      without a CHANGELOG entry and sibling work is in flight, so the

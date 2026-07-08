@@ -12,6 +12,11 @@
 ---  - Header line with the discovery root + file/position counts,
 ---    plus the live scan state (`scanning…` / structured cap
 ---    report when a bounded scan aborts — no-silent-caps rule).
+---  - An "Env" section (§8.4, r5) above the position tree: candidate
+---    env files with a `*` marker on the per-repo selection, rows
+---    dimmed when the file is missing. Shared renderer/actions in
+---    `views/_env_section.lua` (debug view parity). Collapse
+---    persists via the same tests_collapsed mechanism as folders.
 ---  - The position tree, indented per depth, with collapse
 ---    chevrons on containers. Folder (dir) collapse state persists
 ---    across sessions via `auto-core.state.namespace("auto-run.ui")`;
@@ -24,7 +29,8 @@
 ---  <CR>  jump to the position (editor-routed via
 ---        auto-finder._editor_target_winid); on a container row,
 ---        toggle collapse; on an expanded output-path detail row,
----        open the run's output file.
+---        open the run's output file; on an env file, open it; on
+---        an env var, open the file at that entry's line.
 ---  r     run the position under the cursor (test / namespace /
 ---        file / folder = suite) via discovery.run_position
 ---  R     re-run the last position run from this panel
@@ -32,7 +38,14 @@
 ---        discovery.debug_position)
 ---  o     toggle — details expansion on a test row (last result
 ---        status, duration, run-output path — emit_frontmatter
----        style child rows), collapse on a container row
+---        style child rows), collapse on a container row; on an
+---        env file, inline KEY=VALUE expansion (user-owned file —
+---        interactive display, §4.2 r5 boundary)
+---  s     env file → select/deselect it (highest-precedence
+---        env_files entry for every subsequent launch, §4.2)
+---  e     env var → edit the value (vim.ui.input, prefilled)
+---  a     env file row / Env header → add KEY=VALUE (two prompts;
+---        already-exists offers overwrite)
 ---  i     output preview float (result status/duration + captured
 ---        failure output + the run dir)
 ---  S     full worktree scan (bounded + cancelable — a second `S`
@@ -61,6 +74,7 @@ local FILETYPE = "auto-finder"
 -- user `:hi AutoFinderTests*` overrides always win (`default = true`).
 local HL = {
   header      = "AutoFinderTestsHeader",      -- top status line
+  env_header  = "AutoFinderTestsEnvHeader",   -- Env section header (§8.4)
   scan_state  = "AutoFinderTestsScanState",   -- scanning… / cap report
   scan_capped = "AutoFinderTestsScanCapped",  -- the cap warning lines
   chevron     = "AutoFinderTestsChevron",     -- ▼ / ▶
@@ -89,6 +103,7 @@ local function _apply_default_highlights()
     vim.api.nvim_set_hl(0, name, { default = true, link = link })
   end
   set(HL.header,      "Title")
+  set(HL.env_header,  "Type")
   set(HL.scan_state,  "Comment")
   set(HL.scan_capped, "DiagnosticWarn")
   set(HL.chevron,     "NonText")
@@ -134,13 +149,18 @@ local STATUS_GLYPH = {
 M._bufnr = nil
 
 -- Per-buffer row metadata, in render order. Shapes:
---   { kind="header",   lnum }
---   { kind="position", lnum, node }        -- node from auto-run's tree
---   { kind="detail",   lnum, node, field, filepath? }
---   { kind="empty",    lnum }
+--   { kind="header",     lnum }
+--   { kind="env-header", lnum }             -- Env section header (§8.4)
+--   { kind="env-file",   lnum, path, source, exists, selected, synthetic? }
+--   { kind="env-var",    lnum, path, key, file_lnum }
+--   { kind="env-error",  lnum, path, file_lnum }
+--   { kind="position",   lnum, node }       -- node from auto-run's tree
+--   { kind="detail",     lnum, node, field, filepath? }
+--   { kind="empty",      lnum }
 -- The keymap layer reads `kind` (and node.type) to decide what
 -- action `<CR>` / `r` / `d` / `o` take — the todos typed-row
--- dispatch pattern.
+-- dispatch pattern. (env-* rows are emitted by
+-- views/_env_section.lua — §8.4 r5.)
 M._rows = nil
 
 -- Collapse state keyed by position id. Dir entries persist via
@@ -181,6 +201,16 @@ local function _auto_run()
   if not okf or type(facade) ~= "table" then return nil end
   return facade
 end
+
+-- Shared Env-section renderer/actions (§8.4 r5) — module-private to
+-- the views; the debug view consumes the same helper.
+local env_section = require("auto-finder.views._env_section")
+
+-- Pseudo position-id keying the Env section's collapse state inside
+-- M._collapsed / the persisted `tests_collapsed` table. Real position
+-- ids are absolute paths (optionally `::`-suffixed), so a `::`-prefixed
+-- key can never collide with one.
+local ENV_SECTION_ID = "::env-section"
 
 -- ─── persisted collapse state (dirs only) ─────────────────────
 
@@ -378,6 +408,29 @@ local function _render(bufnr)
     lines[#lines + 1] = ""
   end
 
+  -- ── Env section (§8.4, r5) — above the position tree ──────────
+  do
+    local env_list = env_section.collect()
+    local collapsed = M._collapsed[ENV_SECTION_ID] == true
+    local chevron = collapsed and "▶ " or "▼ "
+    local label = string.format("Env (%d)", env_list and #env_list or 0)
+    lines[#lines + 1] = chevron .. label
+    local lnum0 = #lines - 1
+    mark(lnum0, 0, #chevron, HL.chevron)
+    mark(lnum0, #chevron, #chevron + #label, HL.env_header)
+    rows[#rows + 1] = { kind = "env-header", lnum = lnum0 + 1 }
+    if not collapsed then
+      env_section.emit({
+        list     = env_list,
+        lines    = lines,
+        mark     = mark,
+        rows     = rows,
+        expanded = M._expanded,
+      })
+    end
+    lines[#lines + 1] = ""
+  end
+
   -- ── detail (o-expansion) emission — todos emit_frontmatter style ──
   local FM_INDENT  = string.rep(" ", 8)
   local FM_LABEL_W = 12
@@ -524,12 +577,40 @@ end
 
 local log = function() return require("auto-finder.log") end
 
+---Editor-routed open helper (the todos/debug `_open_file` pattern).
+---@param path string?
+---@param lnum integer?
+local function _open_file(path, lnum)
+  if not path or path == "" then return end
+  local af = require("auto-finder")
+  local target = af._editor_target_winid()
+  if not target then
+    pcall(vim.cmd, "rightbelow vsplit " .. vim.fn.fnameescape(path))
+    target = vim.api.nvim_get_current_win()
+  else
+    pcall(vim.api.nvim_set_current_win, target)
+    pcall(vim.cmd, "edit " .. vim.fn.fnameescape(path))
+  end
+  if lnum and lnum > 0 and target and vim.api.nvim_win_is_valid(target) then
+    pcall(vim.api.nvim_win_set_cursor, target, { lnum, 0 })
+  end
+end
+
 ---`<CR>`: context-aware open in the editor-target window.
 ---Containers toggle collapse; positions jump to path:lnum; detail
----rows with a filepath open that file.
+---rows with a filepath open that file; env files open (env vars at
+---their entry's line); the Env header toggles collapse.
 ---@param row table?
 local function _open(row)
   if not row then return end
+
+  if row.kind == "env-header" then
+    -- Persisted via the same dir mechanism as folder collapse.
+    _toggle_collapsed({ id = ENV_SECTION_ID, type = "dir" })
+    _rerender()
+    return
+  end
+  if env_section.open(row, _open_file) then return end
 
   local path, lnum
   if row.kind == "detail" then
@@ -547,20 +628,7 @@ local function _open(row)
   else
     return
   end
-  if not path or path == "" then return end
-
-  local af = require("auto-finder")
-  local target = af._editor_target_winid()
-  if not target then
-    pcall(vim.cmd, "rightbelow vsplit " .. vim.fn.fnameescape(path))
-    target = vim.api.nvim_get_current_win()
-  else
-    pcall(vim.api.nvim_set_current_win, target)
-    pcall(vim.cmd, "edit " .. vim.fn.fnameescape(path))
-  end
-  if lnum and lnum > 0 and target and vim.api.nvim_win_is_valid(target) then
-    pcall(vim.api.nvim_win_set_cursor, target, { lnum, 0 })
-  end
+  _open_file(path, lnum)
 end
 
 ---Run a position (shared by `r` and `R`). Records the launched runs
@@ -621,10 +689,20 @@ local function _debug(row)
 end
 
 ---`o`: details expansion on a test row; collapse toggle on a
----container row (universal "open/close the thing under the cursor").
+---container row (universal "open/close the thing under the cursor");
+---inline KEY=VALUE expansion on an env file (§8.4 r5).
 ---@param row table?
 local function _toggle_expand(row)
   if not row then return end
+  if row.kind == "env-header" then
+    _toggle_collapsed({ id = ENV_SECTION_ID, type = "dir" })
+    _rerender()
+    return
+  end
+  if env_section.toggle_expand(row, M._expanded) then
+    _rerender()
+    return
+  end
   local node = row.kind == "position" and row.node
     or row.kind == "detail" and row.node
     or nil
@@ -793,6 +871,17 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.tests: full worktree scan (bounded; press again to cancel)")
   set("x", function() _stop() end,
     "auto-finder.tests: stop running test jobs")
+  set("s", function() env_section.select(_row_under_cursor(panel_winid)) end,
+    "auto-finder.tests: select/deselect the env file under cursor (applied to every launch)")
+  set("e", function() env_section.edit_var(_row_under_cursor(panel_winid)) end,
+    "auto-finder.tests: edit the env var's value under cursor (vim.ui.input, prefilled)")
+  set("a", function()
+    local row = _row_under_cursor(panel_winid)
+    if row and (row.kind == "env-file" or row.kind == "env-header") then
+      env_section.add(row.kind == "env-file" and row or nil)
+    end
+  end,
+    "auto-finder.tests: add KEY=VALUE to the env file under cursor (Env header targets the selected file)")
 
   local ok_help, neotree_shared = pcall(require, "auto-finder.shared.neotree")
   if ok_help and type(neotree_shared.install_help_keymap) == "function" then
@@ -827,6 +916,7 @@ local function _ensure_subscriptions()
   M._subs = {
     ev.subscribe("run.discovery:changed", _on_event),
     ev.subscribe("run.results:changed",   _on_event),
+    ev.subscribe("run.env:changed",       _on_event),
   }
 end
 
@@ -898,6 +988,7 @@ end
 -- Module-private hooks exposed for tests (todos convention).
 M._HL = HL
 M._NS = NS
+M._ENV_SECTION_ID = ENV_SECTION_ID
 M._row_under_cursor = _row_under_cursor
 M._render_for_tests = _render
 
