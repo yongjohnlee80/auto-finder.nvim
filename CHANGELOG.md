@@ -2,7 +2,10 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — ADR-0048 r5: Env section in the tests + debug views
+## [v0.2.63] — 2026-07-08 — ADR-0048 r5: Env section in the tests + debug views
+
+<!-- v0.2.62 = the todos A-assign fix (cc2a58e), tagged separately
+     by its author; this env-section release follows it. -->
 
 An "Env" section in both views manages the env files applied to
 auto-run launches: candidate rows (config/profile-referenced +
