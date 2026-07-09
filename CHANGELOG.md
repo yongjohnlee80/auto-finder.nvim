@@ -2,6 +2,28 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.69] — 2026-07-10 — buffers panel survives cwd/worktree switches
+
+Fixes newly-opened files never appearing in the buffers panel after a
+worktree (cwd) switch made while another section was displayed.
+Pre-existing bug (reproduces on v0.2.66); deterministic headless repro:
+focus buffers → switch to files → `cd` other worktree → open files →
+refocus buffers → files missing, forever.
+
+- `manager.dir_changed` nils the win-keyed state's `path` (and marks it
+  dirty) when the buffers window isn't visible at cwd-change time — but
+  **`_refresh_buffers_now` required `state.path`**, so every subsequent
+  rebuild silently skipped the state. It now heals a nil path to the
+  live cwd and clears the dirty bit instead.
+- the v0.2.13 refocus dirty-bit consumer only fired on
+  `_buffers_dirty`, which tracks skipped Buf\* autocmd fires; a bare
+  `cd` with no buffer event afterwards never set it. `on_focus` now
+  also detects manager-side dirt (dirty flag or nil path) directly.
+
+After the fix the refocused panel roots at the new worktree; buffers
+still open from the previous worktree keep their v0.2.14 external-
+bucket grouping. Patch within the v0.2.x line.
+
 ## [v0.2.68] — 2026-07-10 — files-panel render performance (~2× faster redraws)
 
 Large expanded trees made every files-panel redraw visibly slow —
