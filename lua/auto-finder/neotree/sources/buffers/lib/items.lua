@@ -145,10 +145,23 @@ M.get_opened_buffers = function(state)
   local external_keys = {}
   for k in pairs(externals) do external_keys[#external_keys + 1] = k end
   table.sort(external_keys)
+  -- Track ids already promoted to top-level so a bucket root can't
+  -- collide with the cwd root or another bucket (ADR-0050). nui
+  -- hard-errors on a duplicate node id, aborting the whole render;
+  -- the renderer has a defensive dedup too, but skip the obvious
+  -- collision here so we don't drop a legitimately-distinct subtree.
+  local root_ids = { [root.path] = true }
   for _, bucket_path in ipairs(external_keys) do
+    if root_ids[bucket_path] then
+      -- Bucket path coincides with the cwd root or an earlier bucket;
+      -- its buffers already nest under that existing root folder
+      -- (create_item deduped them there). Nothing more to add.
+      goto continue_bucket
+    end
     local bucket_root = file_items.create_item(
       context, bucket_path, "directory")
       --[[@as neotree.FileItem.Directory]]
+    root_ids[bucket_path] = true
     bucket_root.name = vim.fn.fnamemodify(bucket_path, ":~")
     bucket_root.loaded = true
     bucket_root.search_pattern = state.search_pattern
@@ -174,6 +187,7 @@ M.get_opened_buffers = function(state)
       file_items.advanced_sort(bucket_root.children, state)
     end
     table.insert(root_folders, bucket_root)
+    ::continue_bucket::
   end
   state.default_expanded_nodes = {}
   for id, _ in pairs(context.folders) do

@@ -53,6 +53,14 @@ local M = {}
 --   section._core_subs   view_subs set: { "refresh" } when the section
 --                        passes `core_refresh_topic` (buffers + repos)
 local LIVE_REFRESH_DEBOUNCE_MS = 150  -- collapse refresh storms
+-- ADR-0050 §2.4 backstop: a full filesystem re-scan runs at most once
+-- per this interval, no matter how fast refresh triggers arrive. The
+-- 150 ms coalesce above collapses bursts, but a single scan of a large
+-- monorepo can outlast that window, so a watch→refresh loop would still
+-- fire once per iteration. This min-interval throttle bounds any such
+-- loop to a survivable rate (≈1/s) rather than 13/s. Belt, not the fix
+-- (§2.2 + §2.3 are); it protects against future watch→refresh loops too.
+local REFRESH_THROTTLE_MS = 800
 
 local function require_core()
   local ok, core = pcall(require, "auto-core")
@@ -87,13 +95,35 @@ local function setup_live_refresh(section, source)
   -- the window → render complete" — same shape as the inline
   -- implementation, just without the duplicate coalescer pattern.
   local hrtime_ms = function() return (vim.uv or vim.loop).hrtime() / 1e6 end
+  local function uv_now() return (vim.uv or vim.loop).now() end
   local enqueued_ms = nil
-  local schedule_refresh = require("auto-finder.shared.debounce").coalesce(
+
+  -- Forward declaration: the throttled full-refresh body re-arms
+  -- itself through `schedule_refresh` when it fires inside the
+  -- min-interval window, so the name must resolve at call time.
+  local schedule_refresh
+
+  local last_full_refresh_ms = 0
+  local refresh_coalesced = require("auto-finder.shared.debounce").coalesce(
     function()
       if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
         enqueued_ms = nil
         return
       end
+      -- ADR-0050 §2.4: min-interval throttle. A full monorepo scan
+      -- can outlast the coalesce window, so cap the rate. If we fired
+      -- too recently, re-arm a trailing fire for the remaining time
+      -- and skip this run — bounds any watch→refresh loop to ≈1/s
+      -- without dropping the last request (no starvation).
+      local now = uv_now()
+      local since = now - last_full_refresh_ms
+      if since < REFRESH_THROTTLE_MS then
+        vim.defer_fn(function()
+          if schedule_refresh then schedule_refresh() end
+        end, REFRESH_THROTTLE_MS - since)
+        return
+      end
+      last_full_refresh_ms = now
       -- Drive neo-tree's source manager directly. cmd.execute has no
       -- "refresh" action — it only handles "show", "focus", "close",
       -- and falls through to a show/focus pass for anything else,
@@ -125,11 +155,54 @@ local function setup_live_refresh(section, source)
   -- captures `enqueued_ms`. Subsequent triggers within the window
   -- update the deferred fire (per shared.debounce.coalesce
   -- contract) but don't overwrite enqueued_ms.
-  local schedule_refresh_outer = schedule_refresh
   schedule_refresh = function()
     if enqueued_ms == nil then enqueued_ms = hrtime_ms() end
-    schedule_refresh_outer()
+    refresh_coalesced()
   end
+
+  -- ADR-0050 §2.3: decorate-only refresh for git-state events. When
+  -- only git status changed, the tree STRUCTURE is unchanged — so we
+  -- re-fetch git status and redraw the existing nodes rather than
+  -- doing a full filesystem `navigate()`/root re-scan. This keeps a
+  -- legitimate git event O(decorate) instead of O(monorepo walk) and,
+  -- critically, never re-mounts/navigates the panel — which is what
+  -- yanked window focus back to `files` on every refresh. The fork's
+  -- `git.status_async` runs `git status` with `--no-optional-locks`
+  -- (see neotree/git/cmd.lua), fires GIT_STATUS_CHANGED, and the
+  -- filesystem source's handler redraws in place (manager.lua
+  -- `git_status_changed`).
+  local schedule_decorate = require("auto-finder.shared.debounce").coalesce(
+    function()
+      if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
+        return
+      end
+      -- Only the filesystem source carries git decorations. Any other
+      -- live_refresh source degrades to the (throttled) full refresh.
+      if source ~= "filesystem" then
+        schedule_refresh()
+        return
+      end
+      local ok_git, git = pcall(require, "auto-finder.neotree.git")
+      local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+      if not ok_git or not ok_mgr
+          or type(git.status_async) ~= "function"
+          or type(mgr._get_all_states) ~= "function" then
+        -- Decorate path unavailable → degrade to a full refresh
+        -- rather than silently dropping the git update.
+        schedule_refresh()
+        return
+      end
+      local ok_cfg, nt = pcall(require, "auto-finder.neotree")
+      local opts = (ok_cfg and type(nt.ensure_config) == "function"
+        and nt.ensure_config().git_status_async_options) or {}
+      for _, state in ipairs(mgr._get_all_states()) do
+        if state.name == source and state.winid and state.path then
+          pcall(git.status_async, state.path, state.git_base_by_worktree, opts)
+        end
+      end
+    end,
+    LIVE_REFRESH_DEBOUNCE_MS
+  )
 
   -- Re-anchor the section's neo-tree state to the current cwd
   -- WITHOUT re-mounting. v0.2.2 used `cmd.execute({ position =
@@ -240,7 +313,9 @@ local function setup_live_refresh(section, source)
       local cwd = vim.fn.getcwd()
       if payload.repo_root == cwd
           or cwd:sub(1, #payload.repo_root + 1) == payload.repo_root .. "/" then
-        schedule_refresh()
+        -- ADR-0050 §2.3: git state changed but the tree structure did
+        -- not — re-decorate in place, do NOT full-rescan or re-mount.
+        schedule_decorate()
       end
     end)
   end

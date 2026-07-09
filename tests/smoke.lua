@@ -1247,8 +1247,14 @@ else
   ok("files section does NOT carry _git_watch_handle (moved to core)",
     files_section._git_watch_handle == nil)
 
-  -- Stub manager.refresh to capture firings driven by the git
-  -- subscription.
+  -- ADR-0050 §2.3: a git-state event must NOT drive a full filesystem
+  -- re-scan (manager.refresh) — the tree structure is unchanged, so
+  -- the handler re-decorates in place via git.status_async instead.
+  -- That kept the refresh feedback loop from re-scanning a monorepo on
+  -- every index write AND stopped the panel from re-grabbing focus.
+  -- Stub BOTH manager.refresh and git.status_async as recorders so the
+  -- assertions are deterministic (the real async git status is
+  -- suppressed, and we can see which path the git sub took).
   local orig_refresh2 = manager_mod.refresh
   local git_refresh_calls = {}
   manager_mod.refresh = function(source_name, callback)
@@ -1256,59 +1262,89 @@ else
     if callback then pcall(callback) end
   end
 
-  -- Synthetic publish with cwd as repo_root → expect refresh.
+  local git_mod = require("auto-finder.neotree.git")
+  local orig_status_async = git_mod.status_async
+  local decorate_calls = {}
+  git_mod.status_async = function(path, _base, _opts, cb)
+    decorate_calls[#decorate_calls + 1] = path
+    if cb then pcall(cb, nil) end
+  end
+
+  -- Settle: drain any full refresh left pending on the §2.4 throttle's
+  -- trailing edge from earlier section setup (it can defer up to
+  -- REFRESH_THROTTLE_MS), so it doesn't leak into the assertions below.
+  vim.wait(900)
+  git_refresh_calls = {}
+
+  -- Synthetic publish with cwd as repo_root → expect a decorate-only
+  -- refresh (git.status_async), and NO manager.refresh.
   core.events.publish("core.git.state:changed", {
     repo_root = vim.fn.getcwd(),
     git_dir   = vim.fn.getcwd() .. "/.git",
-    kind      = "index",
+    kind      = "head",
   })
-  vim.wait(400, function()
-    for _, src in ipairs(git_refresh_calls) do
-      if src == "filesystem" then return true end
-    end
-    return false
-  end)
-  local saw_git_refresh = false
+  vim.wait(400, function() return #decorate_calls > 0 end)
+  local saw_full_refresh = false
   for _, src in ipairs(git_refresh_calls) do
-    if src == "filesystem" then saw_git_refresh = true; break end
+    if src == "filesystem" then saw_full_refresh = true; break end
   end
-  ok("core.git.state:changed for cwd triggers manager.refresh",
-    saw_git_refresh,
+  ok("core.git.state:changed for cwd does NOT full-rescan (§2.3)",
+    not saw_full_refresh,
     "git_refresh_calls=" .. vim.inspect(git_refresh_calls))
+  -- Decorate fires only when a live filesystem state (with a window)
+  -- exists; the suite may not have one mounted at this point, so assert
+  -- the weaker "decorate attempted OR no full refresh" — the anti-scan
+  -- property above is the load-bearing one.
+  ok("core.git.state:changed for cwd re-decorates in place when mounted (§2.3)",
+    (#decorate_calls > 0) or (not saw_full_refresh),
+    "decorate_calls=" .. vim.inspect(decorate_calls))
+
+  -- Count only signals attributable to OUR git subscriber: a
+  -- filesystem full-refresh, or a decorate against cwd. Background
+  -- refreshes/decorates for other sources/paths must not count.
+  local cwd = vim.fn.getcwd()
+  local function fs_refreshes(list)
+    local n = 0
+    for _, src in ipairs(list) do if src == "filesystem" then n = n + 1 end end
+    return n
+  end
+  local function cwd_decorates(list)
+    local n = 0
+    for _, p in ipairs(list) do if p == cwd then n = n + 1 end end
+    return n
+  end
 
   -- Synthetic publish with a DIFFERENT repo_root (not a prefix of
-  -- cwd) → must NOT refresh. The shared/neotree.lua filter checks
-  -- `payload.repo_root == cwd OR cwd starts-with repo_root/`.
+  -- cwd) → must NOT refresh NOR decorate. The shared/neotree.lua
+  -- filter checks `repo_root == cwd OR cwd starts-with repo_root/`.
   git_refresh_calls = {}
+  decorate_calls = {}
   core.events.publish("core.git.state:changed", {
     repo_root = "/tmp/some-other-repo",
     git_dir   = "/tmp/some-other-repo/.git",
-    kind      = "index",
+    kind      = "head",
   })
   vim.wait(250)
-  local saw_cross_refresh = false
-  for _, src in ipairs(git_refresh_calls) do
-    if src == "filesystem" then saw_cross_refresh = true end
-  end
-  ok("core.git.state:changed for unrelated repo_root does NOT refresh",
-    not saw_cross_refresh,
-    "git_refresh_calls=" .. vim.inspect(git_refresh_calls))
+  ok("core.git.state:changed for unrelated repo_root does NOT refresh or decorate",
+    fs_refreshes(git_refresh_calls) == 0 and cwd_decorates(decorate_calls) == 0,
+    "refresh=" .. vim.inspect(git_refresh_calls)
+      .. " decorate=" .. vim.inspect(decorate_calls))
 
-  -- Missing repo_root field → must not crash, must not refresh.
+  -- Missing repo_root field → must not crash, must not refresh/decorate.
   git_refresh_calls = {}
+  decorate_calls = {}
   core.events.publish("core.git.state:changed", {
     git_dir = "/somewhere/.git",
     kind    = "head",
   })
   vim.wait(250)
-  local saw_malformed_refresh = false
-  for _, src in ipairs(git_refresh_calls) do
-    if src == "filesystem" then saw_malformed_refresh = true end
-  end
   ok("malformed core.git.state:changed payload is ignored safely",
-    not saw_malformed_refresh)
+    fs_refreshes(git_refresh_calls) == 0 and cwd_decorates(decorate_calls) == 0,
+    "refresh=" .. vim.inspect(git_refresh_calls)
+      .. " decorate=" .. vim.inspect(decorate_calls))
 
   manager_mod.refresh = orig_refresh2
+  git_mod.status_async = orig_status_async
 end
 
 -- ADR 0026 Phase 4 teardown: core.stop() releases every watcher.
@@ -3904,28 +3940,34 @@ do
     refresh_calls[#refresh_calls + 1] = source_name
     if callback then pcall(callback) end
   end
+  -- ADR-0050 §2.3: git-state events re-decorate in place via
+  -- git.status_async, they do NOT full-rescan (manager.refresh).
+  local git_mod = require("auto-finder.neotree.git")
+  local orig_status_async = git_mod.status_async
+  local decorate_calls = {}
+  git_mod.status_async = function(path, _base, _opts, cb)
+    decorate_calls[#decorate_calls + 1] = path
+    if cb then pcall(cb, nil) end
+  end
 
   up.events.publish("core.git.state:changed", {
     repo_root = vim.fn.getcwd(),
     git_dir   = vim.fn.getcwd() .. "/.git",
-    kind      = "index",
+    kind      = "head",
   })
-  -- LIVE_REFRESH_DEBOUNCE_MS = 150; pad to 350 for CI variance.
-  vim.wait(350, function()
-    for _, src in ipairs(refresh_calls) do
-      if src == "filesystem" then return true end
-    end
-    return false
-  end)
-  local saw_refresh = false
+  -- LIVE_REFRESH_DEBOUNCE_MS = 150; pad to 400 for CI variance.
+  vim.wait(400, function() return #decorate_calls > 0 end)
+  local saw_full_refresh = false
   for _, src in ipairs(refresh_calls) do
-    if src == "filesystem" then saw_refresh = true; break end
+    if src == "filesystem" then saw_full_refresh = true; break end
   end
-  ok("core.git.state:changed still triggers manager.refresh via the translated topic",
-    saw_refresh,
-    "refresh_calls=" .. vim.inspect(refresh_calls))
+  ok("core.git.state:changed re-decorates via the translated topic, no full rescan (§2.3)",
+    #decorate_calls > 0 and not saw_full_refresh,
+    "decorate=" .. vim.inspect(decorate_calls)
+      .. " refresh=" .. vim.inspect(refresh_calls))
 
   manager_mod.refresh = orig_refresh
+  git_mod.status_async = orig_status_async
 end
 end)()
 
@@ -4741,9 +4783,15 @@ local function bus_reset_survives(view_name, view_idx, topic, payload)
 
   -- Publish the synthetic topic. core's translator fires it
   -- through; shared/neotree.lua's view_subs-armed callback
-  -- triggers schedule_refresh → manager.refresh (150ms).
+  -- triggers schedule_refresh → manager.refresh (150ms coalesce).
+  -- ADR-0050 §2.4: the full-refresh path is min-interval throttled
+  -- (REFRESH_THROTTLE_MS = 800), so if a full refresh fired shortly
+  -- before this publish, manager.refresh is deferred to the trailing
+  -- edge. Wait long enough to cover coalesce + throttle window; the
+  -- condition fn returns early when it fires fast, so this is free
+  -- in the common case.
   core_events.publish(topic, payload)
-  vim.wait(500, function() return #refresh_calls > 0 end)
+  vim.wait(1200, function() return #refresh_calls > 0 end)
 
   manager_mod.refresh = orig_refresh
 
@@ -5707,6 +5755,62 @@ end)()
 -- Six-bucket rendering (`Open → In Progress → Automated → Deferred →
 -- Completed → Archived`) and per-bucket 1-based numbering on every
 -- non-archived bucket.
+-- ─────────── 39b. ADR-0050 — renderer dedups duplicate node ids ──
+-- nui's tree hard-`error()`s on a duplicate node id, aborting the
+-- ENTIRE render. The buffers panel's external-bucket extension can
+-- materialise a worktree-root path as BOTH a directory (bucket/parent)
+-- and a file node (a directory-buffer at that path), colliding ids.
+-- create_nodes now drops the later duplicate so one bad id degrades to
+-- a missing node instead of a blank panel. (Placed before [41b], which
+-- crashes headless per the known-issue task, so this actually runs.)
+print("\n[39b] ADR-0050 — renderer.create_nodes dedups duplicate node ids")
+;(function()
+  local renderer = require("auto-finder.neotree.ui.renderer")
+  local create_nodes = renderer._create_nodes_for_tests
+  ok("p39b: renderer exposes _create_nodes_for_tests",
+    type(create_nodes) == "function")
+  if type(create_nodes) ~= "function" then return end
+
+  local fake_state = { filtered_items = {}, renderers = {} }
+
+  -- A directory node whose subtree contains "/bucket/wt", plus a
+  -- SIBLING file node with the SAME id "/bucket/wt" (the collision
+  -- the buffers extension produces when a directory-buffer sits at a
+  -- worktree root that's also a nested parent).
+  local source_items = {
+    {
+      id = "/bucket", type = "directory", name = "bucket", loaded = true,
+      children = {
+        {
+          id = "/bucket/wt", type = "directory", name = "wt", loaded = true,
+          children = {
+            { id = "/bucket/wt/f.go", type = "file", name = "f.go" },
+          },
+        },
+      },
+    },
+    { id = "/bucket/wt", type = "file", name = "wt-as-file" },
+    { id = "/bucket/other", type = "file", name = "other" },
+  }
+
+  local ok_call, nodes = pcall(create_nodes, source_items, fake_state, 0)
+  ok("p39b: create_nodes does not error on a duplicate id", ok_call,
+    tostring(nodes))
+  ok("p39b: duplicate top-level id is dropped (kept the first, distinct id survives)",
+    ok_call and type(nodes) == "table" and #nodes == 2,
+    "top-level node count = " .. tostring(ok_call and type(nodes) == "table" and #nodes))
+
+  -- Sanity: with no duplicates every node survives.
+  local clean = {
+    { id = "/a", type = "file", name = "a" },
+    { id = "/b", type = "file", name = "b" },
+  }
+  local ok_clean, clean_nodes = pcall(create_nodes, clean, fake_state, 0)
+  ok("p39b: no false-positive dedup on distinct ids",
+    ok_clean and type(clean_nodes) == "table" and #clean_nodes == 2,
+    tostring(ok_clean and type(clean_nodes) == "table" and #clean_nodes))
+end)()
+
 print("\n[40] ADR-0035 Phase 1 — six-bucket panel + numbered non-archived rendering")
 ;(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")

@@ -286,9 +286,17 @@ local create_nodes
 --the given source, but they must contain at least an id field.
 ---@param state neotree.State The current state of the plugin.
 ---@param level integer Optional. The current level of the tree, defaults to 0.
+---@param seen table? Optional. Shared id set for duplicate-id defence
+--(ADR-0050); threaded through the recursion so the whole tree shares one.
 ---@return table nodes A collection of TreeNodes.
-create_nodes = function(source_items, state, level)
+create_nodes = function(source_items, state, level, seen)
   level = level or 0
+  -- ADR-0050: nui's tree hard-`error()`s on a duplicate node id, which
+  -- aborts the ENTIRE render (e.g. the buffers panel's external-bucket
+  -- extension can materialise a worktree-root path as both a directory
+  -- bucket and a file node). Drop the later duplicate here so one bad
+  -- id degrades to a missing node instead of a blank panel.
+  seen = seen or {}
   local nodes = {}
   local filtered_items = state.filtered_items or {}
   local visible, hidden = remove_filtered(source_items, filtered_items)
@@ -311,6 +319,15 @@ create_nodes = function(source_items, state, level)
 
   for i, item in ipairs(source_items) do
     local is_last_child = i == #source_items
+
+    if item.id ~= nil and seen[item.id] then
+      -- Duplicate id already emitted in this render — skip it (and its
+      -- subtree) rather than let nui abort the whole tree. Logged so a
+      -- real collision is diagnosable instead of silently swallowed.
+      log.warn("renderer.create_nodes: dropping duplicate node id ",
+        tostring(item.id), " (", tostring(item.type), ")")
+    else
+    if item.id ~= nil then seen[item.id] = true end
 
     local nodeData = {
       id = item.id,
@@ -337,7 +354,7 @@ create_nodes = function(source_items, state, level)
 
     local node_children = nil
     if item.children ~= nil then
-      node_children = create_nodes(item.children, state, level + 1)
+      node_children = create_nodes(item.children, state, level + 1, seen)
     end
 
     local node = NuiTree.Node(nodeData, node_children)
@@ -345,6 +362,7 @@ create_nodes = function(source_items, state, level)
       node:expand()
     end
     table.insert(nodes, node)
+    end
   end
 
   if #hidden > 0 then
@@ -1687,5 +1705,9 @@ M.show_nodes = function(sourceItems, state, parentId, callback)
   end
   --end, 100)
 end
+
+-- Test-only: expose the id-deduping node builder so the smoke suite can
+-- pin the ADR-0050 duplicate-id defence without mounting a full source.
+M._create_nodes_for_tests = create_nodes
 
 return M
