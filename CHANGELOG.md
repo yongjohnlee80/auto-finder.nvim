@@ -2,6 +2,30 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.66] — 2026-07-10 — files-follow cheap reveal (ADR-0050 reopen follow-up)
+
+Fixes per-keystroke editor lag from `cfg.files.follow` on large
+monorepos. The `BufEnter` reveal called
+`fs_scan.get_items(state, nil, path, …)` unconditionally — a full root
+tree-walk (0.4–4.5 s each) on **every** buffer enter, with no check for
+whether the node was already loaded and no guard against overlapping
+scans. `BufEnter` fires far more often than the tree structure changes
+(window/focus churn, cursor-trail float windows, plugins re-entering a
+buffer), so scans piled up and serialised into a freeze.
+
+- **`init.lua` `_install_files_follow_autocmd`:** the reveal now (1)
+  short-circuits to `renderer.focus_node` when `state.tree:get_node(path)`
+  already exists — O(lookup), no filesystem scan; (2) only scans when the
+  node is genuinely absent, gated by a `reveal_in_flight` bool (reset in
+  the scan callback + a 10 s safety timer) so a `BufEnter` burst can't
+  stack root walks. `focus_node` keeps `do_not_focus_window = true` — a
+  passive follow never steals the user's window focus.
+
+Diagnosed by attributing every root scan to its trigger (temporary
+instrumentation, since removed): after [ADR-0050] the self-sustaining
+runaway was gone, but `files.follow` accounted for the bulk of the
+remaining scans (17 of 21 in one capture). Patch within the v0.2.x line.
+
 ## [v0.2.65] — 2026-07-09 — ADR-0050: decorate-only git refresh + node-id dedup
 
 Fixes the files-panel scan runaway / focus-hijack and the buffers-panel
