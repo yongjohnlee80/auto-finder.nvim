@@ -61,7 +61,25 @@ local base_on_focus = section.on_focus
 section.on_focus = function(panel_winid, bufnr)
   if base_on_focus then base_on_focus(panel_winid, bufnr) end
   local aa = require("auto-finder")
-  if aa._buffers_dirty == true then
+  local needs_refresh = aa._buffers_dirty == true
+  if not needs_refresh then
+    -- A cwd/worktree switch while buffers wasn't the displayed section
+    -- runs manager.dir_changed, which nils the win-keyed state's path
+    -- and marks it dirty — WITHOUT setting `_buffers_dirty` (that flag
+    -- only tracks skipped Buf* autocmd fires). Detect the manager-side
+    -- dirt directly so refocusing after a bare `cd` also rebuilds.
+    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+    if ok_mgr and type(mgr._get_all_states) == "function" then
+      for _, s in ipairs(mgr._get_all_states()) do
+        if s.name == "buffers" and s.winid == panel_winid
+            and (s.dirty or not s.path) then
+          needs_refresh = true
+          break
+        end
+      end
+    end
+  end
+  if needs_refresh then
     aa._buffers_dirty = false
     if type(aa._refresh_buffers_now) == "function" then
       pcall(aa._refresh_buffers_now, panel_winid)

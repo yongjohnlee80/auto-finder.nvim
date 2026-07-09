@@ -839,9 +839,18 @@ function M._refresh_buffers_now(panel_winid)
   for _, state in ipairs(mgr._get_all_states()) do
     if state.name == "buffers"
         and state.winid == panel_winid
-        and state.path
         and state.tree
     then
+      -- Heal a nil path instead of skipping. manager.dir_changed nils
+      -- `state.path` (and sets dirty) when the cwd changes while the
+      -- buffers window isn't visible — e.g. a worktree switch with the
+      -- files section up. Requiring `state.path` here made every
+      -- subsequent rebuild silently no-op, so buffers opened after the
+      -- switch never appeared until a full remount.
+      if not state.path then
+        state.path = vim.fn.getcwd()
+      end
+      state.dirty = false
       -- The renderer's "current" branch swaps the freshly-built tree
       -- buffer into `state.winid` via `nvim_win_set_buf` — which
       -- raises E1513 against the auto-core.ui.panel singleton's
