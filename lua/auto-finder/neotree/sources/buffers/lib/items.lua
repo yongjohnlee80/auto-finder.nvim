@@ -189,6 +189,46 @@ M.get_opened_buffers = function(state)
     table.insert(root_folders, bucket_root)
     ::continue_bucket::
   end
+  -- Detach every top-level root from any parent folder it was linked
+  -- into. create_item → set_parents builds the FULL ancestor chain for
+  -- each item (cwd root included), so when a bucket path is an ancestor
+  -- of the cwd root (cwd ~/Source/Projects/X + external buffer under
+  -- ~/Source ⇒ bucket ~/Source), the cached bucket folder already
+  -- contains the cwd root in its subtree — rendering it as a sibling
+  -- duplicates every node under cwd (the renderer.create_nodes
+  -- duplicate-id WARN storm). Siblings must be disjoint subtrees.
+  for _, top in ipairs(root_folders) do
+    local parent = top.parent_path and context.folders[top.parent_path]
+    if parent and parent.children then
+      for i, child in ipairs(parent.children) do
+        if child.id == top.id then
+          table.remove(parent.children, i)
+          break
+        end
+      end
+    end
+  end
+  -- Prune directories emptied by the detach above (a detached cwd
+  -- root can leave its old parent chain — e.g. an empty "Projects"
+  -- dir — dangling inside a bucket). Dirs in this panel exist only to
+  -- host buffers, so an empty one is always dead weight.
+  local function prune_empty_dirs(dir)
+    if not dir.children then
+      return
+    end
+    for i = #dir.children, 1, -1 do
+      local child = dir.children[i]
+      if child.type == "directory" then
+        prune_empty_dirs(child)
+        if not child.children or #child.children == 0 then
+          table.remove(dir.children, i)
+        end
+      end
+    end
+  end
+  for _, top in ipairs(root_folders) do
+    prune_empty_dirs(top)
+  end
   state.default_expanded_nodes = {}
   for id, _ in pairs(context.folders) do
     table.insert(state.default_expanded_nodes, id)
