@@ -2,6 +2,34 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.65] — 2026-07-09 — ADR-0050: decorate-only git refresh + node-id dedup
+
+Fixes the files-panel scan runaway / focus-hijack and the buffers-panel
+`duplicate node id` crash (two independent defects, [ADR-0050]).
+
+- **§2.3 `shared/neotree.lua`:** `auto-finder.core.git:changed` now
+  **re-decorates in place** — `git.status_async` → `GIT_STATUS_CHANGED`
+  → `manager.git_status_changed` → `renderer.redraw` — instead of a full
+  filesystem `navigate()`/root re-scan. The tree structure is unchanged
+  on a git-state event, so the monorepo walk was wasted; and dropping the
+  re-mount stops the panel from grabbing window focus (the `files`
+  section no longer yanks focus off `todos`). Full re-scan stays reserved
+  for `files:changed` (structural) + `worktree:switched` (re-anchor).
+  Only the `filesystem` source carries git decorations.
+- **§2.4 `shared/neotree.lua`:** min-interval throttle (800 ms,
+  trailing-edge, no starvation) on the full-rescan path — a backstop that
+  bounds any future watch→refresh loop to a survivable rate.
+- **Buffers `duplicate node id` (separate defect):**
+  `renderer.create_nodes` dedups node ids across a render (first-wins,
+  logged) so nui's hard `error()` on a duplicate can't blank the whole
+  panel; `buffers/lib/items.lua` also skips a bucket root colliding with
+  the cwd root / an earlier bucket.
+
+Pairs with `auto-core` ≥ v0.1.62 (§2.1 `--no-optional-locks`, §2.2 drops
+`index` from `git.watch`), but each half stands alone. Lector-reviewed
+(`approved_with_notes`). Smoke 636/0 (new `[39b]`; `[14b]`/`[33]`
+rewritten to the decorate contract).
+
 ## [v0.2.63] — 2026-07-08 — ADR-0048 r5: Env section in the tests + debug views
 
 <!-- v0.2.62 = the todos A-assign fix (cc2a58e), tagged separately
