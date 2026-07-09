@@ -701,6 +701,10 @@ end
 function M._install_files_follow_autocmd(group)
   local pending = false
   local DEBOUNCE_MS = 60
+  -- Guards a reveal scan so BufEnter bursts can't pile up multi-second
+  -- root walks that serialise into an editor freeze. Reset in the scan
+  -- callback (and by a safety timer if the async scan never calls back).
+  local reveal_in_flight = false
 
   local function fire()
     pending = false
@@ -752,15 +756,39 @@ function M._install_files_follow_autocmd(group)
     local root_norm = state.path:gsub("/+$", "")
     if path_norm:sub(1, #root_norm + 1) ~= root_norm .. "/" then return end
 
+    local ok_ren, renderer = pcall(require, "auto-finder.neotree.ui.renderer")
+    if not ok_ren then return end
+
+    -- Short-circuit: if the target node is already materialised in the
+    -- loaded tree, just move the cursor to it — NO filesystem scan.
+    -- BufEnter fires far more often than the tree structure changes
+    -- (window/focus churn, cursor-trail float windows, plugins
+    -- re-entering a buffer). Re-walking the whole monorepo on each
+    -- reveal was pure waste and, on a large tree, the source of the
+    -- per-keystroke editor lag. `true` = do_not_focus_window (this is a
+    -- passive follow — never yank the user's window focus).
+    if state.tree and state.tree:get_node(path_norm) then
+      pcall(renderer.focus_node, state, path_norm, true)
+      return
+    end
+
+    -- Node not loaded yet → a reveal scan is genuinely needed. Guard
+    -- against launching another while one is in flight so a burst of
+    -- BufEnters can't stack root scans.
+    if reveal_in_flight then return end
     local ok_scan, fs_scan = pcall(require,
       "auto-finder.neotree.sources.filesystem.lib.fs_scan")
-    local ok_ren, renderer = pcall(require, "auto-finder.neotree.ui.renderer")
-    if not (ok_scan and ok_ren) then return end
-    pcall(function()
-      fs_scan.get_items(state, nil, path_norm, function()
-        pcall(renderer.focus_node, state, path_norm, true)
-      end)
+    if not ok_scan then return end
+
+    reveal_in_flight = true
+    -- Safety net: never wedge follow permanently if the async scan
+    -- aborts without invoking the callback.
+    vim.defer_fn(function() reveal_in_flight = false end, 10000)
+    local ok = pcall(fs_scan.get_items, state, nil, path_norm, function()
+      reveal_in_flight = false
+      pcall(renderer.focus_node, state, path_norm, true)
     end)
+    if not ok then reveal_in_flight = false end
   end
 
   vim.api.nvim_create_autocmd("BufEnter", {
