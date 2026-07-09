@@ -2,6 +2,51 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.67] — 2026-07-10 — scan feedback loop broken + buffers duplicate-node storm fixed
+
+Fixes the remaining scan runaway that survived [v0.2.65] (git entry
+point) and [v0.2.66] (files-follow entry point). Root cause confirmed
+by live traceback capture (deterministic 5/5 repro via `vim.notify`):
+a slow scan's "mapped X (N.Ns)" toast tears down its toast buffer →
+`BufDelete` → `core/buffers.lua` published `buffers:changed` for ANY
+buffer → the buffers section's refresh subscriber called
+`manager.refresh('buffers')` → which ignored its source arg and
+navigated EVERY windowed state, including the filesystem state → full
+monorepo root re-scan → slow → new toast → loop.
+
+- **`neotree/sources/manager.lua`:** `manager.refresh(source_name)` is
+  now scoped to the named source (the fork-original implementation
+  navigated all sources). `nil` keeps the legacy refresh-everything
+  behavior; every existing caller passes an explicit source.
+- **`core/buffers.lua`:** only tracks/publishes user-visible buffers
+  (listed or terminal — exactly what the buffers view renders).
+  Scratch/nofile buffers (notifier toasts, cursor-trail floats, picker
+  previews) no longer generate `buffers:changed` spam. `snapshot_async`
+  resolves directly once the cache warms instead of relying on event
+  spam.
+- **`neotree/sources/filesystem/lib/fs_scan.lua`:** scan-storm detector
+  at the root-scan chokepoint — >8 root scans in 30 s emits a WARN with
+  the current scan's traceback, so any future watch/event→refresh loop
+  self-announces with its trigger attributed in the log ring. Detection
+  only; legitimate navigation is never delayed.
+
+Also fixes the buffers panel's non-stop
+`renderer.create_nodes: dropping duplicate node id` WARN spam.
+`create_item → set_parents` recursively links every item's full
+ancestor chain — including the cwd root's (cwd `~/Source/Projects/X`
+gets attached under `~/Source/Projects` → `~/Source` → …). When an
+external buffer bucketed under one of those ancestors (v0.2.14
+external-bucket extension), the bucket lookup returned the cached
+ancestor folder whose subtree already contained the cwd root, so
+rendering it as a top-level sibling duplicated every node under cwd.
+
+- **`sources/buffers/lib/items.lua`:** before `show_nodes`, each
+  top-level root (cwd root, bucket roots) is detached from any parent
+  folder `set_parents` linked it into — siblings must be disjoint
+  subtrees — and directories emptied by the detach are pruned.
+
+Patch within the v0.2.x line.
+
 ## [v0.2.66] — 2026-07-10 — files-follow cheap reveal (ADR-0050 reopen follow-up)
 
 Fixes per-keystroke editor lag from `cfg.files.follow` on large
