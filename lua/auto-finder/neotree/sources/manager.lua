@@ -651,7 +651,20 @@ M.redraw = function(source_name)
 end
 
 ---Refreshes the tree by scanning the filesystem again.
----@param source_name string
+---
+---v0.2.67: scoped to `source_name`. The inherited implementation
+---ignored the argument and navigated EVERY source's windowed state —
+---so a cheap buffers/repos refresh also triggered a full filesystem
+---root re-scan. In the panel architecture (multiple sources mounted
+---persistently in one window) that cross-source fan-out turned any
+---buffer-list event into a monorepo walk, and closed the notification
+---feedback loop behind the ADR-0050 scan runaway (slow scan →
+---`scan.completed.slow` toast → notifier deletes its toast buffer →
+---`core.buffers:changed` → refresh → scan → …). States of other
+---sources are left untouched (not even dirtied) — the section
+---mount/revive path navigates them on display anyway. Pass nil to
+---keep the legacy refresh-everything behavior.
+---@param source_name string?
 ---@param callback function?
 M.refresh = function(source_name, callback)
   if type(callback) ~= "function" then
@@ -661,13 +674,15 @@ M.refresh = function(source_name, callback)
   log.trace(source_name, "refresh")
   for i = 1, #all_states, 1 do
     local state = all_states[i]
-    if state.tabid == current_tabid and state.path and renderer.window_exists(state) then
-      local success, err = pcall(M.navigate, state, state.path, nil, callback)
-      if not success then
-        log.error(err)
+    if source_name == nil or state.name == source_name then
+      if state.tabid == current_tabid and state.path and renderer.window_exists(state) then
+        local success, err = pcall(M.navigate, state, state.path, nil, callback)
+        if not success then
+          log.error(err)
+        end
+      else
+        state.dirty = true
       end
-    else
-      state.dirty = true
     end
   end
 end

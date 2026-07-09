@@ -28,6 +28,49 @@ M.MAPPING_TOAST_MS = 500
 -- Independent of MAPPING_TOAST_MS; subscribe to either or both.
 M.SLOW_THRESHOLD_MS = 1000
 
+-- v0.2.67: scan-storm detector. Every full root scan funnels through
+-- the `not parent_id` branch of `get_items`, which makes it the one
+-- chokepoint that sees a runaway regardless of which caller drives it
+-- (watch events, section refreshes, reveals, notification feedback —
+-- the ADR-0050 family). When more root scans than STORM_THRESHOLD
+-- land inside STORM_WINDOW_MS, emit a WARN carrying the CURRENT
+-- scan's traceback so the loop self-announces WITH its trigger
+-- attributed in the log ring — instead of silently pinning a core
+-- until someone bolts on ad-hoc instrumentation. Detection only: no
+-- damping/suppression, legitimate rapid navigation is never delayed.
+-- Thresholds are far above legitimate bursts (worktree switch +
+-- mount + reveal ≈ 3 scans); exposed on M for tests + power-users.
+M.STORM_WINDOW_MS = 30000
+M.STORM_THRESHOLD = 8
+local storm_times = {}
+local storm_last_warn_ms = 0
+
+---Record a root-scan start; warn (at most once per window) when the
+---rate crosses the storm threshold. Split out for the smoke pin.
+---@param now_ms integer
+---@return boolean warned
+function M._storm_record(now_ms)
+  storm_times[#storm_times + 1] = now_ms
+  local cutoff = now_ms - M.STORM_WINDOW_MS
+  local kept = {}
+  for _, t in ipairs(storm_times) do
+    if t >= cutoff then kept[#kept + 1] = t end
+  end
+  storm_times = kept
+  if #storm_times >= M.STORM_THRESHOLD
+      and (now_ms - storm_last_warn_ms) >= M.STORM_WINDOW_MS then
+    storm_last_warn_ms = now_ms
+    return true
+  end
+  return false
+end
+
+---Reset detector state (tests).
+function M._storm_reset()
+  storm_times = {}
+  storm_last_warn_ms = 0
+end
+
 --- how many entries to load per readdir
 local ENTRIES_BATCH_SIZE = 1000
 
@@ -731,6 +774,21 @@ M.get_items = function(state, parent_id, path_to_reveal, callback, async_dir_sca
     -- vendored vlog.
     local ok_log, af_log = pcall(require, "auto-finder.log")
     if not ok_log then af_log = nil end
+
+    -- v0.2.67 scan-storm detector (see M._storm_record). The
+    -- traceback is only captured when the threshold actually trips,
+    -- so the steady-state cost is one table append + prune per scan.
+    if M._storm_record(start_ms) and af_log then
+      pcall(af_log.warn, "scan",
+        ("scan storm: %d+ full root scans within %ds — possible watch/event→refresh feedback loop; fields.stack attributes this scan's trigger")
+          :format(M.STORM_THRESHOLD, math.floor(M.STORM_WINDOW_MS / 1000)),
+        { fields = {
+            path      = short,
+            threshold = M.STORM_THRESHOLD,
+            window_ms = M.STORM_WINDOW_MS,
+            stack     = (debug.traceback("", 2) or ""):gsub("\t", "  "),
+          } })
+    end
 
     -- Deferred toast: fire the user-visible "mapping …" toast only
     -- if the scan is still running after MAPPING_TOAST_MS. The

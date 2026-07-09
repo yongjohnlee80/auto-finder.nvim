@@ -52,24 +52,52 @@ local function _build_entry(bufnr)
   }
 end
 
+---v0.2.67: only user-visible buffers belong in the cache — the
+---buffers view renders listed buffers plus terminals and nothing
+---else (`neotree/sources/buffers/lib/items.lua` filters on
+---`buflisted`). Tracking every buffer meant every scratch/`nofile`
+---buffer — notifier toasts, cursor-trail floats, picker previews —
+---published a `buffers:changed` event on create/delete/enter. That
+---event spam was the transport of the notification→refresh feedback
+---loop (each slow-scan toast's buffer teardown re-triggered a
+---refresh) and churned the buffers panel for buffers it never shows.
+---@param bufnr integer
+---@return boolean
+local function _user_visible(bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then return false end
+  if vim.bo[bufnr].buflisted then return true end
+  return vim.bo[bufnr].buftype == "terminal"
+end
+
 ---Populate the cache from `nvim_list_bufs()`. Used at
 ---`_arm_autocmds` time so the cache reflects reality immediately,
 ---not just from the next autocmd onward.
 local function _refresh_all()
   M._cache = {}
   for _, bufnr in ipairs(vim.api.nvim_list_bufs()) do
-    local e = _build_entry(bufnr)
-    if e then M._cache[bufnr] = e end
+    if _user_visible(bufnr) then
+      local e = _build_entry(bufnr)
+      if e then M._cache[bufnr] = e end
+    end
   end
   M._readiness = "ready"
 end
 
 ---Update one entry and publish auto-finder.core.buffers:changed.
+---Buffers that were never user-visible (see `_user_visible`) are
+---ignored entirely — no cache entry, no event. A cached buffer that
+---turns non-visible (e.g. `setlocal nobuflisted`) is downgraded to a
+---`remove` so subscribers converge with the panel's rendering.
 ---@param bufnr integer
 ---@param kind 'add'|'remove'|'enter'|'modify'
 local function _mutate(bufnr, kind)
   if kind == "remove" then
+    if M._cache[bufnr] == nil then return end  -- never tracked → silent
     M._cache[bufnr] = nil
+  elseif not _user_visible(bufnr) then
+    if M._cache[bufnr] == nil then return end  -- scratch/notif → silent
+    M._cache[bufnr] = nil
+    kind = "remove"
   else
     local e = _build_entry(bufnr)
     if e then M._cache[bufnr] = e end
@@ -102,15 +130,27 @@ function M.snapshot_async(cb)
     vim.schedule(function() cb(M.snapshot_now()) end)
     return
   end
-  -- Wait for the next buffers:changed and then fire. Also kick
-  -- a refresh so the callback isn't stranded on a quiet session.
+  -- Wait for the next buffers:changed and then fire. Also kick a
+  -- refresh so the callback isn't stranded on a quiet session.
+  -- v0.2.67: the scheduled refresh now resolves the callback
+  -- DIRECTLY once the cache is warm. Previously the callback relied
+  -- on the next autocmd-driven event — near-instant when every
+  -- scratch buffer published, but with `_user_visible` filtering a
+  -- quiet session could strand it indefinitely.
   local events_mod = require("auto-finder.core.events")
+  local done = false
   local handle
-  handle = events_mod.subscribe("auto-finder.core.buffers:changed", function()
-    events_mod.unsubscribe(handle)
+  local function finish()
+    if done then return end
+    done = true
+    if handle then events_mod.unsubscribe(handle) end
     cb(M.snapshot_now())
+  end
+  handle = events_mod.subscribe("auto-finder.core.buffers:changed", finish)
+  vim.schedule(function()
+    _refresh_all()
+    finish()
   end)
-  vim.schedule(function() _refresh_all() end)
 end
 
 ---@param bufnr integer
