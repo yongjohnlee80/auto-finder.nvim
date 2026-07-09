@@ -114,6 +114,7 @@ end
 ---@class (exact) neotree.StateWithTree : neotree.State
 ---@field tree NuiTree
 ---@field _in_pre_render boolean?
+---@field _render_width integer? per-render-pass window-width snapshot (renderer.render_tree)
 
 ---@param tabid integer
 ---@param sd table

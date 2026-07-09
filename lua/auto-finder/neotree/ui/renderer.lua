@@ -493,11 +493,19 @@ local prepare_node = function(item, state)
   -- `state.win_width` to detect "did the window change since the
   -- last render"). Those writes are correct as recorded snapshots;
   -- the bug was only this read trusting the snapshot.
-  local remaining_cols
-  if state.winid and vim.api.nvim_win_is_valid(state.winid) then
-    remaining_cols = vim.api.nvim_win_get_width(state.winid)
-  else
-    remaining_cols = utils.resolve_config_option(state, "window.width", 40)
+  -- Perf: `state._render_width` is a per-render-pass snapshot taken by
+  -- render_tree immediately before each `tree:render()` and cleared
+  -- right after. Renders are synchronous, so the window cannot resize
+  -- mid-pass — unlike the cross-render `state.win_width` cache above,
+  -- this one can never go stale. It saves one nvim_win_get_width API
+  -- round-trip per node, which adds up on large trees.
+  local remaining_cols = state._render_width
+  if not remaining_cols then
+    if state.winid and vim.api.nvim_win_is_valid(state.winid) then
+      remaining_cols = vim.api.nvim_win_get_width(state.winid)
+    else
+      remaining_cols = utils.resolve_config_option(state, "window.width", 40)
+    end
   end
 
   local wanted_width = 0
@@ -1461,13 +1469,33 @@ render_tree = function(state)
   local should_auto_expand = state.window.auto_expand_width
       and state.current_position ~= "float"
       and not pinned
-  local should_pre_render = should_auto_expand or state.current_position == "current"
+  -- Auto-finder fork perf: upstream also pre-rendered for
+  -- `position = "current"` because prepare_node clamped
+  -- `remaining_cols` to `longest_node + 4` there — a clamp this fork
+  -- removed (see prepare_node). With that gone, auto-expand is the
+  -- pre-render's ONLY consumer, and pre-rendering unconditionally for
+  -- "current" (how every auto-finder panel mounts) doubled the cost
+  -- of every redraw on large trees.
+  local should_pre_render = should_auto_expand
 
   local marks = save_marks(state)
+
+  -- Snapshot the live window width for prepare_node once per render
+  -- pass (see the `state._render_width` read there). Renders are
+  -- synchronous; the snapshot is retaken after the auto-expand resize
+  -- below and cleared before returning.
+  local function snapshot_render_width()
+    if state.winid and vim.api.nvim_win_is_valid(state.winid) then
+      state._render_width = vim.api.nvim_win_get_width(state.winid)
+    else
+      state._render_width = nil
+    end
+  end
 
   if should_pre_render and M.tree_is_visible(state) then
     log.trace("pre-rendering tree")
     state._in_pre_render = true
+    snapshot_render_width()
     if add_blank_line_at_top then
       state.tree:render(2)
     else
@@ -1485,12 +1513,14 @@ render_tree = function(state)
   end
 
   if M.tree_is_visible(state) then
+    snapshot_render_width()
     if add_blank_line_at_top then
       state.tree:render(2)
     else
       state.tree:render()
     end
   end
+  state._render_width = nil
 
   log.debug("render_tree: Restoring position")
   M.position.restore(state)
