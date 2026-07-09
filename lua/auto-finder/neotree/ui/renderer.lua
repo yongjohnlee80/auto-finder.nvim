@@ -320,49 +320,52 @@ create_nodes = function(source_items, state, level, seen)
   for i, item in ipairs(source_items) do
     local is_last_child = i == #source_items
 
+    -- ADR-0050: drop a duplicate id (and its subtree) rather than let
+    -- nui abort the whole tree. First-wins; logged so a real collision
+    -- stays diagnosable instead of silently swallowed.
     if item.id ~= nil and seen[item.id] then
-      -- Duplicate id already emitted in this render — skip it (and its
-      -- subtree) rather than let nui abort the whole tree. Logged so a
-      -- real collision is diagnosable instead of silently swallowed.
       log.warn("renderer.create_nodes: dropping duplicate node id ",
         tostring(item.id), " (", tostring(item.type), ")")
-    else
+      goto continue_item
+    end
     if item.id ~= nil then seen[item.id] = true end
 
-    local nodeData = {
-      id = item.id,
-      name = item.name,
-      type = item.type,
-      loaded = item.loaded,
-      filtered_by = item.filtered_by,
-      extra = item.extra,
-      is_nested = item.is_nested,
-      skip_node = item.skip_node,
-      is_empty_with_hidden_root = item.is_empty_with_hidden_root,
-      stat = item.stat,
-      stat_provider = item.stat_provider,
-      -- TODO: The below properties are not universal and should not be here.
-      -- Maybe they should be moved to the "extra" field?
-      is_link = item.is_link,
-      link_to = item.link_to,
-      path = item.path,
-      ext = item.ext,
-      search_pattern = item.search_pattern,
-      level = level,
-      is_last_child = is_last_child,
-    }
+    do
+      local nodeData = {
+        id = item.id,
+        name = item.name,
+        type = item.type,
+        loaded = item.loaded,
+        filtered_by = item.filtered_by,
+        extra = item.extra,
+        is_nested = item.is_nested,
+        skip_node = item.skip_node,
+        is_empty_with_hidden_root = item.is_empty_with_hidden_root,
+        stat = item.stat,
+        stat_provider = item.stat_provider,
+        -- TODO: The below properties are not universal and should not be here.
+        -- Maybe they should be moved to the "extra" field?
+        is_link = item.is_link,
+        link_to = item.link_to,
+        path = item.path,
+        ext = item.ext,
+        search_pattern = item.search_pattern,
+        level = level,
+        is_last_child = is_last_child,
+      }
 
-    local node_children = nil
-    if item.children ~= nil then
-      node_children = create_nodes(item.children, state, level + 1, seen)
-    end
+      local node_children = nil
+      if item.children ~= nil then
+        node_children = create_nodes(item.children, state, level + 1, seen)
+      end
 
-    local node = NuiTree.Node(nodeData, node_children)
-    if item._is_expanded then
-      node:expand()
+      local node = NuiTree.Node(nodeData, node_children)
+      if item._is_expanded then
+        node:expand()
+      end
+      table.insert(nodes, node)
     end
-    table.insert(nodes, node)
-    end
+    ::continue_item::
   end
 
   if #hidden > 0 then
