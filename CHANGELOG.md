@@ -2,6 +2,33 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.68] — 2026-07-10 — files-panel render performance (~2× faster redraws)
+
+Large expanded trees made every files-panel redraw visibly slow —
+LuaJIT-profiled at 40 ms per redraw for 521 visible nodes (scales
+linearly, so multi-thousand-node monorepo views paid hundreds of ms).
+Three per-node hot-path fixes in the forked renderer:
+
+- **`ui/renderer.lua` `render_tree`:** no more full pre-render pass for
+  `position = "current"` mounts (how every auto-finder panel mounts).
+  Upstream pre-rendered there to feed prepare_node's
+  `longest_node + 4` clamp — a clamp this fork removed — so the pass
+  only doubled redraw cost. Pre-render now runs solely when
+  auto-expand-width genuinely needs it (on, not pinned, not float).
+- **`ui/renderer.lua` `prepare_node`:** the live window width is now
+  snapshotted once per render pass (`state._render_width`) instead of
+  one `nvim_win_get_width` API round-trip per node. Renders are
+  synchronous, so unlike the stale-prone cross-render `state.win_width`
+  cache, the snapshot cannot drift.
+- **`defaults.lua` icon provider:** `pcall(require,
+  "nvim-web-devicons")` ran per file node per render, and Lua never
+  caches a FAILED require — without devicons installed every node
+  re-scanned the entire runtimepath (~25% of render time). The lookup
+  is memoized in a module-local (`false` = confirmed absent).
+
+Measured after: ~20 ms per redraw at the same node count, in both the
+default and auto-expand configs. Patch within the v0.2.x line.
+
 ## [v0.2.67] — 2026-07-10 — scan feedback loop broken + buffers duplicate-node storm fixed
 
 Fixes the remaining scan runaway that survived [v0.2.65] (git entry
