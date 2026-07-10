@@ -12,6 +12,13 @@
 ---  - Header line with the discovery root + file/position counts,
 ---    plus the live scan state (`scanning…` / structured cap
 ---    report when a bounded scan aborts — no-silent-caps rule).
+---  - A "Config" section above Env: the `kind=test` VSCode
+---    `launch.json` configs auto-run parses, with a `*` marker on the
+---    per-repo selected config. Selecting one makes it the active base
+---    merged into every subsequent launch (env/build_flags/etc.).
+---    Shared renderer/actions in `views/_config_section.lua` (debug
+---    view shows `kind=debug`). `o` expands resolved fields with env
+---    VALUES masked (§8.2).
 ---  - An "Env" section (§8.4, r5) above the position tree: candidate
 ---    env files with a `*` marker on the per-repo selection, rows
 ---    dimmed when the file is missing. Shared renderer/actions in
@@ -29,7 +36,8 @@
 ---  <CR>  jump to the position (editor-routed via
 ---        auto-finder._editor_target_winid); on a container row,
 ---        toggle collapse; on an expanded output-path detail row,
----        open the run's output file; on an env file, open it; on
+---        open the run's output file; on a config row, open
+---        launch.json at that entry; on an env file, open it; on
 ---        an env var, open the file at that entry's line.
 ---  r     run the position under the cursor (test / namespace /
 ---        file / folder = suite) via discovery.run_position
@@ -41,8 +49,9 @@
 ---        style child rows), collapse on a container row; on an
 ---        env file, inline KEY=VALUE expansion (user-owned file —
 ---        interactive display, §4.2 r5 boundary)
----  s     env file → select/deselect it (highest-precedence
----        env_files entry for every subsequent launch, §4.2)
+---  s     config row → select/deselect it (active base merged into
+---        every subsequent launch); env file → select/deselect it
+---        (highest-precedence env_files entry for every launch, §4.2)
 ---  e     env var → edit the value (vim.ui.input, prefilled)
 ---  a     env file row / Env header → add KEY=VALUE (two prompts;
 ---        already-exists offers overwrite)
@@ -73,7 +82,8 @@ local FILETYPE = "auto-finder"
 -- near-universal groups so the panel picks up the active palette;
 -- user `:hi AutoFinderTests*` overrides always win (`default = true`).
 local HL = {
-  header      = "AutoFinderTestsHeader",      -- top status line
+  header       = "AutoFinderTestsHeader",      -- top status line
+  config_header = "AutoFinderTestsConfigHeader", -- Config section header
   env_header  = "AutoFinderTestsEnvHeader",   -- Env section header (§8.4)
   scan_state  = "AutoFinderTestsScanState",   -- scanning… / cap report
   scan_capped = "AutoFinderTestsScanCapped",  -- the cap warning lines
@@ -103,12 +113,15 @@ local function _apply_default_highlights()
     vim.api.nvim_set_hl(0, name, { default = true, link = link })
   end
   set(HL.header,      "Title")
+  set(HL.config_header, "Type")
   set(HL.env_header,  "Type")
   set(HL.scan_state,  "Comment")
   set(HL.scan_capped, "DiagnosticWarn")
   set(HL.chevron,     "NonText")
   set(HL.dir,         "Directory")
-  set(HL.file,        "Normal")
+  -- File rows get an explicit orange to distinguish them from test-case
+  -- rows (which stay Normal). `default = true` lets `:hi` overrides win.
+  vim.api.nvim_set_hl(0, HL.file, { default = true, fg = "#e0965e", bold = true })
   set(HL.namespace,   "Identifier")
   set(HL.test,        "Normal")
   set(HL.glyph_pass,  "DiagnosticOk")
@@ -149,7 +162,10 @@ local STATUS_GLYPH = {
 M._bufnr = nil
 
 -- Per-buffer row metadata, in render order. Shapes:
---   { kind="header",     lnum }
+--   { kind="header",       lnum }
+--   { kind="config-header", lnum }          -- Config section header
+--   { kind="config",        lnum, name, runtime, selected }
+--   { kind="config-detail", lnum, name }    -- expanded field child
 --   { kind="env-header", lnum }             -- Env section header (§8.4)
 --   { kind="env-file",   lnum, path, source, exists, selected, synthetic? }
 --   { kind="env-var",    lnum, path, key, file_lnum }
@@ -206,11 +222,17 @@ end
 -- the views; the debug view consumes the same helper.
 local env_section = require("auto-finder.views._env_section")
 
+-- Shared Config-section renderer/actions (launch-config selection) —
+-- the tests view passes kind="test"; the debug view kind="debug".
+local config_section = require("auto-finder.views._config_section")
+
 -- Pseudo position-id keying the Env section's collapse state inside
 -- M._collapsed / the persisted `tests_collapsed` table. Real position
 -- ids are absolute paths (optionally `::`-suffixed), so a `::`-prefixed
 -- key can never collide with one.
 local ENV_SECTION_ID = "::env-section"
+-- Same mechanism for the Config section's collapse state.
+local CONFIG_SECTION_ID = "::config-section"
 
 -- ─── persisted collapse state (dirs only) ─────────────────────
 
@@ -404,6 +426,31 @@ local function _render(bufnr)
         r.parsed or 0, r.cached or 0, r.removed or 0)
       lines[#lines + 1] = l
       mark(#lines - 1, 0, #l, HL.scan_state)
+    end
+    lines[#lines + 1] = ""
+  end
+
+  -- ── Config section (launch-config selection) — above Env ─────
+  do
+    local cfg_list, cfg_reason = config_section.collect("test")
+    local collapsed = M._collapsed[CONFIG_SECTION_ID] == true
+    local chevron = collapsed and "▶ " or "▼ "
+    local label = string.format("Config (%d)", cfg_list and #cfg_list or 0)
+    lines[#lines + 1] = chevron .. label
+    local lnum0 = #lines - 1
+    mark(lnum0, 0, #chevron, HL.chevron)
+    mark(lnum0, #chevron, #chevron + #label, HL.config_header)
+    rows[#rows + 1] = { kind = "config-header", lnum = lnum0 + 1 }
+    if not collapsed then
+      config_section.emit({
+        list     = cfg_list,
+        reason   = cfg_reason,
+        kind     = "test",
+        lines    = lines,
+        mark     = mark,
+        rows     = rows,
+        expanded = M._expanded,
+      })
     end
     lines[#lines + 1] = ""
   end
@@ -604,6 +651,12 @@ end
 local function _open(row)
   if not row then return end
 
+  if row.kind == "config-header" then
+    _toggle_collapsed({ id = CONFIG_SECTION_ID, type = "dir" })
+    _rerender()
+    return
+  end
+  if config_section.open(row, _open_file) then return end
   if row.kind == "env-header" then
     -- Persisted via the same dir mechanism as folder collapse.
     _toggle_collapsed({ id = ENV_SECTION_ID, type = "dir" })
@@ -670,6 +723,15 @@ local function _rerun_last()
 end
 
 ---`d`: debug the test under the cursor (dap strategy).
+---Routes through the editor-target window first so that auto-run's
+---`debug_position` (which does `vim.cmd.edit` + `nvim_win_set_cursor(0, …)`)
+---operates in the editor pane, not the panel. dap-go then picks up the
+---test function under the cursor in the correct buffer.
+---
+---When no DAP breakpoint exists within the test function's line range
+---(node.lnum..node.end_lnum), one is auto-injected at the first line
+---of the function body (lnum + 1) so the debugger always stops inside
+---the function without requiring the user to manually set a breakpoint.
 ---@param row table?
 local function _debug(row)
   if not (row and row.kind == "position") then return end
@@ -682,6 +744,76 @@ local function _debug(row)
     log().warn("view.tests", "auto-run.nvim is not installed")
     return
   end
+  -- Switch to the editor-target window so debug_position's edit/cursor
+  -- land in the editor pane (not the panel scratch buffer).
+  local af = require("auto-finder")
+  local target = af._editor_target_winid()
+  if target and vim.api.nvim_win_is_valid(target) then
+    vim.api.nvim_set_current_win(target)
+  else
+    -- No suitable editor window — open a split, same as _open_file.
+    pcall(vim.cmd, "rightbelow vsplit")
+  end
+
+  -- ── auto-inject breakpoint if none in the function range ──────
+  -- The injected breakpoint is ephemeral: a one-shot DAP listener
+  -- removes it when the debug session terminates / exits.
+  local node = row.node
+  local ok_bp, dap_bps = pcall(require, "dap.breakpoints")
+  local ok_dap, dap = pcall(require, "dap")
+  local injected_bufnr, injected_line  -- track for teardown
+  if ok_bp and ok_dap and node.path and node.lnum then
+    -- Open the file so we have a loaded buffer to inspect.
+    pcall(vim.cmd, "edit " .. vim.fn.fnameescape(node.path))
+    local bufnr = vim.fn.bufnr(node.path)
+    if bufnr and bufnr > 0 then
+      local fn_start = node.lnum
+      local fn_end   = node.end_lnum or fn_start
+      local bps = dap_bps.get(bufnr) or {}
+      local has_bp = false
+      for _, bp in ipairs(bps) do
+        local line = bp.line
+        if line and line >= fn_start and line <= fn_end then
+          has_bp = true
+          break
+        end
+      end
+      if not has_bp then
+        -- Inject at the first line of the function body (lnum + 1).
+        local bp_line = fn_start + 1
+        local total = vim.api.nvim_buf_line_count(bufnr)
+        if bp_line <= total then
+          pcall(vim.api.nvim_win_set_cursor, 0, { bp_line, 0 })
+          pcall(dap.set_breakpoint)
+          injected_bufnr = bufnr
+          injected_line  = bp_line
+          log().info("view.tests",
+            "auto-set breakpoint at " .. node.path .. ":" .. bp_line
+            .. " (will remove on session end)")
+        end
+      end
+    end
+  end
+
+  -- ── register one-shot cleanup for the injected breakpoint ─────
+  if injected_bufnr and injected_line and ok_dap then
+    local LISTENER_KEY = "auto-finder-tests-ephemeral-bp"
+    local function cleanup()
+      -- Remove only the specific injected breakpoint, not user ones.
+      -- dap.breakpoints.remove(bufnr, lnum) is cursor-independent.
+      if vim.api.nvim_buf_is_valid(injected_bufnr) then
+        pcall(dap_bps.remove, injected_bufnr, injected_line)
+        log().info("view.tests",
+          "removed ephemeral breakpoint at line " .. injected_line)
+      end
+      -- De-register ourselves (one-shot).
+      dap.listeners.after.event_terminated[LISTENER_KEY] = nil
+      dap.listeners.after.event_exited[LISTENER_KEY]     = nil
+    end
+    dap.listeners.after.event_terminated[LISTENER_KEY] = cleanup
+    dap.listeners.after.event_exited[LISTENER_KEY]     = cleanup
+  end
+
   local ok, err = ar.discovery.debug_position(row.node.id)
   if not ok then
     log().error("view.tests", "debug failed: " .. tostring(err))
@@ -694,6 +826,15 @@ end
 ---@param row table?
 local function _toggle_expand(row)
   if not row then return end
+  if row.kind == "config-header" then
+    _toggle_collapsed({ id = CONFIG_SECTION_ID, type = "dir" })
+    _rerender()
+    return
+  end
+  if config_section.toggle_expand(row, M._expanded) then
+    _rerender()
+    return
+  end
   if row.kind == "env-header" then
     _toggle_collapsed({ id = ENV_SECTION_ID, type = "dir" })
     _rerender()
@@ -871,8 +1012,12 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.tests: full worktree scan (bounded; press again to cancel)")
   set("x", function() _stop() end,
     "auto-finder.tests: stop running test jobs")
-  set("s", function() env_section.select(_row_under_cursor(panel_winid)) end,
-    "auto-finder.tests: select/deselect the env file under cursor (applied to every launch)")
+  set("s", function()
+      local row = _row_under_cursor(panel_winid)
+      if config_section.select(row) then return end
+      env_section.select(row)
+    end,
+    "auto-finder.tests: select/deselect the config or env file under cursor (applied to every launch)")
   set("e", function() env_section.edit_var(_row_under_cursor(panel_winid)) end,
     "auto-finder.tests: edit the env var's value under cursor (vim.ui.input, prefilled)")
   set("a", function()
@@ -917,6 +1062,7 @@ local function _ensure_subscriptions()
     ev.subscribe("run.discovery:changed", _on_event),
     ev.subscribe("run.results:changed",   _on_event),
     ev.subscribe("run.env:changed",       _on_event),
+    ev.subscribe("run.config:changed",    _on_event),
   }
 end
 

@@ -2,6 +2,31 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — Config section (launch-config selection)
+
+A **Config** section above the Env section in both the tests and debug
+views, the launch-config companion to the r5 Env section. It surfaces
+the VSCode `launch.json` configs auto-run parses
+(`auto-run.import.configs_list`) — the **tests** view lists `mode:test`
+configs, the **debug** view `mode:debug`. A `*` marks the per-repo
+selected config; selecting one (`s`) makes it the **active base** merged
+into every subsequent launch (env/build_flags/etc. via auto-run's
+`apply_selected_base`), alongside the selected `.env` file.
+
+- **New shared component `views/_config_section.lua`** (mirrors
+  `_env_section.lua`): `collect(kind)`, `emit` (with `o` expansion), and
+  the typed-row actions `toggle_expand` (`o`), `open` (`<CR>` opens
+  `launch.json` at the entry), `select` (`s`). Read-only — no edit/add.
+- **Both views** render the section above Env, with per-section collapse,
+  `o`/`s`/`<CR>` dispatch, and a `run.config:changed` subscription (the
+  tests view gains the subscription; the debug view already had it).
+- **Masking (§8.2):** the `o` expansion shows resolved fields but env
+  VALUES are masked (KEY names only) — unlike the Env section's
+  deliberate value display.
+- Requires auto-run ≥ v0.1.5 (`import` selection API + runtime wiring).
+- Smoke: new section [48] (`views._config_section` kind filter, select
+  round-trip, masked expansion).
+
 ## [v0.2.70] — 2026-07-10 — follow toggles persist across restarts
 
 `files follow on|off` (and `repos follow on|off`) previously mutated

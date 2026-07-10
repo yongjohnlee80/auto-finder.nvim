@@ -7422,6 +7422,103 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ── [48] views._config_section — launch-config selection ────────
+-- Unit coverage over the shared Config-section component against the
+-- REAL auto-run.import sibling (on the rtp). A launch.json fixture with
+-- one test-mode + one debug-mode config exercises the kind filter,
+-- selection round-trip, expansion, and the env-value masking boundary.
+print("\n[48] views._config_section — kind filter, select, masked expand")
+;(function()
+  local ok_cs, config_section = pcall(require, "auto-finder.views._config_section")
+  ok("p48: _config_section loads", ok_cs, tostring(config_section))
+  if not ok_cs then return end
+  local ok_imp, import = pcall(require, "auto-run.import")
+  if not ok_imp then
+    ok("p48: auto-run.import sibling present", false, tostring(import))
+    return
+  end
+
+  local worktree = require("auto-core.git.worktree")
+  local repo = vim.fn.tempname() .. "-af-cfgfix"
+  vim.fn.mkdir(repo .. "/.vscode", "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  local f = assert(io.open(repo .. "/.vscode/launch.json", "w"))
+  f:write([[
+{
+  "version": "0.2.0",
+  "configurations": [
+    { "name": "Debug Server", "type": "go", "request": "launch",
+      "mode": "debug", "program": "${workspaceFolder}/cmd/srv",
+      "buildFlags": "-tags=dev", "env": { "SECRET_TOKEN": "hunter2" } },
+    { "name": "Test Pkg", "type": "go", "request": "launch",
+      "mode": "test", "program": "${workspaceFolder}" }
+  ]
+}
+]])
+  f:close()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c",
+    "user.name=s", "add", "." }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c",
+    "user.name=s", "commit", "-q", "-m", "init" }, { text = true }):wait()
+
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  import.set_selected(nil)
+
+  -- collect(): per-kind filtering.
+  local tests = config_section.collect("test")
+  ok("p48: collect('test') → only the test-mode config",
+    tests and #tests == 1 and tests[1].name == "Test Pkg", vim.inspect(tests))
+  local debugs = config_section.collect("debug")
+  ok("p48: collect('debug') → only the debug-mode config",
+    debugs and #debugs == 1 and debugs[1].name == "Debug Server",
+    vim.inspect(debugs))
+
+  -- emit(): a config row is produced, name carried.
+  local function render(list, kind, expanded)
+    local ctx = { list = list, kind = kind, lines = {}, rows = {},
+      expanded = expanded or {},
+      mark = function() end }
+    config_section.emit(ctx)
+    return ctx
+  end
+  local r1 = render(debugs, "debug")
+  local cfg_row
+  for _, row in ipairs(r1.rows) do
+    if row.kind == "config" then cfg_row = row end
+  end
+  ok("p48: emit produces a config row with the name",
+    cfg_row ~= nil and cfg_row.name == "Debug Server", vim.inspect(r1.rows))
+
+  -- select(): round-trips through auto-run + annotates on re-collect.
+  ok("p48: select handled for a config row",
+    config_section.select(cfg_row) == true)
+  ok("p48: selection reached auto-run",
+    import.get_selected() == "Debug Server")
+  ok("p48: re-collect marks the selected config",
+    config_section.collect("debug")[1].selected == true)
+  -- select on a non-config row is a no-op (returns false).
+  ok("p48: select is a no-op on a foreign row",
+    config_section.select({ kind = "env-file" }) == false)
+
+  -- toggle_expand + emit: expanded field children, env VALUE MASKED.
+  local exp = {}
+  ok("p48: toggle_expand handled", config_section.toggle_expand(cfg_row, exp) == true)
+  local r2 = render(config_section.collect("debug"), "debug", exp)
+  local body = table.concat(r2.lines, "\n")
+  ok("p48: expansion shows the env KEY", body:find("SECRET_TOKEN", 1, true) ~= nil)
+  ok("p48: expansion MASKS the env VALUE (§8.2)",
+    body:find("hunter2", 1, true) == nil, body)
+  ok("p48: expansion shows build_flags", body:find("-tags=dev", 1, true) ~= nil)
+
+  -- cleanup — leave no selection / active worktree behind.
+  import.set_selected(nil)
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

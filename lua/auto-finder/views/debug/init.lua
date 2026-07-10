@@ -6,6 +6,13 @@
 ---  Entry Points   auto-run store configs (`kind = debug | run`),
 ---                 grouped by kind, provenance/tier annotated
 ---                 (merge layers + origin from `store.list()`).
+---  Config         the `kind=debug` VSCode launch.json configs
+---                 auto-run parses, with a `*` marker on the per-repo
+---                 selected config. Selecting one makes it the active
+---                 base merged into every subsequent launch. Shared
+---                 renderer in `views/_config_section.lua` (tests view
+---                 shows `kind=test`). `o` expands resolved fields
+---                 with env VALUES masked (§8.2).
 ---  Env            candidate env files (§8.4, r5) with a `*` marker
 ---                 on the per-repo selection; rows dim when the
 ---                 file is missing. Shared renderer/actions in
@@ -26,6 +33,7 @@
 ---  <CR>  entry point → launch (kind-appropriate strategy via
 ---        exec.start); session → focus (dap.set_session + dap-view);
 ---        breakpoint → jump to file:line (editor-routed);
+---        config row → open launch.json at that entry;
 ---        env file → open it; env var → open at its line;
 ---        header → toggle collapse; detail path row → open file
 ---  o     expand details — entry point: resolved config fields with
@@ -47,8 +55,9 @@
 ---        already-exists offers overwrite); elsewhere scaffold a
 ---        new config (auto-run store.add flow — gobugger `new_*`
 ---        parity)
----  s     env file → select/deselect it (highest-precedence
----        env_files entry for every subsequent launch, §4.2)
+---  s     config row → select/deselect it (active base merged into
+---        every subsequent launch); env file → select/deselect it
+---        (highest-precedence env_files entry, §4.2)
 ---  x     terminate the session under the cursor
 ---  p     pause / continue the session under the cursor
 ---  i     info popup for the row under the cursor
@@ -72,6 +81,7 @@ local FILETYPE = "auto-finder"
 
 local HL = {
   header_entries     = "AutoFinderDebugHeaderEntries",
+  header_config      = "AutoFinderDebugHeaderConfig",
   header_env         = "AutoFinderDebugHeaderEnv",
   header_sessions    = "AutoFinderDebugHeaderSessions",
   header_breakpoints = "AutoFinderDebugHeaderBreakpoints",
@@ -100,6 +110,7 @@ local function _apply_default_highlights()
     vim.api.nvim_set_hl(0, name, { default = true, link = link })
   end
   set(HL.header_entries,     "Title")
+  set(HL.header_config,      "Type")
   set(HL.header_env,         "Type")
   set(HL.header_sessions,    "Statement")
   set(HL.header_breakpoints, "DiagnosticWarn")
@@ -136,11 +147,12 @@ end
 -- feeds the launches the entries above it start.
 local BUCKETS = {
   entries     = { header = "Entry Points",    hl_header = HL.header_entries     },
+  config      = { header = "Config",          hl_header = HL.header_config      },
   env         = { header = "Env",             hl_header = HL.header_env         },
   sessions    = { header = "Active Sessions", hl_header = HL.header_sessions    },
   breakpoints = { header = "Breakpoints",     hl_header = HL.header_breakpoints },
 }
-local BUCKET_ORDER = { "entries", "env", "sessions", "breakpoints" }
+local BUCKET_ORDER = { "entries", "config", "env", "sessions", "breakpoints" }
 
 -- ─── module state ─────────────────────────────────────────────
 
@@ -150,6 +162,8 @@ M._bufnr = nil
 --   { kind="bucket-header",  lnum, section }
 --   { kind="kind-header",    lnum, cfg_kind }
 --   { kind="entry",          lnum, name, cfg }
+--   { kind="config",         lnum, name, runtime, selected }
+--   { kind="config-detail",  lnum, name }   -- expanded field child
 --   { kind="env-file",       lnum, path, source, exists, selected, synthetic? }
 --   { kind="env-var",        lnum, path, key, file_lnum }
 --   { kind="env-error",      lnum, path, file_lnum }
@@ -190,6 +204,10 @@ local log = function() return require("auto-finder.log") end
 -- Shared Env-section renderer/actions (§8.4 r5) — module-private to
 -- the views; the tests view consumes the same helper.
 local env_section = require("auto-finder.views._env_section")
+
+-- Shared Config-section renderer/actions (launch-config selection) —
+-- this view passes kind="debug"; the tests view kind="test".
+local config_section = require("auto-finder.views._config_section")
 
 ---Confirm wrapper — module-level so tests can stub bulk-destructive
 ---confirmation without monkey-patching vim.fn.
@@ -629,6 +647,23 @@ local function _render(bufnr)
     end
   end
 
+  -- ── Config (launch-config selection) — above Env ────────────
+  do
+    local cfg_list, cfg_reason = config_section.collect("debug")
+    emit_bucket_header("config", cfg_list and #cfg_list or 0)
+    if not M._collapsed.config then
+      config_section.emit({
+        list     = cfg_list,
+        reason   = cfg_reason,
+        kind     = "debug",
+        lines    = lines,
+        mark     = mark,
+        rows     = rows,
+        expanded = M._expanded,
+      })
+    end
+  end
+
   -- ── Env (§8.4, r5) ───────────────────────────────────────────
   do
     local env_list = env_section.collect()
@@ -863,6 +898,9 @@ local function _open(row)
     return
   end
 
+  -- Config rows: open launch.json at the entry.
+  if config_section.open(row, _open_file) then return end
+
   -- Env rows: file opens the file, var/error opens at its line
   -- (editor-routed — §8.4 r5).
   if env_section.open(row, _open_file) then return end
@@ -912,6 +950,10 @@ local function _toggle_expand(row)
   if not row then return end
   if row.kind == "bucket-header" then
     _toggle_collapsed(row.section)
+    _rerender()
+    return
+  end
+  if config_section.toggle_expand(row, M._expanded) then
     _rerender()
     return
   end
@@ -1112,8 +1154,12 @@ local function _apply_keymaps(bufnr, panel_winid)
     _scaffold()
   end,
     "auto-finder.debug: on an env row/header add KEY=VALUE to the env file; elsewhere scaffold a new run/test/debug config (store.add flow)")
-  set("s", function() env_section.select(_row_under_cursor(panel_winid)) end,
-    "auto-finder.debug: select/deselect the env file under cursor (applied to every launch)")
+  set("s", function()
+      local row = _row_under_cursor(panel_winid)
+      if config_section.select(row) then return end
+      env_section.select(row)
+    end,
+    "auto-finder.debug: select/deselect the config or env file under cursor (applied to every launch)")
   set("x", function() _terminate(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: terminate the session under cursor")
   set("p", function() _pause_continue(_row_under_cursor(panel_winid)) end,
