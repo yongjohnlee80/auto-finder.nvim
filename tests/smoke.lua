@@ -7314,84 +7314,14 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
   vim.api.nvim_win_set_cursor(w, { entry_row.lnum, 0 })
   seen_maps["o"].callback()
 
-  -- ── §8.3 row `d`: IMMEDIATE delete from live dap AND the store ─
-  local bp3 = find_row(function(r)
-    return r.kind == "breakpoint" and r.bp.lnum == 3
-  end)
-  ok("p47: typed breakpoint row present (lnum 3)", bp3 ~= nil)
-  vim.api.nvim_win_set_cursor(w, { bp3.lnum, 0 })
-  seen_maps["d"].callback()
-  local live_after = dap_bps.get(src_buf)[src_buf] or {}
-  local live_l3 = false
-  for _, bp in ipairs(live_after) do
-    if bp.line == 3 then live_l3 = true end
-  end
-  ok("p47: `d` removed the breakpoint from nvim-dap's LIVE registry",
-    not live_l3, vim.inspect(live_after))
-  local recs = ar_bps.read()
-  local stored_l3 = false
-  for _, rec in ipairs(recs) do
-    if rec.lnum == 3 then stored_l3 = true end
-  end
-  ok("p47: `d` removed the breakpoint from the PERSISTED store (one action)",
-    not stored_l3, vim.inspect(recs))
-  ok("p47: the sibling breakpoint (lnum 5) survives the targeted delete",
-    #recs == 1 and recs[1].lnum == 5, vim.inspect(recs))
-
-  -- ── §8.3 file-header `d`: clear that file's breakpoints ────────
-  dap_bps.set({}, src_buf, 7)   -- second bp so the file group has two
-  ar_bps.reconcile()
-  debug_view.on_focus(w, b)
-  local file_hdr = find_row(function(r) return r.kind == "bp-file-header" end)
-  ok("p47: file group header row present", file_hdr ~= nil)
-  vim.api.nvim_win_set_cursor(w, { file_hdr.lnum, 0 })
-  seen_maps["d"].callback()
-  local live_map = dap_bps.get(src_buf)[src_buf] or {}
-  ok("p47: file-header `d` cleared the file's LIVE breakpoints",
-    #live_map == 0, vim.inspect(live_map))
-  ok("p47: file-header `d` cleared the file's PERSISTED records",
-    #ar_bps.read() == 0, vim.inspect(ar_bps.read()))
-
-  -- ── §8.3 section-header `d`: clear ALL, with confirm ───────────
-  dap_bps.set({}, src_buf, 2)
-  dap_bps.set({}, src_buf, 4)
-  ar_bps.reconcile()
-  debug_view.on_focus(w, b)
-  local bp_hdr = find_row(function(r)
-    return r.kind == "bucket-header" and r.section == "breakpoints"
-  end)
-  ok("p47: Breakpoints section header row present", bp_hdr ~= nil)
-  local orig_confirm = debug_view._confirm
-  local confirm_calls = 0
-  -- Declined confirm → nothing is cleared.
-  debug_view._confirm = function(...)
-    confirm_calls = confirm_calls + 1
-    return 2
-  end
-  vim.api.nvim_win_set_cursor(w, { bp_hdr.lnum, 0 })
-  seen_maps["d"].callback()
-  ok("p47: section-header `d` PROMPTS before bulk clear",
-    confirm_calls == 1, "calls=" .. confirm_calls)
-  ok("p47: declined confirm clears nothing",
-    #ar_bps.read() == 2, vim.inspect(ar_bps.read()))
-  -- Accepted confirm → live registry + store both empty.
-  debug_view._confirm = function(...)
-    confirm_calls = confirm_calls + 1
-    return 1
-  end
-  vim.api.nvim_win_set_cursor(w, { bp_hdr.lnum, 0 })
-  seen_maps["d"].callback()
-  ok("p47: accepted confirm clears ALL persisted records",
-    #ar_bps.read() == 0, vim.inspect(ar_bps.read()))
-  local live_all = dap_bps.get()
-  local any_live = false
-  for _, bps in pairs(live_all) do
-    if #bps > 0 then any_live = true end
-  end
-  ok("p47: accepted confirm clears the LIVE registry too", not any_live)
-  debug_view._confirm = orig_confirm
-
-  -- ── orphaned persisted entry renders dimmed with (orphaned) ────
+  -- §8.3 breakpoint-delete was REMOVED: the debug panel has NO delete
+  -- surface. `d` is debug-only (dap); breakpoints are managed via nvim-dap
+  -- directly (sign column / API). `r` runs the entry's program in an
+  -- auto-agents playground terminal; `a` exports the entry to launch.json.
+  -- Those behaviors drive live dap / auto-agents / filesystem side effects
+  -- not exercised headless here — their keymaps are asserted registered by
+  -- the keymap-registration check above. The orphaned-persisted RENDER
+  -- (dimmed `(orphaned)` marker) still holds:
   dap_bps.set({}, src_buf, 6)
   ar_bps.reconcile()                 -- persist it …
   dap_bps.remove(src_buf, 6)         -- … then drop live WITHOUT reconcile
@@ -7405,11 +7335,6 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
   ok("p47: orphaned row typed with orphaned=true",
     orphan_row ~= nil and orphan_row.bp.orphaned == true
       and orphan_row.bp.live == false)
-  -- `d`-to-clean affordance works on the orphan too.
-  vim.api.nvim_win_set_cursor(w, { orphan_row.lnum, 0 })
-  seen_maps["d"].callback()
-  ok("p47: `d` cleans the orphaned persisted record",
-    #ar_bps.read() == 0, vim.inspect(ar_bps.read()))
 
   -- ── cleanup ────────────────────────────────────────────────────
   debug_view.on_close()

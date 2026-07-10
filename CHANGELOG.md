@@ -2,6 +2,48 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — debug panel Entry Points: run / debug / navigate / export
+
+Reworked the Entry Points keymaps and removed the delete surface:
+
+- **`<CR>`** → open the entry's **program source** (resolved `program`
+  → `main.go` / dir), instead of launching.
+- **`r`** → **run** the program in an auto-agents playground terminal
+  (prompts T1..T4; `auto-run.exec.command_line` builds the command,
+  env sourced from a file so secrets stay off the command line;
+  chansent via `auto-agents.term.send`).
+- **`d`** → **debug** (dap), forced regardless of the config's kind.
+- **`a`** on an entry → **export** the config to `launch.json`
+  (`auto-run.import.export`: append to the nearest reachable file, else
+  create `$WORKSPACE/.config/launch.json`); on env rows, still adds
+  KEY=VALUE.
+- **Delete removed** — the debug panel no longer has any delete surface
+  (the old `d` = breakpoint-clear / file-clear / clear-all is gone).
+  Breakpoints are managed via nvim-dap directly; config files via the
+  files panel.
+- Requires auto-run ≥ v0.1.8. Smoke [47] updated (delete assertions
+  dropped; orphaned-render retained).
+
+## [Unreleased] — `O` toggles the whole view open/closed
+
+A new `O` keymap in the **files, todos, debug, and tests** views: a
+bulk collapse/expand for the whole panel — built for repos with
+thousands of tests where you want to hide or reveal everything at once.
+
+Semantics (identical across all four): **if anything is open, collapse
+everything; only when nothing is open does it expand everything**
+(short-circuits on the first open item). It toggles the tree/section
+**structure** — folders, namespaces, buckets, section headers, and
+(files view) directories — never the per-row `o` detail expansions.
+
+- **tests:** walks the discovery tree for containers + the Config/Env
+  section headers; persists dir/section collapse state.
+- **debug / todos:** over `BUCKET_ORDER` (todos also over tracked
+  archive periods); persisted.
+- **files:** new neo-tree `toggle_all_nodes` command (fork) bound to
+  `O` in the filesystem `window.mappings` — collapses all if any dir is
+  expanded, else `expand_all_nodes`.
+
 ## [Unreleased] — tests panel `i` shows the run's terminal output
 
 The tests view's `i` float previously showed result metadata (status /

@@ -30,31 +30,29 @@
 ---direct file reads ([[auto-family-state-ownership]]).
 ---
 ---Buffer-local keymaps:
----  <CR>  entry point → launch (kind-appropriate strategy via
----        exec.start); session → focus (dap.set_session + dap-view);
+---  <CR>  entry point → open the program's SOURCE (program path →
+---        main.go / dir); session → focus (dap.set_session + dap-view);
 ---        breakpoint → jump to file:line (editor-routed);
 ---        config row → open launch.json at that entry;
 ---        env file → open it; env var → open at its line;
 ---        header → toggle collapse; detail path row → open file
+---  r     entry point → RUN the program in an auto-agents playground
+---        terminal (prompts T1..T4; auto-run builds the command, env
+---        sourced from a file so secrets stay off the command line)
+---  d     entry point → DEBUG (dap). The debug panel has no delete
+---        surface — breakpoints are managed via nvim-dap directly.
 ---  o     expand details — entry point: resolved config fields with
 ---        env VALUES MASKED (keys + `${...}`/`cmd:` refs only,
 ---        never literal values); env file: inline KEY=VALUE rows
 ---        (user-owned file — interactive display, §4.2 r5 boundary);
 ---        session: state detail; breakpoint: condition/hit/log
 ---        detail; header: collapse
----  d     §8.3 marks-parity clearing —
----          breakpoint row    delete IMMEDIATELY (no confirm):
----                            removed from nvim-dap's live registry
----                            AND the persisted store in one action
----          file group header clear that file's breakpoints
----          Breakpoints section header
----                            clear ALL (confirm — bulk destructive)
 ---  e     entry point → edit its config file (editor-routed);
 ---        env var → edit the value (vim.ui.input, prefilled)
----  a     env file row / Env header → add KEY=VALUE (two prompts;
----        already-exists offers overwrite); elsewhere scaffold a
----        new config (auto-run store.add flow — gobugger `new_*`
----        parity)
+---  a     entry point → EXPORT the config to launch.json (appended to
+---        the nearest reachable launch.json, else created at
+---        `$WORKSPACE/.config/launch.json`); env file / Env header →
+---        add KEY=VALUE (two prompts; already-exists offers overwrite)
 ---  s     config row → select/deselect it (active base merged into
 ---        every subsequent launch); env file → select/deselect it
 ---        (highest-precedence env_files entry, §4.2)
@@ -791,82 +789,9 @@ end
 ---the persisted record leaves via auto-run's reconcile (live wins
 ---for loaded paths — the §9 public sync surface; the store file
 ---is never touched directly here).
----@param bp table
----@return boolean ok
-local function _delete_breakpoint(bp)
-  local ar = _auto_run()
-  if not ar then return false end
-  local okb, dap_bps = pcall(require, "dap.breakpoints")
-  if not okb then
-    log().warn("view.debug", "nvim-dap is not installed")
-    return false
-  end
-
-  -- 1. Ensure the file is a loaded buffer: puts the path inside the
-  --    reconcile diff scope AND flushes the restore path first.
-  local bufnr = vim.fn.bufadd(bp.abs)
-  pcall(vim.fn.bufload, bufnr)
-
-  -- 2. Live registry removal.
-  pcall(dap_bps.remove, bufnr, bp.lnum)
-
-  -- 3. Notify running sessions (mirror dap.toggle_breakpoint's push).
-  local okd, dap = pcall(require, "dap")
-  if okd then
-    local oks, sessions = pcall(dap.sessions)
-    if oks and type(sessions) == "table" then
-      for _, s in pairs(sessions) do
-        pcall(function()
-          local okg, remaining = pcall(dap_bps.get, bufnr)
-          s:set_breakpoints(okg and remaining or { [bufnr] = {} })
-        end)
-      end
-    end
-  end
-
-  -- 4. Persisted store, via the public reconcile (§9).
-  pcall(function() ar.breakpoints.reconcile() end)
-  return true
-end
-
----`d` typed-row dispatch (§8.3):
----  breakpoint row     → delete immediately (live + store, no confirm)
----  file group header  → clear that file's breakpoints
----  Breakpoints header → clear ALL, with confirm (bulk destructive)
----@param row table?
-local function _delete(row)
-  if not row then return end
-
-  if row.kind == "breakpoint" then
-    if _delete_breakpoint(row.bp) then _rerender() end
-    return
-  end
-
-  if row.kind == "bp-file-header" then
-    local any = false
-    for _, bp in ipairs(row.bps or {}) do
-      any = _delete_breakpoint(bp) or any
-    end
-    if any then _rerender() end
-    return
-  end
-
-  if row.kind == "bucket-header" and row.section == "breakpoints" then
-    local choice = M._confirm(
-      "Clear ALL breakpoints (live registry + persisted store)?",
-      "&Yes\n&No", 2)
-    if choice ~= 1 then return end
-    local ar = _auto_run()
-    if not ar then return end
-    local ok, err = pcall(function() return ar.breakpoints.clear_all() end)
-    if not ok then
-      log().error("view.debug", "clear-all failed: " .. tostring(err))
-    end
-    _rerender()
-    return
-  end
-  -- Everything else: no-op (predictable — `d` is breakpoint-scoped).
-end
+-- NOTE: the debug panel has NO delete surface. Breakpoints are managed
+-- through nvim-dap itself (sign column / dap API); config files are
+-- deleted from the files panel. `d` here is reserved for debug.
 
 -- ─── actions ──────────────────────────────────────────────────
 
@@ -885,6 +810,35 @@ local function _open_file(path, lnum)
   if lnum and lnum > 0 and target and vim.api.nvim_win_is_valid(target) then
     pcall(vim.api.nvim_win_set_cursor, target, { lnum, 0 })
   end
+end
+
+---Resolve an Entry Point's `program` to a source file and open it — the
+---`<CR>` target. A Go package dir opens its `main.go` when present, else
+---the resolved path as-is.
+---@param name string
+local function _open_program(name)
+  local ar = _auto_run()
+  if not ar then return end
+  local ok_g, eff = pcall(ar.store.get, name)
+  if not ok_g or type(eff) ~= "table" then
+    log().warn("view.debug", "cannot resolve config '" .. tostring(name) .. "'")
+    return
+  end
+  local env = require("auto-run.env")
+  local program = eff.program
+  if type(program) == "string" and program ~= "" then
+    local okc, ctx = pcall(env.context)
+    if okc then program = env.substitute_deep(program, ctx) end
+  end
+  if type(program) ~= "string" or program == "" then
+    log().info("view.debug", "'" .. tostring(name) .. "' has no program to open")
+    return
+  end
+  if vim.fn.isdirectory(program) == 1 then
+    local main = program .. "/main.go"
+    if vim.fn.filereadable(main) == 1 then program = main end
+  end
+  _open_file(program)
 end
 
 ---`<CR>` typed-row dispatch.
@@ -906,14 +860,8 @@ local function _open(row)
   if env_section.open(row, _open_file) then return end
 
   if row.kind == "entry" then
-    local ar = _auto_run()
-    if not ar then return end
-    -- Kind-appropriate strategy: exec.start resolves debug → dap,
-    -- run → background job (§6 defaults).
-    local launched, err = ar.exec.start(row.name)
-    if not launched then
-      log().error("view.debug", "launch failed: " .. tostring(err))
-    end
+    -- <CR> navigates to the program's source; r runs, d debugs.
+    _open_program(row.name)
     return
   end
 
@@ -979,6 +927,51 @@ local function _toggle_expand(row)
   _rerender()
 end
 
+---`r`: run an Entry Point's program in an auto-agents playground
+---terminal (T1..T4). Prompts for the slot, then chansends the run
+---command (auto-run builds it — `go run …` / `go test …`, env sourced
+---from a file so secrets stay off the command line).
+---@param row table?
+local function _run_in_terminal(row)
+  if not (row and row.kind == "entry") then return end
+  local ar = _auto_run()
+  if not ar then return end
+  local okt, term = pcall(require, "auto-agents.term")
+  if not okt or type(term.send) ~= "function" then
+    log().warn("view.debug",
+      "auto-agents playground terminals unavailable (auto-agents.nvim not loaded)")
+    return
+  end
+  local name = row.name
+  vim.ui.select({ "1", "2", "3", "4" },
+    { prompt = "Run '" .. tostring(name) .. "' in terminal:" }, function(choice)
+      if not choice then return end
+      local cmd, err = ar.exec.command_line(name)
+      if not cmd then
+        log().error("view.debug", "run: " .. tostring(err))
+        return
+      end
+      local ok_s, serr = pcall(term.send, tonumber(choice), cmd)
+      if not ok_s then
+        log().error("view.debug", "terminal send failed: " .. tostring(serr))
+      end
+    end)
+end
+
+---`d`: debug an Entry Point (dap, forced regardless of the config's
+---kind). No delete anything — the debug panel has no delete surface.
+---@param row table?
+local function _debug_entry(row)
+  if not (row and row.kind == "entry") then return end
+  local ar = _auto_run()
+  if not ar then return end
+  local launched, err, detail = ar.exec.start(row.name, { strategy = "dap" })
+  if not launched then
+    log().error("view.debug",
+      "debug failed: " .. tostring(err) .. (detail and (" (" .. tostring(detail.code or "") .. ")") or ""))
+  end
+end
+
 ---`e`: edit the entry point's config file (editor-routed); on an
 ---env-var row, edit that value in place (§8.4 r5).
 ---@param row table?
@@ -999,34 +992,32 @@ local function _edit_config(row)
   _open_file(path)
 end
 
----`a`: scaffold a new config via auto-run's store.add flow
----(gobugger `new_*` parity — mirrors auto-run's `<leader>rc`).
-local function _scaffold()
-  local ar = _auto_run()
-  if not ar then
-    log().warn("view.debug", "auto-run.nvim is not installed")
+---`a` on an Entry Point: export the config as a VSCode launch.json
+---entry — appended to (or replacing the same-name entry in) the nearest
+---reachable launch.json; when none is reachable, created at
+---`<worktree>/.config/launch.json` (auto-run `import.export`). Opens the
+---written file so the result is visible.
+---@param row table?
+local function _export_config(row)
+  if not (row and row.kind == "entry") then
+    log().info("view.debug",
+      "`a` exports an Entry Point to launch.json — put the cursor on a config")
     return
   end
-  vim.ui.select({ "run", "test", "debug" },
-    { prompt = "auto-run: config kind" }, function(kind)
-      if not kind then return end
-      vim.ui.input({ prompt = "config name: " }, function(name)
-        if not name or name == "" then return end
-        local path, err = ar.store.add({
-          name    = name,
-          kind    = kind,
-          runtime = "go",
-          program = kind == "test" and "${worktree}"
-            or "${worktree}/cmd/" .. name,
-        })
-        if not path then
-          log().error("view.debug", "scaffold failed: " .. tostring(err))
-          return
-        end
-        _open_file(path)
-        _rerender()
-      end)
-    end)
+  local ok_i, import = pcall(require, "auto-run.import")
+  if not ok_i or type(import.export) ~= "function" then
+    log().warn("view.debug",
+      "auto-run is too old for launch.json export — update to v0.1.8+")
+    return
+  end
+  local path, err = import.export(row.name)
+  if not path then
+    log().error("view.debug",
+      "export failed: " .. tostring(err and (err.message or err.code) or err))
+    return
+  end
+  log().info("view.debug", "exported '" .. row.name .. "' → " .. path)
+  _open_file(path)
 end
 
 ---`x`: terminate the session under the cursor.
@@ -1129,6 +1120,27 @@ end
 
 -- ─── keymaps ──────────────────────────────────────────────────
 
+---`O`: toggle ALL sections open/closed. If any bucket is currently open,
+---collapse every bucket; only when all are collapsed does it expand them
+---(short-circuits on the first open bucket). Section structure only —
+---never the per-row `o` detail expansions.
+local function _toggle_all()
+  local any_open = false
+  for _, name in ipairs(BUCKET_ORDER) do
+    if M._collapsed[name] ~= true then any_open = true break end
+  end
+  local collapse = any_open   -- any open → collapse all, else expand all
+  local s = _get_ui_state()
+  local stored = s and s:get("debug_collapsed") or nil
+  if type(stored) ~= "table" then stored = s and {} or nil end
+  for _, name in ipairs(BUCKET_ORDER) do
+    M._collapsed[name] = collapse
+    if stored then stored[name] = collapse end
+  end
+  if s and stored then s:set("debug_collapsed", stored) end
+  _rerender()
+end
+
 local function _apply_keymaps(bufnr, panel_winid)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   local set = function(lhs, fn, desc)
@@ -1137,11 +1149,15 @@ local function _apply_keymaps(bufnr, panel_winid)
     })
   end
   set("<CR>", function() _open(_row_under_cursor(panel_winid)) end,
-    "auto-finder.debug: launch entry point / focus session / jump to breakpoint / toggle section")
+    "auto-finder.debug: entry point → open program source; session → focus; breakpoint → jump; header → toggle")
+  set("r", function() _run_in_terminal(_row_under_cursor(panel_winid)) end,
+    "auto-finder.debug: run the entry point's program in a playground terminal (prompts T1..T4)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: expand details (resolved config with env masked / session state / breakpoint condition)")
-  set("d", function() _delete(_row_under_cursor(panel_winid)) end,
-    "auto-finder.debug: delete breakpoint (immediate, live+store); file header clears file; section header clears ALL (confirm)")
+  set("O", function() _toggle_all() end,
+    "auto-finder.debug: toggle ALL sections — collapse everything if anything is open, else expand everything")
+  set("d", function() _debug_entry(_row_under_cursor(panel_winid)) end,
+    "auto-finder.debug: debug the entry point under cursor (dap)")
   set("e", function() _edit_config(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: edit the entry point's config file; on an env var, edit its value")
   set("a", function()
@@ -1151,9 +1167,9 @@ local function _apply_keymaps(bufnr, panel_winid)
       env_section.add(row.kind == "env-file" and row or nil)
       return
     end
-    _scaffold()
+    _export_config(row)
   end,
-    "auto-finder.debug: on an env row/header add KEY=VALUE to the env file; elsewhere scaffold a new run/test/debug config (store.add flow)")
+    "auto-finder.debug: env row/header → add KEY=VALUE; entry → export config to launch.json (new: $WORKSPACE/.config)")
   set("s", function()
       local row = _row_under_cursor(panel_winid)
       if config_section.select(row) then return end
@@ -1276,6 +1292,5 @@ M._BUCKETS = BUCKETS
 M._BUCKET_ORDER = BUCKET_ORDER
 M._row_under_cursor = _row_under_cursor
 M._masked_env_value = _masked_env_value
-M._delete_breakpoint = _delete_breakpoint
 
 return M
