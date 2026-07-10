@@ -2,6 +2,29 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.2.70] — 2026-07-10 — follow toggles persist across restarts
+
+`files follow on|off` (and `repos follow on|off`) previously mutated
+only the in-memory config — every new session reverted to the config
+default (files-follow ON). The toggles now persist in the same
+auto-core state namespace that already carries `user_width` /
+`last_section` (`<state>/auto-core/auto-finder.json`).
+
+- **`state.lua`:** new `get_follow(section)` / `set_follow(section,
+  enabled)` over a `follow` map keyed by section name. Tri-state:
+  absent = never toggled (config default stands); true/false =
+  explicit user choice. Global, not per-workspace.
+- **`panel/admin.lua`:** the follow toggle persists after applying the
+  live change (best-effort — persistence failure never breaks the
+  runtime flip). Help text updated accordingly.
+- **`init.lua` `setup()`:** a persisted value overrides
+  `cfg.<section>.follow` before the `follow_current_file` translation,
+  so both the neo-tree merge and the live BufEnter gates honor it.
+
+Verified with a two-process headless test sharing `XDG_STATE_HOME`:
+toggle off in session 1 → session 2 boots with follow off. Patch
+within the v0.2.x line.
+
 ## [v0.2.69] — 2026-07-10 — buffers panel survives cwd/worktree switches
 
 Fixes newly-opened files never appearing in the buffers panel after a
