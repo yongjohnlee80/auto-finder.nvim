@@ -55,8 +55,9 @@
 ---  e     env var → edit the value (vim.ui.input, prefilled)
 ---  a     env file row / Env header → add KEY=VALUE (two prompts;
 ---        already-exists offers overwrite)
----  i     output preview float (result status/duration + captured
----        failure output + the run dir)
+---  i     output float — the run's full terminal output (what
+---        `go test` printed), via auto-run's discovery.run_output.
+---        (`o` shows result METADATA; `i` shows the logs.)
 ---  S     full worktree scan (bounded + cancelable — a second `S`
 ---        while scanning cancels)
 ---  x     stop running test jobs started from this panel's runs
@@ -863,46 +864,45 @@ local function _toggle_expand(row)
   _rerender()
 end
 
----`i`: output preview float for the position under the cursor —
----status / duration / captured failure output / run dir.
+---`i`: output float for the position under the cursor — the run's
+---human/terminal output (what `go test` printed), fetched from
+---auto-run's `discovery.run_output`. Distinct from `o`, which expands
+---the result METADATA (status / duration / output path) inline.
 ---@param row table?
 local function _preview(row)
   if not (row and (row.kind == "position" or row.kind == "detail")) then return end
   local node = row.node
   local ar = _auto_run()
-  local r = nil
-  if ar then
-    local okr, res = pcall(ar.discovery.results)
-    if okr and type(res) == "table" then r = res[node.id] end
-  end
-
-  local lines = {}
-  local function add(label, value)
-    lines[#lines + 1] = string.format("  %-10s %s", label, tostring(value))
-  end
-  add("Position", node.id)
-  add("Type",     node.type)
-  if node.lnum then add("Line", node.lnum) end
-  add("Status",   r and r.status or "(no result)")
-  if r and r.duration_ms then add("Duration", _fmt_duration(r.duration_ms)) end
   local info = _run_for(node.id)
-  local out_path = _run_output_path(info)
-  if out_path then add("Output", out_path) end
-  if r and type(r.output) == "string" and r.output ~= "" then
-    lines[#lines + 1] = ""
-    lines[#lines + 1] = "  Captured output"
-    for l in (r.output .. "\n"):gmatch("([^\n]*)\n") do
-      lines[#lines + 1] = "    " .. l
+
+  local lines
+  if not ar then
+    lines = { "auto-run.nvim is not installed" }
+  elseif not (info and info.run_id) then
+    lines = {
+      "No run recorded for this position yet.",
+      "Press `r` to run it, then `i` to view its output.",
+    }
+  elseif type(ar.discovery.run_output) ~= "function" then
+    lines = { "auto-run is too old for the output view — update to v0.1.6+." }
+  else
+    local text, err = ar.discovery.run_output(info.run_id, info.adapter)
+    if type(text) == "string" and text ~= "" then
+      -- Split on newlines; the terminating newline yields a trailing
+      -- "" which we drop so the float has no blank tail.
+      lines = vim.split(text, "\n", { plain = true })
+      if lines[#lines] == "" then lines[#lines] = nil end
+    else
+      lines = { "(no output — " .. tostring(err or "the run produced none") .. ")" }
     end
   end
-  lines[#lines + 1] = ""
-  lines[#lines + 1] = "  (q / <Esc> to close)"
+  if #lines == 0 then lines = { "(no output)" } end
 
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].buftype   = "nofile"
   vim.bo[buf].swapfile  = false
-  vim.bo[buf].filetype  = "auto-finder-tests-info"
+  vim.bo[buf].filetype  = "auto-finder-tests-output"
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
 
@@ -910,12 +910,15 @@ local function _preview(row)
   for _, l in ipairs(lines) do if #l > max_w then max_w = #l end end
   local width  = math.min(max_w + 2, math.max(80, vim.o.columns - 8))
   local height = math.min(#lines, math.max(10, vim.o.lines - 6))
+  local name = node.name or vim.fn.fnamemodify(tostring(node.id):gsub("::.*", ""), ":t")
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "cursor", row = 1, col = 0,
     width = width, height = height,
     style = "minimal", border = "rounded",
-    title = " test result ", title_pos = "left",
+    title = " test output: " .. tostring(name) .. "  (q/<Esc> to close) ",
+    title_pos = "left",
   })
+  vim.wo[win].wrap = false
   local function close()
     if vim.api.nvim_win_is_valid(win) then
       pcall(vim.api.nvim_win_close, win, true)
@@ -1007,7 +1010,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
     "auto-finder.tests: toggle — details on a test row (status / duration / output path), collapse on a container")
   set("i", function() _preview(_row_under_cursor(panel_winid)) end,
-    "auto-finder.tests: output preview (popup) — result status, duration, captured output")
+    "auto-finder.tests: output float — the run's full terminal output (go test logs)")
   set("S", function() _scan() end,
     "auto-finder.tests: full worktree scan (bounded; press again to cancel)")
   set("x", function() _stop() end,

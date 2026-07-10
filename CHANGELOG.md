@@ -2,6 +2,21 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — tests panel `i` shows the run's terminal output
+
+The tests view's `i` float previously showed result metadata (status /
+duration / output path) + a short captured failure snippet. It now shows
+the run's **full terminal output** — exactly what `go test` printed —
+fetched from auto-run's new `discovery.run_output(run_id, adapter)`
+(which reconstructs the human log from the `go test -json` stream). `o`
+still expands the result METADATA inline; `i` is now the logs.
+
+- **`views/tests/init.lua` `_preview`:** fetches `discovery.run_output`
+  for the run covering the position under the cursor and renders the
+  terminal log in the float (no metadata chrome); graceful hints when
+  no run is recorded yet or auto-run is too old. Requires auto-run
+  ≥ v0.1.6.
+
 ## [Unreleased] — Config section (launch-config selection)
 
 A **Config** section above the Env section in both the tests and debug
