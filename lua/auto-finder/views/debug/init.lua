@@ -943,15 +943,17 @@ local function _run_in_terminal(row)
     return
   end
   local name = row.name
-  vim.ui.select({ "1", "2", "3", "4" },
-    { prompt = "Run '" .. tostring(name) .. "' in terminal:" }, function(choice)
+  vim.ui.select({ 1, 2, 3, 4 }, {
+    prompt = "Run '" .. tostring(name) .. "' in terminal:",
+    format_item = function(n) return "term" .. n end,
+  }, function(choice)
       if not choice then return end
       local cmd, err = ar.exec.command_line(name)
       if not cmd then
         log().error("view.debug", "run: " .. tostring(err))
         return
       end
-      local ok_s, serr = pcall(term.send, tonumber(choice), cmd)
+      local ok_s, serr = pcall(term.send, choice, cmd)
       if not ok_s then
         log().error("view.debug", "terminal send failed: " .. tostring(serr))
       end

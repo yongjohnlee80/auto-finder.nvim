@@ -9,8 +9,8 @@ Reworked the Entry Points keymaps and removed the delete surface:
 - **`<CR>`** → open the entry's **program source** (resolved `program`
   → `main.go` / dir), instead of launching.
 - **`r`** → **run** the program in an auto-agents playground terminal
-  (prompts T1..T4; `auto-run.exec.command_line` builds the command,
-  env sourced from a file so secrets stay off the command line;
+  (prompts `term1`..`term4`; `auto-run.exec.command_line` builds the
+  command, env sourced from a file so secrets stay off the command line;
   chansent via `auto-agents.term.send`).
 - **`d`** → **debug** (dap), forced regardless of the config's kind.
 - **`a`** on an entry → **export** the config to `launch.json`
