@@ -161,6 +161,13 @@ local function set_follow(section, action)
   if section == "files" then
     set_neotree_follow(new_state)
   end
+  -- v0.2.70: persist the toggle in the auto-finder state namespace so
+  -- it survives nvim restarts (setup() reads it back and overrides the
+  -- config default). Best-effort — a persistence failure must not
+  -- break the live toggle that already applied above.
+  pcall(function()
+    require("auto-finder.state").set_follow(section, new_state)
+  end)
   return nil
 end
 
@@ -1063,7 +1070,8 @@ local TOPIC_HELP = {
     "  defaults: hidden + dotfiles are SHOWN; files-follow is ON.",
     "  follow maps to neo-tree's `filesystem.follow_current_file` and",
     "  fires on every BufEnter. Toggling here updates the live runtime",
-    "  config (no setup() re-run needed) and persists for the session.",
+    "  config (no setup() re-run needed) and persists across restarts",
+    "  (v0.2.70; stored in the auto-finder state namespace).",
     "",
   },
   repos = {
@@ -1077,6 +1085,7 @@ local TOPIC_HELP = {
     "  buffer's path until it hits a direct child of workspace_root,",
     "  then calls neo-tree's `reveal_file` on the auto-finder-repos",
     "  source. No-op if the repos section's buffer isn't currently live.",
+    "  Toggles persist across restarts (v0.2.70), same as files-follow.",
     "",
   },
   slot = function()

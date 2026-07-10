@@ -151,6 +151,22 @@ function M.setup(user_opts)
     require("auto-finder.views.todos").install_automated_default_hook()
   end)
 
+  -- v0.2.70: a follow toggle made via the admin DSL (`files follow
+  -- on|off`, `repos follow on|off`) persists in the auto-finder
+  -- state namespace and overrides the config default on the next
+  -- setup. nil = never toggled → `cfg.<section>.follow` stands.
+  -- Must run BEFORE the follow_current_file translation below so
+  -- the persisted value is what reaches neo-tree.
+  do
+    local st = require("auto-finder.state")
+    for _, sec in ipairs({ "files", "repos" }) do
+      local persisted = st.get_follow(sec)
+      if persisted ~= nil and cfg[sec] then
+        cfg[sec].follow = persisted
+      end
+    end
+  end
+
   -- Translate `cfg.files.follow` (per-section convenience flag) into
   -- neo-tree's native `filesystem.follow_current_file = { enabled }`
   -- so the filesystem source reveals the active buffer on BufEnter.

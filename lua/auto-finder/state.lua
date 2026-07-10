@@ -32,6 +32,8 @@
 ---  state.set_sections_for(wskey, …)      → ok, err?
 ---  state.get_last_section_for(wskey)     → integer?
 ---  state.set_last_section_for(wskey, n?) → ok, err?
+---  state.get_follow(section)             → boolean?
+---  state.set_follow(section, enabled?)   → ok, err?
 ---  state.watch_user_width(cb)            → handle
 ---  state.watch_last_section(cb)          → handle
 ---
@@ -85,6 +87,14 @@ local DEFAULTS = {
   -- sensible value; readers prefer this map and only fall back
   -- to the global key on a per-workspace miss.
   last_section_by_workspace = {},
+  -- v0.2.70: persisted follow-mode toggles, keyed by section name
+  -- ("files" / "repos"). Tri-state per section: absent = the user
+  -- never toggled → the config default (`cfg.<section>.follow`)
+  -- applies; true/false = explicit user choice via the admin DSL
+  -- (`files follow on|off`), which now survives nvim restarts.
+  -- Global (not per-workspace) — follow is a behavioral preference,
+  -- not a project composition.
+  follow = {},
 }
 
 local _ns = nil
@@ -255,6 +265,39 @@ function M.set_last_section_for(workspace_key, n)
   return true
 end
 
+-- ── follow-mode persistence (v0.2.70) ────────────────────────
+
+---Fetch the persisted follow toggle for a section. Returns nil when
+---the user never toggled it — caller falls back to the config
+---default (`cfg.<section>.follow`).
+---@param section "files"|"repos"
+---@return boolean?
+function M.get_follow(section)
+  if type(section) ~= "string" or section == "" then return nil end
+  local all = M.namespace():get("follow") or {}
+  local v = all[section]
+  if type(v) == "boolean" then return v end
+  return nil
+end
+
+---Persist the follow toggle for a section. Pass `nil` to clear the
+---record (config default applies again on next setup).
+---@param section "files"|"repos"
+---@param enabled boolean?
+---@return boolean ok, string? err
+function M.set_follow(section, enabled)
+  if type(section) ~= "string" or section == "" then
+    return false, "section must be a non-empty string"
+  end
+  if enabled ~= nil and type(enabled) ~= "boolean" then
+    return false, "follow must be nil or a boolean; got " .. tostring(enabled)
+  end
+  local all = vim.deepcopy(M.namespace():get("follow") or {})
+  all[section] = enabled
+  M.namespace():set("follow", all)
+  return true
+end
+
 -- ── test-only ────────────────────────────────────────────────
 
 ---Test-only: clear the namespace cache + reset every key to defaults.
@@ -266,6 +309,7 @@ function M._reset_for_tests()
       _ns:set("last_section",              DEFAULTS.last_section)
       _ns:set("sections",                  vim.deepcopy(DEFAULTS.sections))
       _ns:set("last_section_by_workspace", vim.deepcopy(DEFAULTS.last_section_by_workspace))
+      _ns:set("follow",                    vim.deepcopy(DEFAULTS.follow))
     end)
   end
   _ns = nil
