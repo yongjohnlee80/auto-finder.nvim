@@ -499,6 +499,7 @@ local config = {
         ["<C-x>"] = "clear_filter",
         ["<bs>"] = "navigate_up",
         ["."] = "set_root",
+        ["O"] = "toggle_all_nodes", -- auto-finder: collapse all if anything open, else expand all
         ["[g"] = "prev_git_modified",
         ["]g"] = "next_git_modified",
         ["i"] = "show_file_details", -- see `:h neo-tree-file-actions` for options to customize the window.

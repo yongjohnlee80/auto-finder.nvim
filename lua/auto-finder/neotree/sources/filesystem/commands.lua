@@ -83,6 +83,32 @@ M.expand_all_subnodes = function(state, node)
   cc.expand_all_subnodes(state, node, fs.prefetcher)
 end
 
+-- auto-finder `O`: toggle the WHOLE tree. If any directory is currently
+-- expanded, collapse everything; otherwise expand everything. Built for
+-- large trees where you want to open or hide the whole thing in one key.
+M.toggle_all_nodes = function(state)
+  local tree = state.tree
+  if not tree then return end
+  local any_expanded = false
+  local by_id = tree.nodes and tree.nodes.by_id or {}
+  for _, node in pairs(by_id) do
+    if node.type == "directory" and node:is_expanded() then
+      any_expanded = true
+      break
+    end
+  end
+  if any_expanded then
+    state.explicitly_opened_nodes = {}
+    renderer.collapse_all_nodes(tree)
+    renderer.redraw(state)
+  else
+    local root = tree:get_nodes()[1]
+    if root then
+      cc.expand_all_nodes(state, root, fs.prefetcher)
+    end
+  end
+end
+
 ---Shows the filter input, which will filter the tree.
 ---@param state neotree.sources.filesystem.State
 M.filter_as_you_type = function(state)

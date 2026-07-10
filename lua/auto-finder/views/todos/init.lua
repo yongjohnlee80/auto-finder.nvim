@@ -2201,6 +2201,44 @@ end
 ---potential multi-key sequence.
 ---@param bufnr integer
 ---@param panel_winid integer
+---`O`: toggle ALL open/closed. If any bucket is open (or any tracked
+---archive period is explicitly expanded), collapse everything; only when
+---nothing is open does it expand everything (short-circuits on the first
+---open item). Section/period structure only — never the per-task `o`
+---frontmatter expansions. Archive periods default collapsed, so
+---expand-all reveals the buckets and any period the user had opened.
+local function _toggle_all()
+  local any_open = false
+  for _, name in ipairs(BUCKET_ORDER) do
+    if M._collapsed[name] ~= true then any_open = true break end
+  end
+  if not any_open then
+    for _, v in pairs(M._archive_collapsed) do
+      if v == false then any_open = true break end
+    end
+  end
+  local collapse = any_open   -- any open → collapse all, else expand all
+
+  local s = _get_ui_state()
+  local cstored = s and s:get("collapsed") or nil
+  if type(cstored) ~= "table" then cstored = s and {} or nil end
+  for _, name in ipairs(BUCKET_ORDER) do
+    M._collapsed[name] = collapse
+    if cstored then cstored[name] = collapse end
+  end
+  if s and cstored then s:set("collapsed", cstored) end
+
+  local astored = s and s:get("archive_periods") or nil
+  if type(astored) ~= "table" then astored = s and {} or nil end
+  for period in pairs(M._archive_collapsed) do
+    M._archive_collapsed[period] = collapse
+    if astored then astored[period] = collapse end
+  end
+  if s and astored then s:set("archive_periods", astored) end
+
+  _render(M._bufnr)
+end
+
 local function _apply_keymaps(bufnr, panel_winid)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   local set = function(lhs, fn, desc)
@@ -2242,6 +2280,8 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.todos: assign task to a spawned agent (picker + notes prompt)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: toggle — task frontmatter expansion, or section/period collapse on a header")
+  set("O", function() _toggle_all() end,
+    "auto-finder.todos: toggle ALL sections — collapse everything if anything is open, else expand everything")
   set("R", function() _refresh(bufnr) end,
     "auto-finder.todos: refresh (auto-core.todo.refresh + re-render)")
   set("M", _migrate_dir,

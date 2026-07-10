@@ -992,6 +992,59 @@ end
 ---(the `?` help overlay renders from them).
 ---@param bufnr integer
 ---@param panel_winid integer?
+---`O`: toggle the WHOLE tree open/closed. Semantics: if ANY container
+---or section is currently open, collapse everything; only when nothing
+---is open does it expand everything (short-circuits on the first open
+---item). Structure only — the position tree's containers + the Config /
+---Env section headers — never the per-row `o` detail expansions. Built
+---for large repos where you want to hide thousands of tests in one key.
+local function _toggle_all()
+  local section_ids = { CONFIG_SECTION_ID, ENV_SECTION_ID }
+  -- Container nodes (dirs / files / namespaces — anything with children)
+  -- from the live discovery tree, each tagged with whether it persists.
+  local containers = {}
+  local ar = _auto_run()
+  if ar then
+    local okt, tree = pcall(ar.discovery.tree)
+    if okt and tree and tree.root then
+      local function walk(node)
+        for _, child in ipairs(node.children or {}) do
+          if type(child.children) == "table" and #child.children > 0 then
+            containers[#containers + 1] =
+              { id = child.id, dir = child.type == "dir" }
+            walk(child)
+          end
+        end
+      end
+      walk(tree.root)
+    end
+  end
+
+  -- "Anything open?" — a container/section is open when NOT collapsed.
+  local any_open = false
+  for _, id in ipairs(section_ids) do
+    if M._collapsed[id] ~= true then any_open = true break end
+  end
+  if not any_open then
+    for _, c in ipairs(containers) do
+      if M._collapsed[c.id] ~= true then any_open = true break end
+    end
+  end
+  local collapse = any_open   -- any open → collapse all, else expand all
+
+  local s = _get_ui_state()
+  local stored = s and s:get("tests_collapsed") or nil
+  if type(stored) ~= "table" then stored = s and {} or nil end
+  local function apply(id, persist)
+    M._collapsed[id] = collapse or nil
+    if persist and stored then stored[id] = collapse and true or nil end
+  end
+  for _, id in ipairs(section_ids) do apply(id, true) end   -- sections persist
+  for _, c in ipairs(containers) do apply(c.id, c.dir) end  -- dirs persist
+  if s and stored then s:set("tests_collapsed", stored) end
+  _rerender()
+end
+
 local function _apply_keymaps(bufnr, panel_winid)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   local set = function(lhs, fn, desc)
@@ -1009,6 +1062,8 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.tests: debug the test under cursor (dap strategy)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
     "auto-finder.tests: toggle — details on a test row (status / duration / output path), collapse on a container")
+  set("O", function() _toggle_all() end,
+    "auto-finder.tests: toggle ALL — collapse everything if anything is open, else expand everything")
   set("i", function() _preview(_row_under_cursor(panel_winid)) end,
     "auto-finder.tests: output float — the run's full terminal output (go test logs)")
   set("S", function() _scan() end,
