@@ -355,8 +355,18 @@ if you want dbee's original behavior.
 Two flat scratch-buffer views (ADR-0048 Phase 3) consuming
 [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)'s
 public API — pure renderers over auto-run's discovery tree, config
-store, and breakpoint persistence, refreshed by the `run.*` event
-topics. Register with `slot add tests` / `slot add debug`.
+store, `launch.json` parse, and breakpoint persistence, refreshed by
+the `run.*` event topics. Register with `slot add tests` / `slot add
+debug`.
+
+Both views render two selection sections above their main body: a
+**Config** section (the VSCode `launch.json` configs auto-run parses —
+the tests view lists `mode:test`, the debug view `mode:debug`) and an
+**Env** section (candidate `.env` files, discovered under the worktree
+root and the bare-repo container, each at `.`, `.config/`, `.vscode/`).
+A `*` marks the per-repo **selected** config / env file; the selection
+feeds every subsequent launch — the config as the *active base*
+(env/build_flags/etc. merged in), the env file highest-precedence.
 
 ### tests
 
@@ -370,44 +380,47 @@ scan aborts.
 
 | Key | Action |
 |---|---|
-| `<CR>` | jump to position (editor-routed); toggle collapse on a folder |
+| `<CR>` | jump to position (editor-routed); config row → open `launch.json`; env file → open; toggle collapse on a folder / section header |
 | `r` | run position under cursor (test / file / namespace / folder = suite) |
 | `R` | re-run the last position run from this panel |
 | `d` | debug the test under cursor (dap strategy) |
-| `o` | toggle details on a test row (status / duration / output path — `<CR>` on the path opens it); collapse on containers |
-| `i` | output preview float |
+| `o` | toggle details on a test row / config row (env values masked) / env file (KEY=VALUE); collapse on containers |
+| `O` | toggle ALL: collapse everything if anything is open, else expand everything |
+| `i` | output float — the run's full terminal output (`go test` logs) |
+| `s` | select / deselect the config or env file under cursor |
+| `e` | edit the env var under cursor (Env section) |
+| `a` | add KEY=VALUE to the env file (env row / Env header) |
 | `S` | full worktree scan (bounded; `S` again cancels) |
 | `x` | stop running test jobs |
 | `?` | help overlay |
 
 ### debug
 
-Three sections: **Entry Points** (store configs `kind=debug|run`,
-grouped by kind, provenance/tier annotated), **Active Sessions**
-(live nvim-dap sessions), and **Breakpoints** (the persisted
-per-repo store merged with live dap state, grouped by file —
-orphaned persisted entries render dimmed).
+Sections: **Entry Points** (store configs `kind=debug|run`, grouped by
+kind, provenance/tier annotated), **Config** (`mode:debug` `launch.json`
+configs, selectable), **Env**, **Active Sessions** (live nvim-dap
+sessions), and **Breakpoints** (the persisted per-repo store merged with
+live dap state, grouped by file — orphaned persisted entries render
+dimmed). `o` on an entry expands its resolved config with **env values
+masked** — keys and `${VAR}` / `cmd:` refs only, literal values never
+reach the buffer.
 
-`o` on an entry point expands the resolved config inline with
-**env values masked** — keys and `${VAR}` / `cmd:` refs only,
-literal values never reach the buffer.
-
-Breakpoint clearing mirrors the marks view (`d` = immediate):
-`d` on a breakpoint row deletes it from nvim-dap's live registry
-AND the persisted store in one action; `d` on a file group header
-clears that file; `d` on the Breakpoints section header clears
-everything (this one confirms — bulk destructive).
+The debug panel has **no delete surface** — breakpoints are managed via
+nvim-dap directly (sign column / API); config files via the files panel.
 
 | Key | Action |
 |---|---|
-| `<CR>` | launch entry point / focus session / jump to breakpoint |
-| `o` | expand details (resolved config, session state, breakpoint condition) |
-| `d` | delete breakpoint (row) / clear file (file header) / clear all with confirm (section header) |
-| `e` | edit the entry point's config file |
-| `a` | scaffold a new config (auto-run `store.add` flow) |
+| `<CR>` | entry point → open its **program source**; config row → open `launch.json`; session → focus; breakpoint → jump; header → toggle collapse |
+| `r` | entry point → **run** the program in an auto-agents playground terminal (prompts `term1`..`term4`) |
+| `d` | entry point → **debug** (dap) |
+| `o` | expand details (resolved config with env masked / session state / breakpoint condition); collapse on headers |
+| `O` | toggle ALL sections open/closed |
+| `e` | edit the entry point's config file; env var → edit its value |
+| `a` | entry point → **export** config to `launch.json` (nearest reachable, else `$WORKSPACE/.config/launch.json`); env row / Env header → add KEY=VALUE |
+| `s` | select / deselect the config or env file under cursor |
 | `x` | terminate the session under cursor |
 | `p` | pause / continue the session under cursor |
-| `i` | info popup |
+| `i` | info popup for the row under cursor |
 | `R` | refresh |
 | `?` | help overlay |
 
