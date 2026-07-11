@@ -2,6 +2,14 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.3.1] — debug Entry Points `<CR>` opens the config definition
+
+`<CR>` on an Entry Point now opens the config's **definition** (the
+`.auto-run` store JSON, or the reachable `launch.json` at that entry for
+launch.json-origin configs) instead of the program's source — matching
+"navigate to the config". `r` still runs the program in a terminal, `d`
+still debugs.
+
 ## [Unreleased] — debug panel Entry Points: run / debug / navigate / export
 
 Reworked the Entry Points keymaps and removed the delete surface:
