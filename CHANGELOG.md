@@ -2,6 +2,13 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.3.2] — debug Entry Points `<CR>` opens the program (revert v0.3.1)
+
+`<CR>` on an Entry Point opens the **program's source** again (resolved
+`program` → `main.go` / dir), not the config definition. The Config
+section already surfaces the config, so `<CR>` navigating to the program
+is the non-redundant behavior. Reverts the v0.3.1 config-open change.
+
 ## [v0.3.1] — debug Entry Points `<CR>` opens the config definition
 
 `<CR>` on an Entry Point now opens the config's **definition** (the

@@ -30,8 +30,9 @@
 ---direct file reads ([[auto-family-state-ownership]]).
 ---
 ---Buffer-local keymaps:
----  <CR>  entry point → open its CONFIG definition (store JSON, or the
----        launch.json entry for launch.json-origin configs);
+---  <CR>  entry point → open its PROGRAM source (resolved `program` →
+---        main.go / dir); (the Config section opens the config
+---        definition — this doesn't);
 ---        session → focus (dap.set_session + dap-view);
 ---        breakpoint → jump to file:line (editor-routed);
 ---        config row → open launch.json at that entry;
@@ -813,41 +814,34 @@ local function _open_file(path, lnum)
   end
 end
 
----Open an Entry Point's CONFIG definition — the `<CR>` target. For a
----store config that's its backing `.auto-run/…/<name>.json`; for a
----launch.json-origin config (read-through shim) it's the reachable
----`launch.json`, jumped to that entry's line.
+---Open an Entry Point's PROGRAM source — the `<CR>` target. Resolves the
+---config's `program` (substituted); a Go package dir opens its `main.go`
+---when present, else the resolved path. (Opening the config DEFINITION is
+---the Config section's job, not this.)
 ---@param name string
-local function _open_config(name)
-  -- Store-tier config file first (the reviewable JSON).
-  local path = _config_file(name)
-  if path then
-    _open_file(path)
+local function _open_program(name)
+  local ar = _auto_run()
+  if not ar then return end
+  local ok_g, eff = pcall(ar.store.get, name)
+  if not ok_g or type(eff) ~= "table" then
+    log().warn("view.debug", "cannot resolve config '" .. tostring(name) .. "'")
     return
   end
-  -- launch.json-origin (shim / not imported): open launch.json at the entry.
-  local ok_i, import = pcall(require, "auto-run.import")
-  if ok_i and type(import.find_launch_json) == "function" then
-    local lj = import.find_launch_json()
-    if type(lj) == "string" and lj ~= "" then
-      local lnum, fh = 1, io.open(lj, "r")
-      if fh then
-        local n, needle = 0, '"' .. name .. '"'
-        for line in fh:lines() do
-          n = n + 1
-          if line:find('"name"', 1, true) and line:find(needle, 1, true) then
-            lnum = n
-            break
-          end
-        end
-        fh:close()
-      end
-      _open_file(lj, lnum)
-      return
-    end
+  local env = require("auto-run.env")
+  local program = eff.program
+  if type(program) == "string" and program ~= "" then
+    local okc, ctx = pcall(env.context)
+    if okc then program = env.substitute_deep(program, ctx) end
   end
-  log().warn("view.debug",
-    "'" .. tostring(name) .. "' has no config file to open")
+  if type(program) ~= "string" or program == "" then
+    log().info("view.debug", "'" .. tostring(name) .. "' has no program to open")
+    return
+  end
+  if vim.fn.isdirectory(program) == 1 then
+    local main = program .. "/main.go"
+    if vim.fn.filereadable(main) == 1 then program = main end
+  end
+  _open_file(program)
 end
 
 ---`<CR>` typed-row dispatch.
@@ -869,8 +863,8 @@ local function _open(row)
   if env_section.open(row, _open_file) then return end
 
   if row.kind == "entry" then
-    -- <CR> opens the config's definition; r runs, d debugs.
-    _open_config(row.name)
+    -- <CR> opens the program's source; r runs, d debugs.
+    _open_program(row.name)
     return
   end
 
@@ -1160,7 +1154,7 @@ local function _apply_keymaps(bufnr, panel_winid)
     })
   end
   set("<CR>", function() _open(_row_under_cursor(panel_winid)) end,
-    "auto-finder.debug: entry point → open config definition; session → focus; breakpoint → jump; header → toggle")
+    "auto-finder.debug: entry point → open program source; session → focus; breakpoint → jump; header → toggle")
   set("r", function() _run_in_terminal(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: run the entry point's program in a playground terminal (prompts T1..T4)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
