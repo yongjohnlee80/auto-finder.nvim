@@ -4997,6 +4997,38 @@ print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
   ok("empty workspace renders the `a` add hint",
     raw_empty:find("`a`") ~= nil)
 
+  -- v0.3.3: the Open header is ALWAYS visible, even at count 0, so a
+  -- task-less panel still opens on a task section. Without it the only
+  -- section was Vars, and the default (top-of-buffer) cursor `a`
+  -- pressed there adds a *variable*, not a task.
+  ok("empty workspace renders the Open header at count 0",
+    raw_empty:find("Open %(0%)") ~= nil, raw_empty)
+  -- Open must sit ABOVE Vars so the top-of-buffer cursor lands on it.
+  local pos_open_hdr = raw_empty:find("Open %(0%)")
+  local pos_vars_hdr = raw_empty:find("Vars %(")
+  ok("empty workspace: Open header precedes the Vars header",
+    pos_open_hdr and pos_vars_hdr and pos_open_hdr < pos_vars_hdr,
+    "open=" .. tostring(pos_open_hdr) .. " vars=" .. tostring(pos_vars_hdr))
+  -- The row at buffer line 1 must be the Open bucket-header — that is
+  -- what makes the default-cursor `a` dispatch to add-task, not
+  -- add-var (the `a` keymap routes vars-entry / vars-header rows to
+  -- _add_var and everything else to _add_task).
+  local row_l1
+  for _, r in ipairs(view._rows or {}) do
+    if r.lnum == 1 then row_l1 = r; break end
+  end
+  ok("empty workspace: line-1 row is the Open bucket-header",
+    row_l1 and row_l1.kind == "bucket-header" and row_l1.section == "open",
+    vim.inspect(row_l1))
+  ok("empty workspace: line-1 row is NOT a Vars row (so `a` adds a task)",
+    row_l1 ~= nil
+      and row_l1.kind ~= "vars-entry"
+      and row_l1.kind ~= "vars-header")
+  -- The ephemeral-index hint is suppressed when Open is empty — there
+  -- is no numbering to explain.
+  ok("empty workspace: no ephemeral-index hint under an empty Open",
+    raw_empty:find("index is ephemeral") == nil)
+
   -- ── populated render: buckets + ordinals + badges + due ────
   todo.add({ id = "2026-05-25-foo", title = "First open task" })
   todo.add({ id = "2026-05-26-bar", title = "Second open task", due = "2026-06-15" })

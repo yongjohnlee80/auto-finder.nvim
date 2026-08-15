@@ -975,7 +975,13 @@ local function _render(bufnr)
   local total = 0
   for _, name in ipairs(BUCKET_ORDER) do
     local bucket = grouped[name] or {}
-    if #bucket > 0 then
+    -- v0.3.3: the Open header is ALWAYS emitted, even at count 0, so a
+    -- freshly-created (task-less) panel still opens with the cursor on
+    -- a task section. Pressing `a` there adds a task; before this fix
+    -- the only section on an empty panel was Vars, and `a` on a Vars
+    -- row adds a *variable* (the friction this closes). The other
+    -- buckets stay hidden until they actually hold tasks.
+    if #bucket > 0 or name == "open" then
       emit_header(name, #bucket)
       local collapsed = M._collapsed[name] == true
       if not collapsed then
@@ -1009,7 +1015,10 @@ local function _render(bufnr)
           -- section so we surface it exactly once — once the user
           -- has read it under Open, the same rule transparently
           -- applies to the buckets below.
-          if name == "open" then
+          -- v0.3.3: only surface the ephemeral-index hint when there
+          -- is at least one open task — an empty Open header (count 0)
+          -- has no numbering to explain.
+          if name == "open" and #bucket > 0 then
             local hint = "    (index is ephemeral — refer by id for anything persistent)"
             lines[#lines + 1] = hint
             mark(#lines - 1, 0, #hint, HL.empty)  -- reuse the dim Comment link
