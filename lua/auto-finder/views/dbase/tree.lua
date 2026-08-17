@@ -517,29 +517,26 @@ local function _ensure_subscriptions()
   local s = _session()
   if not s then return end
 
-  -- Session changes are autodb's own signals, not auto-core topics, so
-  -- they are held directly and released in on_close.
-  M._session_unsubs = M._session_unsubs or {}
-  if #M._session_unsubs == 0 then
-    table.insert(M._session_unsubs, s.on("connected", function()
-      M.invalidate(nil)
-      vim.schedule(_rerender)
-    end))
-    table.insert(M._session_unsubs, s.on("disconnected", function()
-      M.invalidate(nil)
-      vim.schedule(_rerender)
-    end))
-    table.insert(M._session_unsubs, s.on("selection", function()
-      vim.schedule(_rerender)
-    end))
-  end
+  -- autodb publishes to auto-core topics, so these go through the same
+  -- view_subs machinery as every other subscription in this plugin:
+  -- one handle per slot, replaced rather than accumulated on refocus,
+  -- and released together in on_close.
+  M._subs:replace("autodb-connected", s.TOPIC_CONNECTED, function()
+    M.invalidate(nil)
+    vim.schedule(_rerender)
+  end)
+  M._subs:replace("autodb-disconnected", s.TOPIC_DISCONNECTED, function()
+    M.invalidate(nil)
+    vim.schedule(_rerender)
+  end)
+  M._subs:replace("autodb-selection", s.TOPIC_SELECTION, function()
+    vim.schedule(_rerender)
+  end)
 end
 
 local function _dispose_subscriptions()
   if M._subs and M._subs.dispose_all then pcall(function() M._subs:dispose_all() end) end
   M._subs = nil
-  for _, un in ipairs(M._session_unsubs or {}) do pcall(un) end
-  M._session_unsubs = nil
 end
 
 -- ─── public — view lifecycle contract ─────────────────────────
