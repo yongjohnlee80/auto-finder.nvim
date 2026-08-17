@@ -19,6 +19,21 @@
 ---`sections/dbase.lua` facade.
 ---@module 'auto-finder.views.dbase'
 
+-- ADR-0058 (M7): the dbase slot moves from nvim-dbee to autodb's own
+-- explorer. The switch is by AVAILABILITY rather than configuration —
+-- installing autodb.nvim is the cutover, and until then the dbee path
+-- below is untouched. M8 removes dbee and this delegation with it.
+--
+-- Delegation rather than a rewrite in place, deliberately: a developer
+-- mid-session keeps a working panel either way, and the change is
+-- reversible by uninstalling one plugin.
+local function _autodb_view()
+  if not pcall(require, "autodb.session") then return nil end
+  local ok, tree = pcall(require, "auto-finder.views.dbase.tree")
+  if ok then return tree end
+  return nil
+end
+
 local host = require("auto-finder.panel.host")
 local logger = require("auto-finder.log")
 local setup_mod = require("auto-finder.views.dbase.setup")
@@ -244,6 +259,8 @@ end
 ---@param panel_winid integer
 ---@return integer|nil bufnr
 function M.get_buffer(panel_winid)
+  local autodb_view = _autodb_view()
+  if autodb_view then return autodb_view.get_buffer(panel_winid) end
   ---@diagnostic disable-next-line: unused-local
   local _ = panel_winid  -- consumed in on_focus's deferred mount
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
@@ -265,6 +282,8 @@ end
 ---@param panel_winid integer
 ---@param bufnr integer  -- placeholder bufnr created by get_buffer
 function M.on_focus(panel_winid, bufnr)
+  local autodb_view = _autodb_view()
+  if autodb_view then return autodb_view.on_focus(panel_winid, bufnr) end
   -- Re-focus on an already-mounted drawer? No setup needed.
   if bufnr and M._owned_bufs[bufnr] then return end
 
@@ -341,6 +360,8 @@ end
 ---orphan in the editor area after the user closes the panel,
 ---producing UX rough edges.
 function M.on_close()
+  local autodb_view = _autodb_view()
+  if autodb_view then return autodb_view.on_close() end
   M._bufnr = nil
   M._owned_bufs = {}
   pcall(layout_mod.close_all)

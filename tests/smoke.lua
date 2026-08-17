@@ -7476,6 +7476,78 @@ print("\n[48] views._config_section — kind filter, select, masked expand")
   vim.fn.delete(repo, "rf")
 end)()
 
+print("\n[49] ADR-0058 M7 — views.dbase.tree (autodb explorer)")
+;(function()
+  local tree = require("auto-finder.views.dbase.tree")
+  tree._reset_for_tests()
+
+  -- The panel must MOUNT with autodb absent. A missing optional
+  -- dependency is a normal state to render, not a reason to fail.
+  local buf = tree.get_buffer(nil)
+  ok("p49: mounts without autodb installed", buf and vim.api.nvim_buf_is_valid(buf), buf)
+  ok("p49: the buffer is a scratch panel buffer",
+    vim.bo[buf].buftype == "nofile" and vim.bo[buf].swapfile == false
+    and vim.bo[buf].modifiable == false)
+  ok("p49: it is stamped as the dbase view", vim.b[buf].auto_finder_view == "dbase")
+
+  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local joined = table.concat(lines, "\n")
+  ok("p49: it explains that autodb is missing rather than rendering empty",
+    joined:find("autodb", 1, true) ~= nil, vim.inspect(lines))
+  ok("p49: rows are parallel to lines", tree._rows and #tree._rows == #lines,
+    tostring(tree._rows and #tree._rows) .. " vs " .. #lines)
+
+  -- Keymaps are bound to the BUFFER, so they cannot leak into the
+  -- editor area.
+  local maps = {}
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do maps[m.lhs] = true end
+  ok("p49: the auto-finder vocabulary is bound (<CR>, o, i, R, ?)",
+    maps["<CR>"] and maps["o"] and maps["i"] and maps["R"] and maps["?"],
+    vim.inspect(vim.tbl_keys(maps)))
+  ok("p49: h and l are NOT bound — they stay ordinary cursor motions",
+    maps["h"] == nil and maps["l"] == nil)
+
+  -- Toggling is pure state: it must not require a live session.
+  tree._expanded = {}
+  local toggled = tree._toggle_for_tests({ kind = "workspace", id = "ws:1" })
+  ok("p49: a container toggles open", toggled == true and tree._expanded["ws:1"] == true)
+  tree._cache["ws:1"] = { items = { { id = 9 } } }
+  tree._toggle_for_tests({ kind = "workspace", id = "ws:1" })
+  ok("p49: collapsing clears the node so re-expanding refetches",
+    tree._expanded["ws:1"] == nil and tree._cache["ws:1"] == nil)
+  ok("p49: a leaf row does not toggle",
+    tree._toggle_for_tests({ kind = "table", id = "t:1" }) == false)
+  ok("p49: a nil row is safe", tree._toggle_for_tests(nil) == nil)
+
+  -- invalidate() is what a reconnect uses: everything, or one node.
+  tree._cache = { root = { items = {} }, ["ws:2"] = { items = {} } }
+  tree.invalidate("ws:2")
+  ok("p49: invalidate(id) drops one node",
+    tree._cache.root ~= nil and tree._cache["ws:2"] == nil)
+  tree.invalidate(nil)
+  ok("p49: invalidate() drops everything", next(tree._cache) == nil)
+
+  tree.on_close()
+  ok("p49: on_close releases the buffer and rows",
+    tree._bufnr == nil and tree._rows == nil)
+  tree._reset_for_tests()
+end)()
+
+print("\n[50] ADR-0058 M7 — dbase slot delegates by availability")
+;(function()
+  local dbase = require("auto-finder.views.dbase")
+  ok("p50: the slot still exposes the view contract",
+    type(dbase.get_buffer) == "function" and type(dbase.on_focus) == "function"
+    and type(dbase.on_close) == "function")
+
+  -- With autodb absent the dbee path is untouched: the delegation is
+  -- by availability, so a developer mid-session keeps a working panel
+  -- and the change is reversible by uninstalling one plugin.
+  local has_autodb = pcall(require, "autodb.session")
+  ok("p50: autodb is absent in this environment, so dbee remains in charge",
+    has_autodb == false, "autodb.session present = " .. tostring(has_autodb))
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
