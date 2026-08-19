@@ -12,8 +12,11 @@
 ---    connection                  ← `*` marks the active one
 ---      Tables
 ---        schema.table
----      Notes
----        query.sql
+---
+---`workspace.list` already embeds each workspace's connections, so the
+---top two levels cost ONE request rather than 1+N. Notes are NOT here:
+---they are client-side files under the configured notes directory, not
+---an RPC surface, and belong with the commands that open them.
 ---
 ---Keymaps follow auto-finder's vocabulary rather than the TUI's, because
 ---`h`/`l` are ordinary cursor motions in a scratch buffer here and the
@@ -189,8 +192,10 @@ local function _render(bufnr)
     -- Workspaces are the root. They are loaded once per epoch.
     local root = _cache("root")
     if not root.items and not root.loading then
-      _load("root", "meta.workspaces", {}, function(r)
-        return type(r) == "table" and (r.workspaces or r) or {}
+      -- workspace.list embeds each workspace's connections, so the top
+      -- two levels of the tree cost ONE round trip rather than 1+N.
+      _load("root", "workspace.list", {}, function(r)
+        return type(r) == "table" and r or {}
       end)
     end
 
@@ -210,19 +215,13 @@ local function _render(bufnr)
         if not ws_open then goto next_ws end
 
         do
-          local conns = _cache(ws_id)
-          if not conns.items and not conns.loading then
-            _load(ws_id, "meta.connections", { ws.id }, function(r)
-              return type(r) == "table" and (r.connections or r) or {}
-            end)
-          end
-          if conns.loading then
-            _row(rows, lines, hls, { kind = "message", hl = HL.dim, text = "    loading…" })
-          elseif conns.error then
-            _row(rows, lines, hls, { kind = "message", hl = HL.error,
-              text = "    " .. tostring(conns.error) })
+          -- Already in hand from workspace.list; no second request.
+          local ws_conns = ws.connections or {}
+          if #ws_conns == 0 then
+            _row(rows, lines, hls, { kind = "message", hl = HL.dim,
+              text = "    (no connections)" })
           else
-            for _, conn in ipairs(conns.items or {}) do
+            for _, conn in ipairs(ws_conns) do
               local c_id = "conn:" .. tostring(conn.id)
               local c_open = M._expanded[c_id] == true
               local is_active = active_conn and active_conn.id == conn.id
@@ -236,8 +235,7 @@ local function _render(bufnr)
 
               do
                 -- Two fixed groups under a connection, matching the TUI.
-                for _, group in ipairs({ { key = "tables", label = "Tables" },
-                  { key = "notes", label = "Notes" } }) do
+                for _, group in ipairs({ { key = "tables", label = "Tables" } }) do
                   local g_id = c_id .. ":" .. group.key
                   local g_open = M._expanded[g_id] == true
                   _row(rows, lines, hls, {
@@ -250,15 +248,11 @@ local function _render(bufnr)
                   do
                     local g = _cache(g_id)
                     if not g.items and not g.loading then
-                      if group.key == "tables" then
-                        _load(g_id, "meta.tables", { conn.id }, function(r)
-                          return type(r) == "table" and (r.tables or r) or {}
-                        end)
-                      else
-                        _load(g_id, "notes.list", { ws.id }, function(r)
-                          return type(r) == "table" and (r.notes or r) or {}
-                        end)
-                      end
+                      -- schema.tables is per SCHEMA; "" asks the server
+                      -- for the connection's default.
+                      _load(g_id, "schema.tables", { conn.id, "" }, function(r)
+                        return type(r) == "table" and r or {}
+                      end)
                     end
                     if g.loading then
                       _row(rows, lines, hls, { kind = "message", hl = HL.dim,
@@ -406,7 +400,8 @@ local function _columns(row)
     return _rerender()
   end
   M._expanded[id] = true
-  _load(id, "meta.columns", { row.connection.id, row.item.schema, row.item.name })
+  _load(id, "schema.columns",
+    { row.connection.id, row.item.schema or "", row.item.name })
   _rerender()
 end
 
