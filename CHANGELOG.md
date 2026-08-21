@@ -53,6 +53,16 @@ minutes — re-indexing a subtree that was **collapsed and invisible**.
   deliberately does *not* wait — deferring a newly created file by
   1.5 s trades a real regression for a hypothetical win.
 
+New suite **`tests/adr0059-e2e.lua`** (wired into `tests/run-all.sh`),
+**5/0**: the `[50]` pins stub the tree and so cover classification only,
+whereas this drives a genuine file write through `auto-core.fs.watch` →
+the translator → a really-mounted panel and counts actual root scans at
+the `fs_scan` chokepoint. Measured A/B against `main` — write to an
+existing visible file **1 → 0** scans, new file in a collapsed dir
+**1 → 0**, 200 files bulk-written into a collapsed dir **1 → 0**, and a
+new file in the *visible* root stays at **1** (the control: legitimate
+structural change must still rescan).
+
 Smoke **647/0** (new section `[50]`, six pins; four of them fail
 against the unfixed subscriber, the other two guard against
 over-suppression — a visible delete must still rescan, and the settle

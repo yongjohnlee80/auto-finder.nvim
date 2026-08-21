@@ -58,6 +58,12 @@ run_suite "smoke"           tests/smoke.lua                 "$TOLERATE_SMOKE_CRA
 run_suite "dbase_spike"     tests/dbase_spike.lua           0
 run_suite "encrypted_vault" tests/encrypted_vault_smoke.lua 0
 run_suite "adr0048"         tests/smoke-adr0048.lua         0
+# ADR-0059 end-to-end: real fs.watch -> translator -> mounted panel,
+# counting actual root scans. The smoke [50] pins stub the tree, so
+# this is the only suite covering the real pipeline. Wired in here
+# deliberately -- an unwired suite is exactly the orphan this
+# runner exists to prevent.
+run_suite "adr0059-e2e"    tests/adr0059-e2e.lua           0
 
 echo "──────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
