@@ -6198,6 +6198,124 @@ end)()
 -- survives) — everything after it, [41b]+[42], silently never ran,
 -- and the printed totals hid the truncation. Tracked as a bug task;
 -- do not add new sections after [41] until it is fixed.
+-- ───────── 50. ADR-0059: files:changed does only what's needed ──────────
+-- Through v0.3.4 the `files` subscriber read NEITHER `payload.kind` nor
+-- `payload.paths` and drove a full root `navigate()` for every event, so
+-- a plain buffer write cost a re-index of every expanded directory.
+-- (a), (b) and (d) below all FAIL on the unfixed code (which refreshed
+-- unconditionally); (c) is the anti-over-suppression guard — a visible
+-- structural change must still rescan.
+--
+-- The tree is stubbed rather than rendered: what's under test is the
+-- CLASSIFICATION (kind + visibility → skip/redraw/scan), and the
+-- subscriber re-requires manager/renderer at call time, so module-level
+-- stubs are seen.
+print("\n[50] ADR-0059 — files:changed does only the work the event requires")
+;(function()
+local ev   = require("auto-finder.core.events")
+local mgr  = require("auto-finder.neotree.sources.manager")
+local rend = require("auto-finder.neotree.ui.renderer")
+
+af.open(true)
+af.focus(1) -- files
+local files_section = require("auto-finder.sections").resolve(1)
+vim.wait(500, function()
+  return files_section and files_section._bufnr ~= nil
+    and vim.api.nvim_buf_is_valid(files_section._bufnr)
+end)
+
+local cwd      = vim.fn.getcwd()
+local open_dir = cwd .. "/lua"                -- stubbed as EXPANDED
+local shut_dir = cwd .. "/tests"              -- stubbed as COLLAPSED
+local rendered = open_dir .. "/rendered.lua"  -- stubbed as an existing node
+
+local shut_node = { type = "directory", loaded = true }
+local nodes = {
+  [rendered] = { type = "file" },
+  [open_dir] = { type = "directory", loaded = true },
+  [shut_dir] = shut_node,
+}
+local fake_tree = { get_node = function(_, id) return nodes[id] end }
+
+local orig_states   = mgr._get_all_states
+local orig_expanded = rend.get_expanded_nodes
+local orig_refresh  = mgr.refresh
+local orig_redraw   = mgr.redraw
+
+mgr._get_all_states = function()
+  return { { name = "filesystem", winid = 1, tree = fake_tree, path = cwd } }
+end
+rend.get_expanded_nodes = function() return { open_dir } end
+
+local refreshes, redraws = {}, {}
+mgr.refresh = function(src) refreshes[#refreshes + 1] = src end
+mgr.redraw  = function(src) redraws[#redraws + 1] = src end
+local function reset() refreshes, redraws = {}, {} end
+
+-- (a) §3.1 — upsert on an already-rendered node inside an expanded
+--     directory is content-only: redraw in place, never walk the fs.
+reset()
+ev.publish("auto-finder.core.files:changed",
+  { cwd = cwd, kind = "upsert", paths = { rendered } })
+vim.wait(400, function() return #redraws > 0 end)
+ok("59a: upsert on a rendered node redraws, does NOT rescan",
+  #redraws > 0 and #refreshes == 0,
+  "redraws=" .. vim.inspect(redraws) .. " refreshes=" .. vim.inspect(refreshes))
+
+-- (b) §3.2 — churn inside a COLLAPSED directory is invisible: no
+--     rescan, no redraw, and the directory is marked for a scoped
+--     rescan on next expand (`toggle_directory` scans when not loaded).
+reset()
+shut_node.loaded = true
+ev.publish("auto-finder.core.files:changed",
+  { cwd = cwd, kind = "upsert", paths = { shut_dir .. "/whatever.txt" } })
+-- Must outlast REFRESH_THROTTLE_MS (800) + the coalesce window,
+-- otherwise the unfixed code's refresh is merely throttled rather
+-- than absent and this pin would pass for the wrong reason.
+vim.wait(1400)
+ok("59b: churn in a collapsed dir triggers no rescan and no redraw",
+  #refreshes == 0 and #redraws == 0,
+  "redraws=" .. vim.inspect(redraws) .. " refreshes=" .. vim.inspect(refreshes))
+ok("59b: the collapsed dir is marked stale for a scoped rescan on expand",
+  shut_node.loaded == false)
+
+-- (c) §3.1 — a delete of a VISIBLE node is structural: must rescan.
+--     Guards the fix against over-suppression.
+reset()
+ev.publish("auto-finder.core.files:changed",
+  { cwd = cwd, kind = "delete", paths = { rendered } })
+vim.wait(2000, function() return #refreshes > 0 end)
+ok("59c: delete of a visible node DOES rescan",
+  #refreshes > 0,
+  "refreshes=" .. vim.inspect(refreshes))
+
+-- (d) §3.3 — bulk churn in a visible directory is held until the
+--     filesystem goes quiet, collapsing into ONE rescan instead of
+--     one per throttle window.
+reset()
+for _ = 1, 6 do
+  ev.publish("auto-finder.core.files:changed",
+    { cwd = cwd, kind = "subtree_stale",
+      paths = { open_dir }, parents = { open_dir } })
+  vim.wait(300) -- sustained churn: 6 x 300ms ~= 1.8s, past the throttle
+end
+local during_burst = #refreshes
+vim.wait(3000, function() return #refreshes > 0 end)
+ok("59d: bulk subtree_stale is HELD while churn CONTINUES (not merely throttled)",
+  during_burst == 0,
+  "fired during 1.8s of sustained churn: " .. tostring(during_burst))
+ok("59d: bulk subtree_stale settles into exactly one rescan",
+  #refreshes == 1,
+  "refreshes=" .. vim.inspect(refreshes))
+
+vim.wait(400) -- let any trailing timer land on the stubs, not the real fns
+mgr._get_all_states     = orig_states
+rend.get_expanded_nodes = orig_expanded
+mgr.refresh             = orig_refresh
+mgr.redraw              = orig_redraw
+end)()
+
+
 print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indicator")
 ;(function()
   local ok_diag, diag = pcall(require, "auto-finder.views.todos.automation_diagnostics")

@@ -62,6 +62,26 @@ local LIVE_REFRESH_DEBOUNCE_MS = 150  -- collapse refresh storms
 -- (§2.2 + §2.3 are); it protects against future watch→refresh loops too.
 local REFRESH_THROTTLE_MS = 800
 
+-- ADR-0059 §3.3: settle detector for bulk filesystem churn. The
+-- 150 ms coalesce + 800 ms throttle above are a RATE LIMITER, not a
+-- settle detector — while churn continues they re-arm indefinitely, so
+-- a `git worktree add` of a few thousand files trains one full root
+-- scan per throttle window for as long as the checkout runs (measured
+-- 2026-08-21: 5,294 files, ~9 minutes, 4 scan-storm WARNs). A
+-- structural refresh is therefore HELD until the filesystem has been
+-- quiet for `SETTLE_QUIET_MS`, bounded by `SETTLE_MAX_WAIT_MS` so a
+-- directory under continuous write still refreshes eventually.
+local SETTLE_QUIET_MS    = 1500
+local SETTLE_MAX_WAIT_MS = 10000
+-- Only BULK churn is worth holding. A single structural change (you
+-- created one file) must land promptly — deferring it 1.5 s to guard
+-- against a checkout that isn't happening trades a real regression for
+-- a hypothetical win. `subtree_stale` already means "core counted more
+-- than its burst threshold in one directory"; this covers the other
+-- bulk shape, where a window's writes are spread thin across many
+-- directories and so never trip core's per-parent counter.
+local BULK_PATHS_THRESHOLD = 25
+
 local function require_core()
   local ok, core = pcall(require, "auto-core")
   if not ok then return nil end
@@ -271,6 +291,171 @@ local function setup_live_refresh(section, source)
   -- function on every focus is safe AND survives an auto-core bus
   -- reset. The smoke section [38] (added with this fix) proves
   -- the bus-reset survivability without manually clearing flags.
+  -- ── ADR-0059: do only as much as a `files:changed` event needs ──
+  --
+  -- The core translator emits a DISCRIMINATED kind precisely so that
+  -- consumers can filter on it (`core/init.lua`: "each kind gets its
+  -- own event so subscribers can filter on payload.kind"). Through
+  -- v0.3.4 this consumer read NEITHER `kind` nor `paths` and drove a
+  -- full root `navigate()` for every event — so a plain buffer write,
+  -- an agent file write or a mailbox message each cost a re-index of
+  -- every expanded directory. ADR-0050 §2.3 had already declared the
+  -- full re-scan "reserved for `files:changed` (structural)", but
+  -- nothing ever checked structurality. §3.1 + §3.2 implement that
+  -- check, which is what makes this the fourth and last known feeder
+  -- into the root-scan sink (after v0.2.65 git, v0.2.66 files-follow
+  -- and v0.2.67 cross-source `manager.refresh`).
+  --
+  -- Three outcomes:
+  --   "skip"   — nothing on screen is affected. A directory whose
+  --              contents churned while COLLAPSED gets `loaded`
+  --              cleared, so the next expand does a scoped rescan of
+  --              just that directory (`toggle_directory` scans only
+  --              when a node is not loaded). Lazily correct, free now.
+  --   "redraw" — every path is an already-rendered node and the event
+  --              is an upsert: content changed, structure did not.
+  --              Re-render in place; no filesystem walk.
+  --   "scan"   — a VISIBLE structural change (a delete, or an upsert
+  --              naming a path with no node yet), or an event we
+  --              cannot attribute. Falls through to the full refresh.
+
+  ---Directory whose CONTENTS an event path describes. `subtree_stale`
+  ---names the directory itself; `upsert`/`delete` name individual
+  ---files, so their container is the parent.
+  ---@param kind string?
+  ---@param p string
+  ---@return string
+  local function affected_dir(kind, p)
+    if kind == "subtree_stale" then
+      return p
+    end
+    return vim.fn.fnamemodify(p, ":h")
+  end
+
+  local VERDICT_RANK = { skip = 0, redraw = 1, scan = 2 }
+
+  ---@param payload table
+  ---@return "skip"|"redraw"|"scan"
+  local function classify_files_event(payload)
+    local paths = payload.paths
+    if type(paths) ~= "table" or #paths == 0 then
+      return "scan" -- unattributed event → assume the worst
+    end
+
+    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
+    local ok_rend, rend = pcall(require, "auto-finder.neotree.ui.renderer")
+    if not ok_mgr or not ok_rend
+        or type(mgr._get_all_states) ~= "function"
+        or type(rend.get_expanded_nodes) ~= "function" then
+      return "scan"
+    end
+
+    local verdict = "skip"
+    local function raise(v)
+      if VERDICT_RANK[v] > VERDICT_RANK[verdict] then
+        verdict = v
+      end
+    end
+
+    ---@type { tree: table, dir: string }[]
+    local stale = {}
+    -- Whether we found any rendered state to reason about. If we
+    -- found none, the event is UNATTRIBUTABLE and must fall through
+    -- to the full refresh — `manager.refresh` marks non-windowed
+    -- states dirty so they re-scan on next display, and silently
+    -- skipping here would lose that.
+    local examined = false
+
+    for _, state in ipairs(mgr._get_all_states()) do
+      if state.name == source and state.winid and state.tree and state.path then
+        examined = true
+        local tree = state.tree
+        -- Only expanded directories (and the root) are showing their
+        -- children. Anything else is a collapsed row whose contents
+        -- are off-screen, so churn inside it changes nothing visible.
+        local ok_exp, expanded = pcall(rend.get_expanded_nodes, tree, state.path)
+        if not ok_exp then
+          return "scan"
+        end
+        local visible = { [state.path] = true }
+        for _, ex in ipairs(expanded or {}) do
+          visible[ex] = true
+        end
+
+        for _, path in ipairs(paths) do
+          local dir = affected_dir(payload.kind, path)
+          if visible[dir] then
+            if payload.kind == "upsert" and tree:get_node(path) then
+              raise("redraw") -- already rendered → content-only
+            else
+              raise("scan")   -- visible + structural
+            end
+          else
+            stale[#stale + 1] = { tree = tree, dir = dir }
+          end
+        end
+      end
+    end
+
+    if not examined then
+      return "scan"
+    end
+
+    -- Off-screen churn: drop the `loaded` flag so re-expanding pays a
+    -- scoped rescan of that one directory instead of a root walk now.
+    for _, entry in ipairs(stale) do
+      local node = entry.tree:get_node(entry.dir)
+      if node and node.type == "directory" then
+        node.loaded = false
+      end
+    end
+
+    return verdict
+  end
+
+  -- ADR-0059 §3.1: content-only changes re-render in place. The
+  -- coalesce here only avoids redundant paints during a burst — a
+  -- redraw is O(rendered nodes), not O(filesystem).
+  local redraw_coalesced = require("auto-finder.shared.debounce").coalesce(
+    function()
+      if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
+        return
+      end
+      pcall(function()
+        require("auto-finder.neotree.sources.manager").redraw(source)
+      end)
+    end,
+    LIVE_REFRESH_DEBOUNCE_MS
+  )
+
+  -- ADR-0059 §3.3: hold a structural refresh until the filesystem
+  -- goes quiet, so a bulk checkout collapses into ONE scan. Uses the
+  -- same generation-counter trick as `shared.debounce` (vim.defer_fn
+  -- returns nil, so timer cancellation isn't available).
+  local settle_gen        = 0
+  local settle_started_ms = nil
+  local function schedule_settled_refresh()
+    settle_gen = settle_gen + 1
+    local my_gen = settle_gen
+    if settle_started_ms == nil then
+      settle_started_ms = uv_now()
+    end
+    -- Held long enough: stop waiting for quiet and refresh now, so a
+    -- continuously-written directory can't starve the panel.
+    if uv_now() - settle_started_ms >= SETTLE_MAX_WAIT_MS then
+      settle_started_ms = nil
+      schedule_refresh()
+      return
+    end
+    vim.defer_fn(function()
+      if my_gen ~= settle_gen then
+        return -- superseded: still churning, keep holding
+      end
+      settle_started_ms = nil
+      schedule_refresh()
+    end, SETTLE_QUIET_MS)
+  end
+
   function section._arm_live_refresh_subs()
     section._live_subs = section._live_subs
       or require("auto-finder.shared.view_subs").new()
@@ -288,7 +473,28 @@ local function setup_live_refresh(section, source)
       if payload.cwd and payload.cwd ~= vim.fn.getcwd() then
         return
       end
-      schedule_refresh()
+      -- ADR-0059 §3.1/§3.2: read the kind + paths the translator went
+      -- to the trouble of computing, and do only what they require.
+      local ok_class, action = pcall(classify_files_event, payload)
+      if not ok_class then
+        action = "scan"
+      end
+      if action == "skip" then
+        return
+      elseif action == "redraw" then
+        redraw_coalesced()
+      elseif payload.kind == "subtree_stale"
+          or (type(payload.paths) == "table"
+              and #payload.paths >= BULK_PATHS_THRESHOLD) then
+        -- Bulk churn (a checkout, a branch switch, a mass delete):
+        -- hold for quiet so it collapses into ONE scan.
+        schedule_settled_refresh()
+      else
+        -- An ordinary structural change in a visible directory. Take
+        -- the established coalesce+throttle path so the new node
+        -- appears promptly.
+        schedule_refresh()
+      end
     end)
 
     -- Worktree switch → the panel is now showing the wrong tree.

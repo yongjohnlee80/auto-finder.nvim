@@ -2,6 +2,63 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.3.5] — ADR-0059: `files:changed` no longer re-indexes the tree on every file event
+
+Closes the fourth and broadest feeder into the full-rescan sink, after
+[v0.2.65] (git → decorate-only), [v0.2.66] (files-follow reveal) and
+[v0.2.67] (cross-source `manager.refresh`). Found by the v0.2.67
+scan-storm detector, which fired 4× in 9 minutes with the trigger
+attributed in the log ring — exactly what it was added for.
+
+The `files` subscriber in `shared/neotree.lua` read **neither**
+`payload.kind` **nor** `payload.paths` and called a full root
+`navigate()` for every event, even though the core translator computes
+both precisely so consumers can discriminate (`core/init.lua`: "each
+kind gets its own event so subscribers can filter on payload.kind").
+[ADR-0050] §2.3 had already declared the full re-scan "reserved for
+`files:changed` (**structural**)", but nothing ever checked
+structurality — and `created` + `modified` both collapse to `upsert`
+at the producer, so the distinction never survived anyway. Net effect:
+every buffer write, agent file write, mailbox message and `.todo-list`
+update cost a re-index of every expanded directory.
+
+Measured on a 16-repo project parent (66,819 dirs, 16,884 inotify
+handles): 68 root scans in 81 minutes, 18.0 s of blocking tree-walk,
+mean 265 ms / max 1,915 ms. Ignition was a `git worktree add` of 5,294
+files, which pinned the panel at the §2.4 throttle ceiling for ~9
+minutes — re-indexing a subtree that was **collapsed and invisible**.
+
+- **`shared/neotree.lua` §3.1 + §3.2:** the subscriber now classifies
+  each event against the rendered tree before acting.
+  - `upsert` whose paths are all already-rendered nodes → content
+    changed, structure did not → **`manager.redraw`**, no filesystem
+    walk.
+  - Churn under a **collapsed** directory → no rescan, no redraw; the
+    directory's `loaded` flag is cleared so the next expand pays a
+    *scoped* rescan of just that directory (`toggle_directory` scans
+    only when a node is not loaded). Lazily correct, free now.
+  - A visible structural change (a delete, or an upsert naming a path
+    with no node yet), or any event that can't be attributed to a
+    rendered state, still takes the full refresh — `manager.refresh`
+    marks non-windowed states dirty, and silently skipping would lose
+    that.
+- **`shared/neotree.lua` §3.3:** bulk churn (`subtree_stale`, or a
+  window carrying ≥ `BULK_PATHS_THRESHOLD` paths) is **held until the
+  filesystem goes quiet** — `SETTLE_QUIET_MS` 1500, capped by
+  `SETTLE_MAX_WAIT_MS` 10000 so a continuously-written directory can't
+  starve the panel. The 150 ms coalesce + 800 ms throttle are a *rate
+  limiter*, not a settle detector: while churn continues they re-arm
+  indefinitely, which is why the checkout above produced a 9-minute
+  train instead of one scan. An **ordinary** single structural change
+  deliberately does *not* wait — deferring a newly created file by
+  1.5 s trades a real regression for a hypothetical win.
+
+Smoke **647/0** (new section `[50]`, six pins; four of them fail
+against the unfixed subscriber, the other two guard against
+over-suppression — a visible delete must still rescan, and the settle
+must fire exactly once). Pre-existing unrelated failures unchanged
+(`dbase_spike` [6b.9], `adr0048` p47 ×10). Patch within the v0.3.x line.
+
 ## [v0.3.2] — debug Entry Points `<CR>` opens the program (revert v0.3.1)
 
 `<CR>` on an Entry Point opens the **program's source** again (resolved
