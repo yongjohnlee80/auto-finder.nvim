@@ -108,24 +108,9 @@ end
 ---files (never an RPC surface); autodb reports the root over its
 ---handshake, so both frontends and this panel read the same folder.
 function M._list_notes(ws_id)
-  local s = _session()
-  if not (s and s.notes_dir) then return {} end
-  local root = s.notes_dir()
-  if type(root) ~= "string" or root == "" then return {} end
-  local dir = root .. "/ws-" .. tostring(ws_id)
-  local fs = vim.uv or vim.loop
-  local handle = fs.fs_scandir(dir)
-  if not handle then return {} end
-  local out = {}
-  while true do
-    local name, typ = fs.fs_scandir_next(handle)
-    if not name then break end
-    if typ ~= "directory" and name:match("%.sql$") then
-      out[#out + 1] = { name = name, path = dir .. "/" .. name }
-    end
-  end
-  table.sort(out, function(a, b) return a.name < b.name end)
-  return out
+  local ok, notes = pcall(require, "autodb.notes")
+  if ok and notes and notes.list then return notes.list(ws_id) end
+  return {}
 end
 
 function M.invalidate(id)
@@ -365,7 +350,7 @@ local function _render(bufnr)
             g.items = M._list_notes(ws.id)   -- client-side files; synchronous
           end
           if #(g.items or {}) == 0 then
-            msg(2, "(no notes)")
+            msg(2, "(no notes — a to create)")
           else
             for _, note in ipairs(g.items) do
               _row(rows, lines, hls, { kind = "note", hl = HL.item,
@@ -460,7 +445,59 @@ local function _open_note(row)
   end
 end
 
----_activate is `<CR>`: toggle a container, open a note, select a
+---_scaffold is `<CR>` on a table/view: write a SELECT note over the
+---SERVER-quoted identifier and open it (ADR-0058). Not a query run — a
+---starting point you edit and `:w`.
+local function _scaffold(row)
+  if not (row and row.workspace and row.item) then return end
+  local ok, notes = pcall(require, "autodb.notes")
+  if not ok then return end
+  local path, err = notes.scaffold(row.workspace.id, row.item.name or "query", row.item.quoted)
+  if not path then
+    logger.notify("autodb: " .. tostring(err), { level = vim.log.levels.ERROR })
+    return
+  end
+  M._expanded["notes:" .. tostring(row.workspace.id)] = true
+  _open_note({ item = { path = path } })
+end
+
+---_add_note is `a`: create a note in the row's workspace.
+local function _add_note(row)
+  local ws = row and row.workspace
+  if not ws then
+    logger.notify("autodb: put the cursor on a workspace's notes to add one",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local ok, notes = pcall(require, "autodb.notes")
+  if not ok then return end
+  vim.ui.input({ prompt = "autodb — new note name: " }, function(name)
+    name = name and vim.trim(name) or ""
+    if name == "" then return end
+    local path, err = notes.create(ws.id, name, "")
+    if not path then
+      logger.notify("autodb: " .. tostring(err), { level = vim.log.levels.ERROR })
+      return
+    end
+    M._expanded["notes:" .. tostring(ws.id)] = true
+    _open_note({ item = { path = path } })
+  end)
+end
+
+---_delete_note is `d`: remove the note under the cursor, after a prompt.
+local function _delete_note(row)
+  if not (row and row.kind == "note" and row.workspace and row.item) then return end
+  local ok, notes = pcall(require, "autodb.notes")
+  if not ok then return end
+  local name = row.item.name or vim.fn.fnamemodify(row.item.path or "", ":t")
+  if vim.fn.confirm("Delete note '" .. name .. "'?", "&Yes\n&No", 2) ~= 1 then return end
+  local dok, derr = notes.delete(row.workspace.id, name)
+  if not dok then
+    logger.notify("autodb: " .. tostring(derr), { level = vim.log.levels.ERROR })
+  end
+end
+
+---_activate is `<CR>`: toggle a container, open/scaffold, select a
 ---connection.
 local function _activate(row)
   if not row then return end
@@ -476,8 +513,10 @@ local function _activate(row)
     _toggle(row)
     return
   end
-  -- Containers (workspace, groups, tables, views) toggle; leaves
-  -- (columns, routines) have nothing to open — `i` describes them.
+  -- <CR> on a table/view scaffolds a SELECT note; columns are `o`.
+  if row.kind == "table" or row.kind == "view" then return _scaffold(row) end
+  -- Containers (workspace, groups) toggle; leaves (columns, routines)
+  -- have nothing to open — `i` describes them.
   _toggle(row)
 end
 
@@ -547,10 +586,10 @@ local HELP = {
   "  workspace → connections · notes",
   "  connection → tables · views · functions → columns",
   "",
-  "  <CR>  expand / collapse · open a note · enter a connection",
+  "  <CR>  expand · open a note · scaffold a SELECT on a table · enter a conn",
   "  o     expand a table/view into its columns",
-  "  i     info about the node under the cursor",
-  "  R     reload the node under the cursor (all with no node)",
+  "  a     new note in this workspace     d  delete the note under the cursor",
+  "  i     info about the node            R  reload (all with no node)",
   "  ?     this help",
   "",
   "  <leader>Dw  choose / create a workspace",
@@ -589,6 +628,10 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.dbase: info about the node under the cursor")
   set("R", function() _reload(_row_under_cursor(panel_winid)) end,
     "auto-finder.dbase: reload the node under the cursor")
+  set("a", function() _add_note(_row_under_cursor(panel_winid)) end,
+    "auto-finder.dbase: add a note to this workspace")
+  set("d", function() _delete_note(_row_under_cursor(panel_winid)) end,
+    "auto-finder.dbase: delete the note under the cursor")
   set("?", _help, "auto-finder.dbase: help")
 end
 
@@ -623,6 +666,13 @@ local function _ensure_subscriptions()
   if s.TOPIC_WORKSPACES then
     M._subs:replace("autodb-workspaces", s.TOPIC_WORKSPACES, function()
       M.invalidate("root")
+      vim.schedule(_rerender)
+    end)
+  end
+  if s.TOPIC_NOTES then
+    M._subs:replace("autodb-notes", s.TOPIC_NOTES, function(payload)
+      local ws = type(payload) == "table" and payload.workspace or nil
+      M.invalidate(ws and ("notes:" .. tostring(ws)) or nil)
       vim.schedule(_rerender)
     end)
   end
