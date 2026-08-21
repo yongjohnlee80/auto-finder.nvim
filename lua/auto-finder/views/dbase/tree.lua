@@ -185,7 +185,7 @@ local function _render(bufnr)
     _row(rows, lines, hls, { kind = "message", hl = HL.dim,
       text = "  Not connected." })
     _row(rows, lines, hls, { kind = "message", hl = HL.dim,
-      text = "  <leader>Dc to choose a connection." })
+      text = "  <leader>Dw workspace · <leader>Dc connection · <leader>Dl sign in · ? help" })
   else
     local active_conn = s.connection()
 
@@ -292,7 +292,10 @@ local function _render(bufnr)
   end
 
   if #lines == 0 then
-    _row(rows, lines, hls, { kind = "message", hl = HL.dim, text = "  (no workspaces)" })
+    _row(rows, lines, hls, { kind = "message", hl = HL.workspace,
+      text = "  No workspaces yet." })
+    _row(rows, lines, hls, { kind = "message", hl = HL.dim,
+      text = "  <leader>Dw to create one · ? for help" })
   end
 
   -- Restore the cursor line across repaints so a background refresh
@@ -441,7 +444,7 @@ local function _info(row)
 
   local ok, float = pcall(require, "auto-core.ui.float")
   if ok and float and float.help_overlay then
-    pcall(float.help_overlay, { title = "dbase", lines = lines })
+    pcall(float.help_overlay, lines, { title = "dbase" })
   else
     logger.notify(table.concat(lines, "\n"), { level = vim.log.levels.INFO })
   end
@@ -466,14 +469,19 @@ local HELP = {
   "  R     reload the node under the cursor (all with no node)",
   "  ?     this help",
   "",
+  "  <leader>Dw  choose / create a workspace",
   "  <leader>Dc  choose a connection      <leader>Dr  run the buffer",
   "  <leader>Dh  history                  <leader>DR  run the selection",
+  "  <leader>Dl  sign in (retry / switch)",
 }
 
 local function _help()
   local ok, float = pcall(require, "auto-core.ui.float")
   if ok and float and float.help_overlay then
-    pcall(float.help_overlay, { title = "dbase", lines = HELP })
+    -- help_overlay(lines, opts) — lines is positional. Passing one packed
+    -- {title, lines} table made `lines` a hash with no array part, so the
+    -- overlay rendered "(no help entries)" and `?` looked dead.
+    pcall(float.help_overlay, HELP, { title = "dbase" })
   else
     logger.notify(table.concat(HELP, "\n"), { level = vim.log.levels.INFO })
   end
@@ -527,6 +535,12 @@ local function _ensure_subscriptions()
   M._subs:replace("autodb-selection", s.TOPIC_SELECTION, function()
     vim.schedule(_rerender)
   end)
+  if s.TOPIC_WORKSPACES then
+    M._subs:replace("autodb-workspaces", s.TOPIC_WORKSPACES, function()
+      M.invalidate("root")
+      vim.schedule(_rerender)
+    end)
+  end
 end
 
 local function _dispose_subscriptions()
