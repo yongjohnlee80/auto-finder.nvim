@@ -104,6 +104,30 @@ end
 
 ---_invalidate drops loaded children so the next expand refetches.
 ---@param id string?  nil clears everything
+---_list_notes reads a workspace's note files. Notes are client-side
+---files (never an RPC surface); autodb reports the root over its
+---handshake, so both frontends and this panel read the same folder.
+function M._list_notes(ws_id)
+  local s = _session()
+  if not (s and s.notes_dir) then return {} end
+  local root = s.notes_dir()
+  if type(root) ~= "string" or root == "" then return {} end
+  local dir = root .. "/ws-" .. tostring(ws_id)
+  local fs = vim.uv or vim.loop
+  local handle = fs.fs_scandir(dir)
+  if not handle then return {} end
+  local out = {}
+  while true do
+    local name, typ = fs.fs_scandir_next(handle)
+    if not name then break end
+    if typ ~= "directory" and name:match("%.sql$") then
+      out[#out + 1] = { name = name, path = dir .. "/" .. name }
+    end
+  end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+
 function M.invalidate(id)
   if id then
     M._cache[id] = nil
@@ -205,84 +229,148 @@ local function _render(bufnr)
       _row(rows, lines, hls, { kind = "message", hl = HL.error,
         text = "  " .. tostring(root.error) })
     else
+      -- One recursive-ish pass, no gotos. Containers ask _expanded
+      -- whether to descend; every lazy level loads through _load and
+      -- settles to loading / error / empty / items.
+      local active_conn = active_conn
+      local IND = "  "
+      local function msg(depth, text, hl)
+        _row(rows, lines, hls, { kind = "message", hl = hl or HL.dim,
+          text = string.rep(IND, depth) .. text })
+      end
+      -- container renders a chevron row and returns whether it is open.
+      local function container(depth, opts)
+        local open = M._expanded[opts.id] == true
+        _row(rows, lines, hls, {
+          kind = opts.kind, id = opts.id, expandable = true,
+          workspace = opts.workspace, connection = opts.connection,
+          group = opts.group, item = opts.item, hl = opts.hl,
+          text = string.rep(IND, depth) .. _chevron(open)
+            .. " " .. (opts.marker or "") .. opts.label,
+        })
+        return open
+      end
+      -- children lazily loads id via method/params, then hands the
+      -- settled items to draw (or renders loading/error/empty first).
+      local function children(id, method, params, project, depth, empty, draw)
+        local g = _cache(id)
+        if not g.items and not g.loading then _load(id, method, params, project) end
+        if g.loading then return msg(depth, "loading…") end
+        if g.error then return msg(depth, tostring(g.error), HL.error) end
+        if #(g.items or {}) == 0 then return msg(depth, empty) end
+        draw(g.items)
+      end
+
+      -- table / view → its columns (schema.columns). Also what o toggles.
+      local function draw_relation(depth, ws, conn, item, kind)
+        local label = item.name or tostring(item)
+        if item.schema and item.schema ~= "" then label = item.schema .. "." .. label end
+        local id = string.format("%s:%d:%s", kind, conn.id, label)
+        local open = container(depth, {
+          kind = kind, id = id, workspace = ws, connection = conn,
+          item = item, hl = HL.item, label = label,
+        })
+        if not open then return end
+        children(id .. ":cols", "schema.columns",
+          { conn.id, item.schema or "", item.name },
+          function(r) return type(r) == "table" and r or {} end,
+          depth + 1, "(no columns)", function(cols)
+            for _, c in ipairs(cols) do
+              local badge = c.type or ""
+              if c.pk then badge = badge .. " pk" end
+              if c.nullable == false then badge = badge .. " not null" end
+              _row(rows, lines, hls, { kind = "column", hl = HL.dim,
+                text = string.rep(IND, depth + 1) .. (c.name or "?")
+                  .. (badge ~= "" and ("  " .. badge) or "") })
+            end
+          end)
+      end
+
+      -- the tables / views / functions sections under a connection.
+      local function draw_sections(depth, ws, conn)
+        for _, sec in ipairs({
+          { key = "tables", label = "tables", kind = "table" },
+          { key = "views", label = "views", kind = "view" },
+          { key = "functions", label = "functions" },
+        }) do
+          local sid = string.format("sec:%d:%s", conn.id, sec.key)
+          local open = container(depth, {
+            kind = "group", id = sid, group = sec.key,
+            workspace = ws, connection = conn, hl = HL.group, label = sec.label,
+          })
+          if not open then goto next_sec end
+          if sec.key == "functions" then
+            children(sid, "schema.routines", { conn.id, "" },
+              function(r) return type(r) == "table" and r.routines or {} end,
+              depth + 1, "(none — engine has no stored routines)", function(items)
+                for _, r in ipairs(items) do
+                  _row(rows, lines, hls, { kind = "routine", hl = HL.item,
+                    text = string.rep(IND, depth + 1) .. (r.name or "?")
+                      .. (r.signature and r.signature ~= "" and ("  " .. r.signature) or "") })
+                end
+              end)
+          else
+            local want = sec.kind
+            children(sid, "schema.tables", { conn.id, "" },
+              function(r)
+                local out = {}
+                for _, x in ipairs(type(r) == "table" and r or {}) do
+                  if (x.kind or "table") == want then out[#out + 1] = x end
+                end
+                return out
+              end,
+              depth + 1, "(none)", function(items)
+                for _, item in ipairs(items) do
+                  draw_relation(depth + 1, ws, conn, item, sec.kind)
+                end
+              end)
+          end
+          ::next_sec::
+        end
+      end
+
       for _, ws in ipairs(root.items or {}) do
         local ws_id = "ws:" .. tostring(ws.id)
-        local ws_open = M._expanded[ws_id] == true
-        _row(rows, lines, hls, {
-          kind = "workspace", id = ws_id, workspace = ws, hl = HL.workspace,
-          text = string.format("%s %s", _chevron(ws_open), ws.name or ws.id),
-        })
-        if not ws_open then goto next_ws end
+        if not container(0, { kind = "workspace", id = ws_id, workspace = ws,
+          hl = HL.workspace, label = ws.name or ws.id }) then goto next_ws end
 
-        do
-          -- Already in hand from workspace.list; no second request.
-          local ws_conns = ws.connections or {}
+        -- connections/
+        local conns_open = container(1, { kind = "group", id = "conns:" .. tostring(ws.id),
+          group = "connections", workspace = ws, hl = HL.group, label = "connections" })
+        if conns_open then
+          local ws_conns = ws.connections or {}   -- already in hand from workspace.list
           if #ws_conns == 0 then
-            _row(rows, lines, hls, { kind = "message", hl = HL.dim,
-              text = "    (no connections — <leader>Dc to add one)" })
+            msg(2, "(no connections — <leader>Dc to add one)")
           else
             for _, conn in ipairs(ws_conns) do
-              local c_id = "conn:" .. tostring(conn.id)
-              local c_open = M._expanded[c_id] == true
               local is_active = active_conn and active_conn.id == conn.id
-              _row(rows, lines, hls, {
-                kind = "connection", id = c_id, workspace = ws, connection = conn,
+              local c_open = container(2, {
+                kind = "connection", id = "conn:" .. tostring(conn.id),
+                workspace = ws, connection = conn,
                 hl = is_active and HL.active or HL.connection,
-                text = string.format("  %s %s%s", _chevron(c_open),
-                  is_active and "* " or "", conn.name or conn.id),
+                marker = is_active and "* " or "", label = conn.name or conn.id,
               })
-              if not c_open then goto next_conn end
+              if c_open then draw_sections(3, ws, conn) end
+            end
+          end
+        end
 
-              do
-                -- Two fixed groups under a connection, matching the TUI.
-                for _, group in ipairs({ { key = "tables", label = "Tables" } }) do
-                  local g_id = c_id .. ":" .. group.key
-                  local g_open = M._expanded[g_id] == true
-                  _row(rows, lines, hls, {
-                    kind = "group", id = g_id, group = group.key,
-                    workspace = ws, connection = conn, hl = HL.group,
-                    text = string.format("    %s %s", _chevron(g_open), group.label),
-                  })
-                  if not g_open then goto next_group end
-
-                  do
-                    local g = _cache(g_id)
-                    if not g.items and not g.loading then
-                      -- schema.tables is per SCHEMA; "" asks the server
-                      -- for the connection's default.
-                      _load(g_id, "schema.tables", { conn.id, "" }, function(r)
-                        return type(r) == "table" and r or {}
-                      end)
-                    end
-                    if g.loading then
-                      _row(rows, lines, hls, { kind = "message", hl = HL.dim,
-                        text = "      loading…" })
-                    elseif g.error then
-                      _row(rows, lines, hls, { kind = "message", hl = HL.error,
-                        text = "      " .. tostring(g.error) })
-                    elseif #(g.items or {}) == 0 then
-                      _row(rows, lines, hls, { kind = "message", hl = HL.dim,
-                        text = "      (empty)" })
-                    else
-                      for _, item in ipairs(g.items or {}) do
-                        local label = item.name or item.path or tostring(item)
-                        if group.key == "tables" and item.schema then
-                          label = item.schema .. "." .. label
-                        end
-                        _row(rows, lines, hls, {
-                          kind = group.key == "tables" and "table" or "note",
-                          id = g_id .. ":" .. tostring(label),
-                          workspace = ws, connection = conn, item = item,
-                          hl = HL.item,
-                          text = "      " .. label,
-                        })
-                      end
-                    end
-                  end
-                  ::next_group::
-                end
-              end
-              ::next_conn::
+        -- notes/
+        local notes_open = container(1, { kind = "group", id = "notes:" .. tostring(ws.id),
+          group = "notes", workspace = ws, hl = HL.group, label = "notes" })
+        if notes_open then
+          local nid = "notes:" .. tostring(ws.id)
+          local g = _cache(nid)
+          if not g.items and not g.loading then
+            g.items = M._list_notes(ws.id)   -- client-side files; synchronous
+          end
+          if #(g.items or {}) == 0 then
+            msg(2, "(no notes)")
+          else
+            for _, note in ipairs(g.items) do
+              _row(rows, lines, hls, { kind = "note", hl = HL.item,
+                workspace = ws, item = note,
+                text = string.rep(IND, 2) .. (note.name or note.path) })
             end
           end
         end
@@ -342,13 +430,11 @@ end
 ---Collapsing INVALIDATES the node, so re-expanding refetches rather
 ---than showing a tree that may have changed on the server since.
 local function _toggle(row)
-  if not row or not row.id then return end
-  if row.kind ~= "workspace" and row.kind ~= "connection" and row.kind ~= "group" then
-    return false
-  end
+  if not row or not row.id or not row.expandable then return false end
   if M._expanded[row.id] then
     M._expanded[row.id] = nil
     M.invalidate(row.id)
+    M.invalidate(row.id .. ":cols")   -- table/view columns live here
   else
     M._expanded[row.id] = true
   end
@@ -378,34 +464,29 @@ end
 ---connection.
 local function _activate(row)
   if not row then return end
-  if _toggle(row) then return end
   if row.kind == "note" then return _open_note(row) end
-  if row.kind == "table" then return end
   if row.kind == "connection" then
+    -- Entering a connection makes it the active one AND expands it: you
+    -- came here to work with it.
     local s = _session()
     if s then
       s.select_workspace(row.workspace)
       s.select_connection(row.connection)
-      _rerender()
     end
+    _toggle(row)
+    return
   end
+  -- Containers (workspace, groups, tables, views) toggle; leaves
+  -- (columns, routines) have nothing to open — `i` describes them.
+  _toggle(row)
 end
 
 ---_columns is `o`: the columns of the table under the cursor.
 local function _columns(row)
-  if not row or row.kind ~= "table" then return end
-  local s = _session()
-  if not s then return end
-  local id = row.id .. ":cols"
-  if M._expanded[id] then
-    M._expanded[id] = nil
-    M.invalidate(id)
-    return _rerender()
-  end
-  M._expanded[id] = true
-  _load(id, "schema.columns",
-    { row.connection.id, row.item.schema or "", row.item.name })
-  _rerender()
+  -- Columns hang off a table/view as its children; o reveals them, the
+  -- same expansion <CR> toggles. A no-op elsewhere.
+  if not row or (row.kind ~= "table" and row.kind ~= "view") then return end
+  _toggle(row)
 end
 
 ---_info is `i`: what this node actually is, in a float.
@@ -463,8 +544,11 @@ end
 local HELP = {
   "auto-finder dbase — autodb explorer",
   "",
-  "  <CR>  toggle · open a note in the editor · select a connection",
-  "  o     columns of the table under the cursor",
+  "  workspace → connections · notes",
+  "  connection → tables · views · functions → columns",
+  "",
+  "  <CR>  expand / collapse · open a note · enter a connection",
+  "  o     expand a table/view into its columns",
   "  i     info about the node under the cursor",
   "  R     reload the node under the cursor (all with no node)",
   "  ?     this help",
