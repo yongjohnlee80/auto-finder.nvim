@@ -219,7 +219,7 @@ local function _render(bufnr)
           local ws_conns = ws.connections or {}
           if #ws_conns == 0 then
             _row(rows, lines, hls, { kind = "message", hl = HL.dim,
-              text = "    (no connections)" })
+              text = "    (no connections — <leader>Dc to add one)" })
           else
             for _, conn in ipairs(ws_conns) do
               local c_id = "conn:" .. tostring(conn.id)
@@ -470,8 +470,9 @@ local HELP = {
   "  ?     this help",
   "",
   "  <leader>Dw  choose / create a workspace",
-  "  <leader>Dc  choose a connection      <leader>Dr  run the buffer",
-  "  <leader>Dh  history                  <leader>DR  run the selection",
+  "  <leader>Dc  choose / create a connection",
+  "  <leader>Dr  run the buffer            <leader>DR  run the selection",
+  "  <leader>Dh  history",
   "  <leader>Dl  sign in (retry / switch)",
 }
 
