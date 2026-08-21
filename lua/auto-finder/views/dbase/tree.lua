@@ -597,6 +597,12 @@ local HELP = {
   "  <leader>Dr  run the buffer            <leader>DR  run the selection",
   "  <leader>Dh  history",
   "  <leader>Dl  sign in (retry / switch)",
+  "  <leader>Dn  choose / create a note",
+  "",
+  "  Result grid (after running a query):",
+  "  J     toggle table ⇄ JSON layout    <CR>  inspect the cell (full value)",
+  "  y     yank cell   Y  yank row (CSV)  gy    yank row (JSON)",
+  "  <Tab> / <S-Tab>  next / prev cell",
 }
 
 local function _help()
