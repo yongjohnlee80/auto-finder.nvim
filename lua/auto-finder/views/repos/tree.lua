@@ -623,6 +623,19 @@ end
 
 function M.on_close()
   _dispose_subscriptions()
+  -- DELETE the buffer, do not merely drop the pointer (ADR-0060 r1 SF1).
+  -- `get_buffer` creates it with bufhidden=hide, so clearing `M._bufnr` alone
+  -- leaked one named `auto-finder://repos` buffer per close/reopen — and per
+  -- worktree switch, which is far more frequent. Every sibling view
+  -- (dbase, todos, tests, debug, marks) and the legacy section delete theirs;
+  -- this file was copied from dbase/tree.lua with the delete block dropped.
+  --
+  -- bufhidden=wipe is NOT the alternative: it kills the buffer on an ordinary
+  -- section switch, leaving `M._bufnr` dangling at an invalid buffer, which
+  -- silently disables `_rerender` until the next mount notices.
+  if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+    pcall(vim.api.nvim_buf_delete, M._bufnr, { force = true })
+  end
   -- The cache goes with the panel: on the next open the work in flight may
   -- have moved, and a stale tree is worse than a brief re-read.
   M.invalidate(nil)

@@ -27,6 +27,11 @@
 -- Delegation rather than a rewrite in place, deliberately: a developer
 -- mid-session keeps a working panel either way, and the change is
 -- reversible by uninstalling one plugin.
+-- ADR-0060 r1 MF6: which implementation owns which buffer. Shared with the
+-- repos slot rather than reimplemented, per shared-resolver-single-source-of-truth.
+local _latch = require("auto-finder.shared.impl_latch").new("views.dbase")
+local AUTODB, DBEE = "autodb", "dbee"
+
 local function _autodb_view()
   if not pcall(require, "autodb.session") then return nil end
   local ok, tree = pcall(require, "auto-finder.views.dbase.tree")
@@ -259,19 +264,34 @@ end
 ---@param panel_winid integer
 ---@return integer|nil bufnr
 function M.get_buffer(panel_winid)
+  -- The choice is latched to the buffer it produces (ADR-0060 r1 MF6). The
+  -- section registry caches the first valid buffer and never calls this again,
+  -- so a probe re-evaluated in `on_focus` could hand one implementation the
+  -- other's buffer. That defect shipped here in v0.3.4 and stayed latent only
+  -- because `autodb.session` happens to be installed, making the probe true
+  -- from the first call so it never transitions. The repos slot ships INTO the
+  -- false state, which is what made the same bug live there.
+  _latch:prune()
   local autodb_view = _autodb_view()
-  if autodb_view then return autodb_view.get_buffer(panel_winid) end
+  if autodb_view then
+    local b = autodb_view.get_buffer(panel_winid)
+    _latch:claim(b, AUTODB)
+    return b
+  end
   ---@diagnostic disable-next-line: unused-local
   local _ = panel_winid  -- consumed in on_focus's deferred mount
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+    _latch:claim(M._bufnr, DBEE)
     return M._bufnr
   end
   M._generation = M._generation + 1
-  return require("auto-finder.shared.loading").buffer({
+  local placeholder = require("auto-finder.shared.loading").buffer({
     view = M.name,
     generation = M._generation,
     message = "Loading " .. M.name .. "…",
   })
+  _latch:claim(placeholder, DBEE)
+  return placeholder
 end
 
 ---ADR 0026 Phase 7 (§A16): the actual dbase mount happens here,
@@ -282,8 +302,15 @@ end
 ---@param panel_winid integer
 ---@param bufnr integer  -- placeholder bufnr created by get_buffer
 function M.on_focus(panel_winid, bufnr)
+  -- Routed by the buffer's OWNER, not a fresh probe: whoever created this
+  -- buffer is the only implementation that may render into it (r1 MF6).
+  local owner = _latch:owner(bufnr)
   local autodb_view = _autodb_view()
-  if autodb_view then return autodb_view.on_focus(panel_winid, bufnr) end
+  if owner == DBEE then
+    -- fall through to the dbee path below, even if autodb is now available
+  elseif autodb_view and (owner == AUTODB or owner == nil) then
+    return autodb_view.on_focus(panel_winid, bufnr)
+  end
   -- Re-focus on an already-mounted drawer? No setup needed.
   if bufnr and M._owned_bufs[bufnr] then return end
 
@@ -360,11 +387,21 @@ end
 ---orphan in the editor area after the user closes the panel,
 ---producing UX rough edges.
 function M.on_close()
+  -- Tear down BOTH paths unconditionally. This used to `return` after autodb's
+  -- on_close, so the dbee side's companion windows and owned-buffer map were
+  -- never cleaned when autodb was present — and autodb's teardown never ran
+  -- when it was absent, even though it may have mounted earlier in the session
+  -- (r1 MF6). Teardown of something we mounted must not be gated on whether it
+  -- is still MOUNTABLE.
   local autodb_view = _autodb_view()
-  if autodb_view then return autodb_view.on_close() end
+  if autodb_view and autodb_view.on_close then pcall(autodb_view.on_close) end
   M._bufnr = nil
   M._owned_bufs = {}
   pcall(layout_mod.close_all)
+  _latch:reset()
 end
+
+---Test seam for the ownership latch (r1 MF6).
+M._latch_for_tests = _latch
 
 return M

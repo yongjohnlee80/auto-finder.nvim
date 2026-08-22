@@ -66,6 +66,7 @@ run_suite "adr0048"         tests/smoke-adr0048.lua         0
 run_suite "adr0059-e2e"    tests/adr0059-e2e.lua           0
 run_suite "adr0060-repos" tests/adr0060-repos-render.lua      0
 run_suite "v0267-loop"    tests/v0267-loop-guard.lua       0
+run_suite "r1-lifecycle"  tests/adr0060-r1-view-lifecycle.lua 0
 
 echo "──────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
