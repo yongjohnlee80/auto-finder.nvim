@@ -32,6 +32,18 @@
 local _latch = require("auto-finder.shared.impl_latch").new("views.dbase")
 local AUTODB, DBEE = "autodb", "dbee"
 
+---_autodb_view_unchecked resolves autodb's tree WITHOUT the availability gate.
+---
+---Teardown must not depend on whether an implementation is still MOUNTABLE. The
+---skipped path disposes autodb's TOPIC_* subscriptions and deletes its named
+---buffer, so gating it on availability leaks BOTH — verbatim the MF6/SF1 pair
+---the repos slot was fixed for (ADR-0060 r2 #3).
+local function _autodb_view_unchecked()
+  local ok, tree = pcall(require, "auto-finder.views.dbase.tree")
+  if ok then return tree end
+  return nil
+end
+
 local function _autodb_view()
   if not pcall(require, "autodb.session") then return nil end
   local ok, tree = pcall(require, "auto-finder.views.dbase.tree")
@@ -73,10 +85,31 @@ local M = {
 ---fall through silently — the bug persists until the consumer
 ---updates, but we don't error.
 ---@param real_bufnr integer
-local function _notify_remount(real_bufnr)
+---@param replaced_bufnr integer?  the placeholder this supersedes, if any
+local function _notify_remount(real_bufnr, replaced_bufnr)
   if not real_bufnr or not vim.api.nvim_buf_is_valid(real_bufnr) then
     return
   end
+
+  -- CLAIM the replacement FIRST, before any early return below (r2 #3). The
+  -- deferred mount swaps the claimed placeholder for the real drawer/fallback
+  -- buffer; leaving that unclaimed meant the next focus saw owner=nil and, once
+  -- autodb appeared, routed a DBEE buffer to autodb.
+  --
+  -- Claiming here rather than at each of the three remount sites is deliberate:
+  -- this is the single chokepoint they all pass through, so no future remount
+  -- path can forget it. And it must precede the registry checks — ownership is
+  -- a fact about who built the buffer, independent of whether the registry can
+  -- be told about it (an old auto-core, or no registry at all, must not leave
+  -- the buffer unowned).
+  -- The superseded placeholder is passed in rather than read from `M._bufnr`:
+  -- every call site assigns `M._bufnr = <new buffer>` before calling, so
+  -- reading it here would only ever see the replacement.
+  _latch:claim(real_bufnr, DBEE)
+  if replaced_bufnr and replaced_bufnr ~= real_bufnr then
+    _latch:forget(replaced_bufnr)
+  end
+
   local ok, af = pcall(require, "auto-finder")
   if not ok or not af or not af._registry then return end
   local registry = af._registry
@@ -272,7 +305,7 @@ function M.get_buffer(panel_winid)
   -- from the first call so it never transitions. The repos slot ships INTO the
   -- false state, which is what made the same bug live there.
   _latch:prune()
-  local autodb_view = _autodb_view()
+  local autodb_view = M._autodb_for_tests()
   if autodb_view then
     local b = autodb_view.get_buffer(panel_winid)
     _latch:claim(b, AUTODB)
@@ -304,15 +337,24 @@ end
 function M.on_focus(panel_winid, bufnr)
   -- Routed by the buffer's OWNER, not a fresh probe: whoever created this
   -- buffer is the only implementation that may render into it (r1 MF6).
+  -- Belt and braces, and it must come FIRST: this guard used to sit BELOW the
+  -- autodb branch, so a buffer dbee had already mounted was handed to autodb
+  -- anyway once autodb appeared (r2 #3).
+  if bufnr and M._owned_bufs[bufnr] then return end
+
   local owner = _latch:owner(bufnr)
-  local autodb_view = _autodb_view()
   if owner == DBEE then
     -- fall through to the dbee path below, even if autodb is now available
-  elseif autodb_view and (owner == AUTODB or owner == nil) then
-    return autodb_view.on_focus(panel_winid, bufnr)
+  elseif owner == AUTODB then
+    -- Owner-routed, resolved UNCHECKED: autodb created this buffer, so it is
+    -- the only implementation that may render into it.
+    local v = M._unchecked_for_tests()
+    if v then return v.on_focus(panel_winid, bufnr) end
+    return -- unresolvable owner: no-op rather than cross to dbee
+  else
+    local autodb_view = M._autodb_for_tests()
+    if autodb_view then return autodb_view.on_focus(panel_winid, bufnr) end
   end
-  -- Re-focus on an already-mounted drawer? No setup needed.
-  if bufnr and M._owned_bufs[bufnr] then return end
 
   local gen = M._generation
   vim.schedule(function()
@@ -331,7 +373,7 @@ function M.on_focus(panel_winid, bufnr)
         err or "dbee.setup failed")
       M._bufnr = pb
       M._owned_bufs[pb] = gen
-      _notify_remount(pb)
+      _notify_remount(pb, bufnr)
       return
     end
 
@@ -356,13 +398,13 @@ function M.on_focus(panel_winid, bufnr)
     if b then
       M._bufnr = b
       M._owned_bufs[b] = gen
-      _notify_remount(b)
+      _notify_remount(b, bufnr)
     else
       local pb = placeholder_buffer(panel_winid,
         "drawer_show returned nil")
       M._bufnr = pb
       M._owned_bufs[pb] = gen
-      _notify_remount(pb)
+      _notify_remount(pb, bufnr)
     end
   end)
 end
@@ -393,7 +435,10 @@ function M.on_close()
   -- when it was absent, even though it may have mounted earlier in the session
   -- (r1 MF6). Teardown of something we mounted must not be gated on whether it
   -- is still MOUNTABLE.
-  local autodb_view = _autodb_view()
+  -- Resolved UNCHECKED (r2 #3): the comment above promised unconditional
+  -- teardown while this line was still availability-gated, so after autodb
+  -- stopped advertising itself its teardown was skipped entirely.
+  local autodb_view = M._unchecked_for_tests()
   if autodb_view and autodb_view.on_close then pcall(autodb_view.on_close) end
   M._bufnr = nil
   M._owned_bufs = {}
@@ -401,7 +446,14 @@ function M.on_close()
   _latch:reset()
 end
 
----Test seam for the ownership latch (r1 MF6).
+---Test seams. `_autodb_for_tests` is the availability-GATED probe that decides
+---MOUNTS; `_unchecked_for_tests` drives owner-routing and TEARDOWN. Kept
+---separate so a test can prove that distinction without monkey-patching
+---`require`, which is what previously made this path untestable (r2 #3).
 M._latch_for_tests = _latch
+M._autodb_for_tests = _autodb_view
+M._unchecked_for_tests = _autodb_view_unchecked
+---Exposed so a test can drive the remount claim without standing up dbee.
+M._notify_remount_for_tests = _notify_remount
 
 return M

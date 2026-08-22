@@ -85,24 +85,50 @@ local NEW, LEGACY = "worktree", "legacy"
 local M
 
 ---_impl_for resolves the implementation that owns `bufnr`, falling back to a
----fresh probe when this buffer is unknown (a first mount, or after a reset).
+---fresh probe only when this buffer is unknown (a first mount, or after a
+---reset). Indirects through `M._probe_for_tests` / `M._unchecked_for_tests` /
+---`M._legacy_for_tests` rather than the upvalues, so the suite can substitute
+---any side and exercise every path on a machine that only resolves one.
 ---
----Indirects through `M._probe_for_tests` / `M._legacy_for_tests` rather than the
----upvalues so the smoke suite can substitute either side and exercise BOTH
----paths on a machine that only resolves one.
+---Ownership and availability answer DIFFERENT questions, and only one of them
+---belongs here. Ownership is a historical fact — which implementation wrote
+---this buffer's contents, keymaps and subscriptions — and it cannot change
+---while the buffer lives. Availability is forward-looking: what a NEW mount
+---should pick. So the probe runs ONLY on the `owner == nil` path.
+---
+---An earlier version re-probed for a NEW owner and fell back to legacy when
+---availability dropped, which was MF6 wearing the other shoe: `on_focus` and
+---`refresh` handed a new-owned buffer to legacy, which then installed its
+---keymaps over the owner's and armed subscriptions against a buffer it will
+---never tear down, while the owner's own `_bufnr`-gated render never ran — a
+---silently frozen panel (r2 #3). The justifying comment claimed it "let the
+---legacy path handle teardown", but this helper is not on the teardown path at
+---all: `on_close` resolves unchecked. The rationale was transplanted from the
+---wrong hook.
+---
+---Crossing over is never the graceful option. The new tree already renders an
+---explicit "worktree.nvim's repos surface is unavailable" screen when its
+---backend is gone, so owner-routing yields a truthful panel where crossing
+---yields a stale one.
+---@param bufnr integer?
+---@return table? impl, string? key   nil impl = route nowhere, deliberately
 local function _impl_for(bufnr)
-  local legacy = M._legacy_for_tests
   local owner = _latch:owner(bufnr)
-  if owner == LEGACY then return legacy, LEGACY end
-  local v = M._probe_for_tests()
+  if owner == LEGACY then return M._legacy_for_tests, LEGACY end
   if owner == NEW then
-    -- The owner said "new" but the plugin has gone away: nothing sane is left
-    -- to route to, so let the legacy path handle teardown rather than throwing.
+    -- Resolved UNCHECKED: this buffer belongs to the new tree whether or not
+    -- the backend is currently advertising itself.
+    local v = M._unchecked_for_tests()
     if v then return v, NEW end
-    return legacy, LEGACY
+    -- The owner's OWN module cannot be loaded — auto-finder itself is broken.
+    -- No-op rather than hand the buffer to the other implementation.
+    return nil, nil
   end
+  -- owner == nil: a first mount (or post-reset). This is the one place the
+  -- availability probe decides anything.
+  local v = M._probe_for_tests()
   if v then return v, NEW end
-  return legacy, LEGACY
+  return M._legacy_for_tests, LEGACY
 end
 
 M = {
@@ -121,6 +147,9 @@ M = {
 function M.get_buffer(panel_winid)
   _latch:prune()
   local impl, key = _impl_for(nil)
+  -- A mount always resolves: the legacy section is a hard require. A nil here
+  -- would mean auto-finder's own module tree is broken, so fail loudly.
+  if not impl then return nil end
   local bufnr = impl.get_buffer(panel_winid)
   _latch:claim(bufnr, key)
   M._mounted_bufnr = bufnr
@@ -130,7 +159,9 @@ end
 function M.on_focus(panel_winid, bufnr)
   if type(bufnr) == "number" then M._mounted_bufnr = bufnr end
   local impl = _impl_for(bufnr)
-  if impl.on_focus then return impl.on_focus(panel_winid, bufnr) end
+  -- nil means the owner cannot be resolved; routing to the other
+  -- implementation would corrupt the buffer, so do nothing.
+  if impl and impl.on_focus then return impl.on_focus(panel_winid, bufnr) end
 end
 
 function M.on_close()
@@ -154,7 +185,7 @@ function M.refresh()
   -- the registry owns the buffer, so ask the latch for anything it has claimed
   -- before falling back to a probe.
   local impl = _impl_for(M._mounted_bufnr)
-  if impl.refresh then return impl.refresh() end
+  if impl and impl.refresh then return impl.refresh() end
 end
 
 ---_legacy_for_tests exposes the fallback so the smoke suite can assert BOTH
