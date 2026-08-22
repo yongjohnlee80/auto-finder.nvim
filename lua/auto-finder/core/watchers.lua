@@ -107,18 +107,12 @@ function M.open_for(cwd)
   -- not an error) and proceed with just the working-tree
   -- watcher. The git decorator path still works via neo-tree's
   -- bundled git query — Phase 5 ships the real cache.
-  local git_watch = _git_watch_mod()
-  if git_watch then
-    local git_handle, git_err = git_watch.start(cwd)
-    if git_handle then
-      bundle.git = git_handle
-    else
-      pcall(function()
-        require("auto-finder.log").debug("core.watchers",
-          "git.watch start failed at " .. cwd .. ": " .. tostring(git_err))
-      end)
-    end
-  end
+  -- ADR-0060 §2.8: no git.watch. It existed so the files panel could
+  -- re-decorate when the index moved (ADR-0025); the panel no longer
+  -- decorates by git, so the handle would fire into nothing. The repos panel
+  -- watches per-worktree and opt-in instead (§2.3). `bundle.git` stays in the
+  -- shape so M.list() and close_for() are unchanged for any caller that still
+  -- reads it.
 
   -- Only register the bundle if at least one watcher came up.
   -- An entry with both handles nil is indistinguishable from

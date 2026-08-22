@@ -28,7 +28,16 @@ local config = {
   close_if_last_window = false, -- Close Neo-tree if it is the last window left in the tab
   default_source = "filesystem", -- you can choose a specific source `last` here which indicates the last used source
   enable_diagnostics = true,
-  enable_git_status = true,
+  -- ADR-0060 §2.8: the files panel holds NO git state. The repos panel owns
+  -- git now, so this default flips to false, which switches off the
+  -- git.status_async fetches (up to FOUR subprocesses per call), the
+  -- GIT_EVENT / GIT_STATUS_CHANGED subscriptions, and the per-worktree
+  -- .git-dir libuv watcher in one place. `hide_gitignored` keeps working:
+  -- with no status cached, mark_gitignored automatically takes its
+  -- check-ignore path (fs_scan.lua) — ONE subprocess per scan, no watcher
+  -- [DECISION -- Johno, 2026-08-22]. Set it back to true to restore the old
+  -- decoration if you want it.
+  enable_git_status = false,
   enable_modified_markers = true, -- Show markers for files with unsaved changes.
   enable_opened_markers = true,   -- Enable tracking of opened files. Required for `components.name.highlight_opened_files`
   enable_refresh_on_write = true, -- Refresh the tree when a file is written. Only used if `use_libuv_file_watcher` is false.
@@ -258,7 +267,8 @@ local config = {
                                       -- "all" (both loaded and unloaded)}. For more information,
                                       -- see the `show_unloaded` config of the `buffers` source.
       use_filtered_colors = true, -- Whether to use a different highlight when the file is filtered (hidden, dotfile, etc.).
-      use_git_status_colors = true,
+      -- ADR-0060 §2.8: no git state in this panel, so nothing to colour by.
+      use_git_status_colors = false,
       highlight = "NeoTreeFileName",
     },
     git_status = {
@@ -332,7 +342,6 @@ local config = {
           },
           { "clipboard", zindex = 10 },
           { "diagnostics", errors_only = true, zindex = 20, align = "right", hide_when_expanded = true },
-          { "git_status", zindex = 10, align = "right", hide_when_expanded = true },
           { "file_size", zindex = 10, align = "right" },
           { "type", zindex = 10, align = "right" },
           { "last_modified", zindex = 10, align = "right" },
@@ -359,7 +368,6 @@ local config = {
           { "bufnr", zindex = 10 },
           { "modified", zindex = 20, align = "right" },
           { "diagnostics",  zindex = 20, align = "right" },
-          { "git_status", zindex = 10, align = "right" },
           { "file_size", zindex = 10, align = "right" },
           { "type", zindex = 10, align = "right" },
           { "last_modified", zindex = 10, align = "right" },
@@ -500,14 +508,13 @@ local config = {
         ["<bs>"] = "navigate_up",
         ["."] = "set_root",
         ["O"] = "toggle_all_nodes", -- auto-finder: collapse all if anything open, else expand all
-        ["[g"] = "prev_git_modified",
-        ["]g"] = "next_git_modified",
+        -- ADR-0060 §6.4: [g / ]g / og read git status, which this panel no
+        -- longer holds. Dropped rather than left as keys that do nothing.
         ["i"] = "show_file_details", -- see `:h neo-tree-file-actions` for options to customize the window.
         ["b"] = "rename_basename",
         ["o"] = { "show_help", nowait=false, config = { title = "Order by", prefix_key = "o" }},
         ["oc"] = { "order_by_created", nowait = false },
         ["od"] = { "order_by_diagnostics", nowait = false },
-        ["og"] = { "order_by_git_status", nowait = false },
         ["om"] = { "order_by_modified", nowait = false },
         ["on"] = { "order_by_name", nowait = false },
         ["os"] = { "order_by_size", nowait = false },

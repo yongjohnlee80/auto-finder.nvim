@@ -3909,8 +3909,14 @@ do
   local subs_to_translated_git = content:find('"auto%-finder%.core%.git:changed"')
   ok("shared/neotree.lua does NOT reference core.git.state:changed as a topic",
     subs_to_git_state == nil)
-  ok("shared/neotree.lua references auto-finder.core.git:changed as a topic",
-    subs_to_translated_git ~= nil)
+  -- ADR-0060 §2.8 INVERTED this. The files panel used to subscribe to the
+  -- translated git topic so it could re-decorate; it now holds no git state at
+  -- all, so the reference must be GONE. Kept as an assertion rather than
+  -- deleted: it is now the guard that stops git creeping back into this panel
+  -- and re-introducing the ADR-0050/0059 cost class.
+  ok("shared/neotree.lua no longer references auto-finder.core.git:changed (§2.8)",
+    subs_to_translated_git == nil,
+    subs_to_translated_git and "still referenced at byte " .. subs_to_translated_git or "")
 end
 
 -- ── behavior: publishing core.git.state:changed still triggers
@@ -3961,8 +3967,13 @@ do
   for _, src in ipairs(refresh_calls) do
     if src == "filesystem" then saw_full_refresh = true; break end
   end
-  ok("core.git.state:changed re-decorates via the translated topic, no full rescan (§2.3)",
-    #decorate_calls > 0 and not saw_full_refresh,
+  -- ADR-0060 §2.8 INVERTED this too. ADR-0050 §2.3 made a git-state event
+  -- re-decorate instead of full-rescanning; §2.8 removes the decoration
+  -- entirely, so the correct behaviour is now NEITHER — a git event must cost
+  -- the files panel nothing at all. Asserting "no decorate AND no rescan" is
+  -- what proves the cost is gone rather than merely cheaper.
+  ok("core.git.state:changed costs the files panel NOTHING — no decorate, no rescan (§2.8)",
+    #decorate_calls == 0 and not saw_full_refresh,
     "decorate=" .. vim.inspect(decorate_calls)
       .. " refresh=" .. vim.inspect(refresh_calls))
 

@@ -69,6 +69,14 @@ local function die(msg)
   vim.cmd("cq")
 end
 
+-- ── attribution state ────────────────────────────────────────────────
+-- Declared HERE, above the fixture's git() helper, and not down with the
+-- instruments: Lua binds `HARNESS` at compile time, so a helper defined above
+-- the local would assign a GLOBAL of the same name while note_git read the
+-- local -- and every harness call would be misattributed to the panel.
+local HARNESS = false
+local harness_seen = 0
+
 -- ── a REAL git repo to measure against ───────────────────────────────
 -- Git cost only materialises inside a repo, so the sandbox must be one.
 local root = sandbox .. "/repo"
@@ -84,7 +92,9 @@ vim.fn.writefile({ "x" }, root .. "/junk.ignored")
 
 local function git(...)
   local args = { "git", "-C", root, ... }
+  HARNESS = true
   local r = vim.system(args, { text = true }):wait()
+  HARNESS = false
   return r.code, (r.stdout or "") .. (r.stderr or "")
 end
 if vim.fn.executable("git") ~= 1 then die("git not on PATH") end
@@ -120,11 +130,21 @@ local function is_git(cmd)
   if s:match("^%s*git%s") or s:match("[/\\]git%s") then return true, s end
   return false, s
 end
+-- HARNESS is true while the harness itself shells git (building the fixture,
+-- driving a scenario). Those calls are not the panel's and must not be counted
+-- as its cost -- but they ARE what proves the instrument can still see git,
+-- which is the positive control below.
 local function note_git(door, cmd)
   local yes, s = is_git(cmd)
   if not yes then return end
-  git_calls.total = git_calls.total + 1
+  if HARNESS then harness_seen = harness_seen + 1; return end
   git_calls.by_door[door] = (git_calls.by_door[door] or 0) + 1
+  -- `vim.system` is implemented OVER uv.spawn, so a single call trips both
+  -- doors. Counting each would double every vim.system-originated git call, so
+  -- the total counts real spawn points only; by_door still records everything
+  -- for diagnosis.
+  if door == "vim.system" then return end
+  git_calls.total = git_calls.total + 1
   if #git_calls.argv < 60 then git_calls.argv[#git_calls.argv + 1] = s:sub(1, 120) end
 end
 
@@ -152,6 +172,13 @@ uv.spawn = function(path, opts, on_exit)
   return orig.uv_spawn(path, opts, on_exit)
 end
 
+-- Positive control, fired the moment the doors are in place: one deliberate
+-- git call attributed to the harness. If the patched doors do not observe
+-- THIS, they observe nothing, and every measurement below is meaningless.
+HARNESS = true
+vim.system({ "git", "--version" }, {}):wait()
+HARNESS = false
+
 -- (2) mount the panel and time it
 local ok_af, af = pcall(require, "auto-finder")
 if not ok_af then die("auto-finder did not load: " .. tostring(af)) end
@@ -169,12 +196,21 @@ if not mounted then die("files panel never mounted") end
 vim.wait(900) -- initial scan + watcher start settle
 local mount_ms = math.floor((vim.uv.hrtime() - t0) / 1e6)
 local mount_git = git_calls.total
--- Instrument self-check. Mounting a panel over a dirty git repo MUST shell
--- git; measuring zero means the door moved again, not that git is free.
-if mount_git == 0 then
-  die("instrument blind: 0 git subprocesses observed while mounting over a "
-    .. "dirty repo. A spawn door moved -- re-check uv.spawn / vim.system / "
-    .. "vim.fn.system / jobstart before trusting any reading.")
+-- Instrument self-check -- a POSITIVE control, not an assumption about the
+-- panel.
+--
+-- The original check treated "0 git at mount" as proof the instrument was
+-- blind. That was right before ADR-0060 §2.8 and WRONG after it: with git
+-- removed from the files panel, zero is the GOAL, and success became
+-- indistinguishable from a moved spawn door. So prove the door works with a
+-- call the harness makes itself -- the fixture ran git init/add/commit through
+-- `git()`, attributed to HARNESS but still passing through every patched door.
+-- If none were seen, the instrument is blind and no reading here means
+-- anything.
+if harness_seen == 0 then
+  die("instrument blind: the harness ran git init/add/commit and the patched "
+    .. "doors observed NONE of them. A spawn door moved -- re-check uv.spawn / "
+    .. "vim.system / vim.fn.system / jobstart before trusting any reading.")
 end
 
 -- (3) root scans at the fs_scan chokepoint (same probe as ADR-0059)
@@ -306,13 +342,16 @@ local report = {
   mount = { ms = mount_ms, git_calls = mount_git },
   scenarios = scenarios,
   totals = { git_calls = total_git },
+  instrument = { harness_git_seen = harness_seen },
   git_doors = git_calls.by_door,
   refresh_door = refresh_door,
   subscriptions = subs,
   sample_git_argv = git_calls.argv,
 }
 
-print("\n── census ──")
+print(string.format("\n  instrument control: %d harness git calls seen "
+  .. "(proves the doors are live)", harness_seen))
+print("── census ──")
 print("  total git subprocesses: " .. total_git)
 for door, n in pairs(git_calls.by_door) do print(string.format("    %-18s %d", door, n)) end
 print("  git-flavoured subscriptions:")

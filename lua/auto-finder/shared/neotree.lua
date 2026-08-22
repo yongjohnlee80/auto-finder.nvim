@@ -180,49 +180,12 @@ local function setup_live_refresh(section, source)
     refresh_coalesced()
   end
 
-  -- ADR-0050 §2.3: decorate-only refresh for git-state events. When
-  -- only git status changed, the tree STRUCTURE is unchanged — so we
-  -- re-fetch git status and redraw the existing nodes rather than
-  -- doing a full filesystem `navigate()`/root re-scan. This keeps a
-  -- legitimate git event O(decorate) instead of O(monorepo walk) and,
-  -- critically, never re-mounts/navigates the panel — which is what
-  -- yanked window focus back to `files` on every refresh. The fork's
-  -- `git.status_async` runs `git status` with `--no-optional-locks`
-  -- (see neotree/git/cmd.lua), fires GIT_STATUS_CHANGED, and the
-  -- filesystem source's handler redraws in place (manager.lua
-  -- `git_status_changed`).
-  local schedule_decorate = require("auto-finder.shared.debounce").coalesce(
-    function()
-      if not section._bufnr or not vim.api.nvim_buf_is_valid(section._bufnr) then
-        return
-      end
-      -- Only the filesystem source carries git decorations. Any other
-      -- live_refresh source degrades to the (throttled) full refresh.
-      if source ~= "filesystem" then
-        schedule_refresh()
-        return
-      end
-      local ok_git, git = pcall(require, "auto-finder.neotree.git")
-      local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
-      if not ok_git or not ok_mgr
-          or type(git.status_async) ~= "function"
-          or type(mgr._get_all_states) ~= "function" then
-        -- Decorate path unavailable → degrade to a full refresh
-        -- rather than silently dropping the git update.
-        schedule_refresh()
-        return
-      end
-      local ok_cfg, nt = pcall(require, "auto-finder.neotree")
-      local opts = (ok_cfg and type(nt.ensure_config) == "function"
-        and nt.ensure_config().git_status_async_options) or {}
-      for _, state in ipairs(mgr._get_all_states()) do
-        if state.name == source and state.winid and state.path then
-          pcall(git.status_async, state.path, state.git_base_by_worktree, opts)
-        end
-      end
-    end,
-    LIVE_REFRESH_DEBOUNCE_MS
-  )
+  -- ADR-0050 §2.3's decorate-only git refresh is GONE (ADR-0060 §2.8). It
+  -- existed so a git-state event could re-fetch status and redraw in place
+  -- instead of triggering a full rescan. The files panel no longer decorates
+  -- by git at all, so there is nothing to re-fetch: the subscription that
+  -- drove this and the git.watch handle that fed it were removed with it.
+  -- Git state lives in the repos panel now.
 
   -- Re-anchor the section's neo-tree state to the current cwd
   -- WITHOUT re-mounting. v0.2.2 used `cmd.execute({ position =
@@ -512,18 +475,11 @@ local function setup_live_refresh(section, source)
     -- translator from upstream `core.git.state:changed`). Filter
     -- by repo_root prefix on cwd so sibling-worktree events don't
     -- over-trigger.
-    subs:replace("git", "auto-finder.core.git:changed", function(payload, _topic)
-      if type(payload) ~= "table" or type(payload.repo_root) ~= "string" then
-        return
-      end
-      local cwd = vim.fn.getcwd()
-      if payload.repo_root == cwd
-          or cwd:sub(1, #payload.repo_root + 1) == payload.repo_root .. "/" then
-        -- ADR-0050 §2.3: git state changed but the tree structure did
-        -- not — re-decorate in place, do NOT full-rescan or re-mount.
-        schedule_decorate()
-      end
-    end)
+    -- ADR-0060 §2.8: REMOVED. This subscription existed to keep the files
+    -- panel's git decoration fresh (ADR-0025, ADR-0050 §2.3). The panel no
+    -- longer decorates by git, so there is nothing to refresh — and every
+    -- fire cost a git.status_async, i.e. up to four subprocesses. The repos
+    -- panel owns git state now. Re-adding this means re-adding the cost.
   end
 end
 
