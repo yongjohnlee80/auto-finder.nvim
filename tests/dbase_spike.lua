@@ -813,6 +813,11 @@ do
   -- focus_dbase_and_wait handles the files-section race too. See
   -- wait_for_drawer_mount above for the artificial-wait rationale.
   focus_dbase_and_wait(af, panel_winid)
+  -- Pin the dbase backend buffer NOW, before the companion mounts, so
+  -- [6b.9] can prove they did not clobber it (backend-agnostic — see
+  -- the reimplement note there).
+  local dbase_panel_buf = panel_winid and vim.api.nvim_win_is_valid(panel_winid)
+    and vim.api.nvim_win_get_buf(panel_winid) or nil
 
   -- If only the panel exists, force-create a non-panel window so the
   -- "prefer existing editor-area window" path is exercised. Use
@@ -858,12 +863,34 @@ do
   ok("[6b.8] layout.is_open returns true after mounts",
     layout.is_open() == true)
 
-  -- Boundary: the panel buffer must NOT have been clobbered.
-  ok("[6b.9] panel buffer is still the dbee drawer",
-    panel_winid and vim.api.nvim_win_is_valid(panel_winid)
-      and vim.bo[vim.api.nvim_win_get_buf(panel_winid)].filetype:find("^dbee"),
-    panel_winid and ("panel ft=" .. tostring(
-      vim.bo[vim.api.nvim_win_get_buf(panel_winid)].filetype)) or "no panel")
+  -- Boundary: the companion-pane mounts must NOT clobber the panel
+  -- buffer. REIMPLEMENT (2026-08-23): the original asserted the panel
+  -- ft starts with `dbee`, but post-ADR-0058/0060 the dbase slot hosts
+  -- the autodb explorer (ft=auto-finder, stamped auto_finder_view=dbase)
+  -- when autodb is present and falls back to the dbee drawer only when
+  -- it is absent (see smoke [50] / ADR-0060). The invariant that still
+  -- holds is that ensure_editor/result/call_log open in the EDITOR area
+  -- and leave the panel's dbase buffer in place. So pin the buffer
+  -- captured right after focus and assert it is unchanged AND a genuine
+  -- dbase backend buffer (autodb view OR dbee drawer) — not a
+  -- files-section race victim.
+  local function is_dbase_backend_buf(buf)
+    if not (buf and vim.api.nvim_buf_is_valid(buf)) then return false end
+    if vim.b[buf].auto_finder_view == "dbase" then return true end   -- autodb explorer
+    local ft = vim.bo[buf].filetype or ""
+    local nm = vim.api.nvim_buf_get_name(buf) or ""
+    return ft:find("^dbee") ~= nil or nm:find("^dbee://") ~= nil
+      or nm:find("dbee%-drawer$") ~= nil
+      or nm:find("auto%-finder%-dbase://") ~= nil
+  end
+  local panel_buf_now = (panel_winid and vim.api.nvim_win_is_valid(panel_winid))
+    and vim.api.nvim_win_get_buf(panel_winid) or nil
+  ok("[6b.9] panel buffer is still the dbase backend (companion mounts did not clobber it)",
+    panel_buf_now == dbase_panel_buf and is_dbase_backend_buf(panel_buf_now),
+    string.format("panel_buf=%s captured=%s view=%s ft=%s",
+      tostring(panel_buf_now), tostring(dbase_panel_buf),
+      tostring(panel_buf_now and vim.b[panel_buf_now].auto_finder_view),
+      tostring(panel_buf_now and vim.bo[panel_buf_now].filetype)))
   ok("[6b.10] winfixbuf still true on panel after companion mounts",
     panel_winid and vim.wo[panel_winid].winfixbuf == true)
   ok("[6b.11] winfixwidth still true on panel after companion mounts",

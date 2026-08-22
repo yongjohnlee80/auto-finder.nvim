@@ -1,24 +1,26 @@
 -- ADR-0048 standalone smoke — sections [46] (views.tests), [47]
--- (views.debug), and [48] (r5 Env section, this file only — the
--- section postdates smoke.lua's [41b] truncation and has no
--- smoke.lua counterpart). Run with:
+-- (views.debug), and [48] (r5 Env section). Run with:
 --   nvim --headless -u NONE -l tests/smoke-adr0048.lua
 --
 -- Exits 0 on PASS, 1 on FAIL. Each test prints its own line.
 --
--- WHY THIS FILE EXISTS: tests/smoke.lua aborts at section [41] with
--- the pre-existing [41b] grid.c assertion crash (grid_line_flush:
--- `grid_line_clear_to <= grid_line_maxcol`, tracked in the KB todo
--- `2026-06-13-bug-auto-finder-smoke-suite-silently-truncates-at-41b-…`),
--- so under the canonical `-u NONE -l` invocation sections [42]–[47]
--- NEVER execute. Until that crash is fixed, this runner is the only
--- in-tree way the ADR-0048 Phase 3 sections actually run. It carries
--- the same rtp prelude + section-[1] bootstrap as tests/smoke.lua
--- (duplicated minimally — the repo's other suites duplicate their
--- preludes the same way) and then sections [46]+[47] VERBATIM.
--- Keep the section bodies in sync with tests/smoke.lua: they are the
--- canonical copies; this file re-executes them, it does not fork them.
--- Wired into tests/run-all.sh as the fourth suite ("adr0048").
+-- WHY THIS FILE EXISTS: [46]/[47] assert against a MATERIALISED panel
+-- window (af.state.panel_winid must be a real window). Inside
+-- tests/smoke.lua that only holds early in the run; late — after ~45
+-- sections of accumulated window state — the panel does not
+-- materialise headlessly and the same code logs env failures + the
+-- p46 nil-buffer abort. In a FRESH nvim process (this file) the panel
+-- materialises under plain `nvim --headless` (no pty). So on
+-- 2026-08-23 [46]/[47] were CONSOLIDATED here — this file is now their
+-- SOLE canonical home (they were removed from smoke.lua, which carries
+-- a pointer marker). [48]'s r5 Env section has always lived only here.
+-- Prelude + section-[1] bootstrap are duplicated from smoke.lua the
+-- same way the repo's other standalone suites duplicate theirs.
+-- Wired into tests/run-all.sh as the "adr0048" suite. (Background: the
+-- crash that historically truncated smoke.lua's tail is the
+-- grid_line_flush / [41b] class, KB todo
+-- 2026-06-13-...; the [41]/[42] extraction on 2026-08-23 removed it
+-- from smoke.lua's hot path — see tests/auto-finder-coverage.md.)
 
 -- Derive plugin_root from the smoke script's own path so the driver
 -- runs unmodified on any machine (Mac, Linux, bare-repo worktree,
@@ -278,6 +280,12 @@ func TestFail(t *testing.T) {
 
   -- Rendering from the real discovery tree.
   local function buf_text()
+    -- Guard the panel-not-materialised case: if `b` is nil the caller's
+    -- own `ok(... b ~= nil ...)` assertions already FAIL visibly above,
+    -- so return "" here instead of throwing an uncaught E5113 that would
+    -- abort the whole suite (this is exactly how the p46 nil-buffer throw
+    -- silently truncated smoke.lua's tail — KB todo 2026-08-23).
+    if not b then return "" end
     return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   end
   local txt = buf_text()
@@ -684,45 +692,28 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
   vim.api.nvim_win_set_cursor(w, { entry_row.lnum, 0 })
   seen_maps["o"].callback()
 
-  -- ── §8.3 row `d`: IMMEDIATE delete from live dap AND the store ─
+  -- ── breakpoint rows render (typed rows, file + section headers) ──
+  -- PRUNE (2026-08-23): the `d` = DELETE surface these tests were
+  -- written against was removed in 73b2293 ("views.debug: … drop
+  -- delete surface"). `d` now means DEBUG (dap, any kind); breakpoints
+  -- are managed via nvim-dap directly, config files via the files
+  -- panel. The 10 delete-ACTION assertions (row `d`, file-header `d`,
+  -- section-header `d` + confirm, orphan `d`-clean) were pruned — the
+  -- feature they defended is gone, so they defend nothing. The
+  -- breakpoint RENDERING invariants below are still real and kept.
   local bp3 = find_row(function(r)
     return r.kind == "breakpoint" and r.bp.lnum == 3
   end)
   ok("p47: typed breakpoint row present (lnum 3)", bp3 ~= nil)
-  vim.api.nvim_win_set_cursor(w, { bp3.lnum, 0 })
-  seen_maps["d"].callback()
-  local live_after = dap_bps.get(src_buf)[src_buf] or {}
-  local live_l3 = false
-  for _, bp in ipairs(live_after) do
-    if bp.line == 3 then live_l3 = true end
-  end
-  ok("p47: `d` removed the breakpoint from nvim-dap's LIVE registry",
-    not live_l3, vim.inspect(live_after))
-  local recs = ar_bps.read()
-  local stored_l3 = false
-  for _, rec in ipairs(recs) do
-    if rec.lnum == 3 then stored_l3 = true end
-  end
-  ok("p47: `d` removed the breakpoint from the PERSISTED store (one action)",
-    not stored_l3, vim.inspect(recs))
-  ok("p47: the sibling breakpoint (lnum 5) survives the targeted delete",
-    #recs == 1 and recs[1].lnum == 5, vim.inspect(recs))
 
-  -- ── §8.3 file-header `d`: clear that file's breakpoints ────────
+  -- file group header renders once a file carries breakpoints.
   dap_bps.set({}, src_buf, 7)   -- second bp so the file group has two
   ar_bps.reconcile()
   debug_view.on_focus(w, b)
   local file_hdr = find_row(function(r) return r.kind == "bp-file-header" end)
   ok("p47: file group header row present", file_hdr ~= nil)
-  vim.api.nvim_win_set_cursor(w, { file_hdr.lnum, 0 })
-  seen_maps["d"].callback()
-  local live_map = dap_bps.get(src_buf)[src_buf] or {}
-  ok("p47: file-header `d` cleared the file's LIVE breakpoints",
-    #live_map == 0, vim.inspect(live_map))
-  ok("p47: file-header `d` cleared the file's PERSISTED records",
-    #ar_bps.read() == 0, vim.inspect(ar_bps.read()))
 
-  -- ── §8.3 section-header `d`: clear ALL, with confirm ───────────
+  -- Breakpoints section (bucket) header renders.
   dap_bps.set({}, src_buf, 2)
   dap_bps.set({}, src_buf, 4)
   ar_bps.reconcile()
@@ -731,35 +722,6 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
     return r.kind == "bucket-header" and r.section == "breakpoints"
   end)
   ok("p47: Breakpoints section header row present", bp_hdr ~= nil)
-  local orig_confirm = debug_view._confirm
-  local confirm_calls = 0
-  -- Declined confirm → nothing is cleared.
-  debug_view._confirm = function(...)
-    confirm_calls = confirm_calls + 1
-    return 2
-  end
-  vim.api.nvim_win_set_cursor(w, { bp_hdr.lnum, 0 })
-  seen_maps["d"].callback()
-  ok("p47: section-header `d` PROMPTS before bulk clear",
-    confirm_calls == 1, "calls=" .. confirm_calls)
-  ok("p47: declined confirm clears nothing",
-    #ar_bps.read() == 2, vim.inspect(ar_bps.read()))
-  -- Accepted confirm → live registry + store both empty.
-  debug_view._confirm = function(...)
-    confirm_calls = confirm_calls + 1
-    return 1
-  end
-  vim.api.nvim_win_set_cursor(w, { bp_hdr.lnum, 0 })
-  seen_maps["d"].callback()
-  ok("p47: accepted confirm clears ALL persisted records",
-    #ar_bps.read() == 0, vim.inspect(ar_bps.read()))
-  local live_all = dap_bps.get()
-  local any_live = false
-  for _, bps in pairs(live_all) do
-    if #bps > 0 then any_live = true end
-  end
-  ok("p47: accepted confirm clears the LIVE registry too", not any_live)
-  debug_view._confirm = orig_confirm
 
   -- ── orphaned persisted entry renders dimmed with (orphaned) ────
   dap_bps.set({}, src_buf, 6)
@@ -775,11 +737,6 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
   ok("p47: orphaned row typed with orphaned=true",
     orphan_row ~= nil and orphan_row.bp.orphaned == true
       and orphan_row.bp.live == false)
-  -- `d`-to-clean affordance works on the orphan too.
-  vim.api.nvim_win_set_cursor(w, { orphan_row.lnum, 0 })
-  seen_maps["d"].callback()
-  ok("p47: `d` cleans the orphaned persisted record",
-    #ar_bps.read() == 0, vim.inspect(ar_bps.read()))
 
   -- ── cleanup ────────────────────────────────────────────────────
   debug_view.on_close()
