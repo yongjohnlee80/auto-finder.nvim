@@ -149,9 +149,21 @@ local function _render(bufnr)
       })
       if ropen then
         local rc = _cache(rid)
-        if not rc.items then rc.items = backend.worktrees(repo) end
+        if not rc.items then
+          -- Capture BOTH values (r2 SF1). The error was discarded here, so a
+          -- failed `git worktree list` rendered "(no worktrees)" — byte-identical
+          -- to a clean empty list, and in practice that string was ONLY ever the
+          -- failure, since every discovered repo has at least one worktree.
+          -- Cached alongside the items so a repaint costs no git.
+          local items, werr = backend.worktrees(repo)
+          rc.items, rc.err = items, werr
+        end
         if #rc.items == 0 then
-          msg(1, "(no worktrees)")
+          if rc.err then
+            msg(1, "git worktree list failed — R to retry", "AutoCoreGitDeleted")
+          else
+            msg(1, "(no worktrees)")
+          end
         end
         for _, wt in ipairs(rc.items) do
           local wid = "wt:" .. wt.path
@@ -366,7 +378,16 @@ function M.toggle_watch(row)
       { level = vim.log.levels.WARN })
     return
   end
-  local watched = backend.toggle_watch(row.worktree.path)
+  -- BIND the error (r2 #5). Only the first value was captured, so a failed
+  -- persist — ENOSPC, EPERM, lock contention, a malformed store — was a SILENT
+  -- NO-OP REPAINT: `set()` returns the unchanged real state and skips its
+  -- publish, so the row looked identical and the user assumed the keypress had
+  -- not registered. Same treatment as the `o` diff call site below.
+  local watched, werr = backend.toggle_watch(row.worktree.path)
+  if werr then
+    logger.notify("repos: could not persist the watch — " .. tostring(werr),
+      { level = vim.log.levels.ERROR })
+  end
   -- The worktree row's own cache holds the stale `watched` flag, and its
   -- children must be recomputed (or discarded) either way.
   M.invalidate("repo:" .. row.repo.common_dir)
@@ -414,7 +435,18 @@ function M.open_diff(row)
   if ok_rev then
     local revs = backend.reviews(row.repo, sha)
     for i = #revs, 1, -1 do
-      local doc = review.load(row.repo.slug, sha, revs[i].revision)
+      -- pcall'd: only the `require` above was guarded, so ONE malformed review
+      -- file turned `o` into a raw keymap traceback (r2 #4d). validate() no
+      -- longer throws on a scalar comment element, but a review store is
+      -- written by agents and hand-editable — a bad file must cost the reader
+      -- that file, not the whole diff view.
+      local ok_doc, doc = pcall(review.load, row.repo.slug, sha, revs[i].revision)
+      if not ok_doc then
+        logger.notify(("repos: skipping unreadable review r%d — %s")
+          :format(revs[i].revision, tostring(doc)),
+          { level = vim.log.levels.WARN })
+        doc = nil
+      end
       if doc then
         for path, list in pairs(review.by_path(doc)) do
           annotations[path] = annotations[path] or {}
