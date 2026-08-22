@@ -108,7 +108,11 @@ ok("p4: the commit expands to the file it touched",
 
 -- a review file attaches to the commit
 local review = require("worktree.review")
-local rv = review.new({ commit = commit.sha, revision = 1, reviewer = "lector" })
+-- Identity is required (ADR-0060 r3 #3): a review must name its repository, and
+-- an empty `repo` serialises as `[]` rather than the declared object. Callers
+-- supply it; the schema does not bend around them.
+local rv = review.new({ commit = commit.sha, revision = 1, reviewer = "lector",
+                        owner = "render", name = "fixture" })
 rv.comments = { { path = "newfile.txt", line = 1, side = "RIGHT", severity = "nit", body = "x" } }
 review.save(repo.slug, rv)
 tree.invalidate("commit:" .. commit.sha)

@@ -439,6 +439,35 @@ end)()
   end
 end)()
 
+-- ── [7] r3 #4: a RETURNED review-load error is surfaced, not swallowed ──
+-- `review.load` reports malformed JSON and failed validation normally as
+-- `(nil, err)` — it does not throw. The guard bound only `(ok, doc)`, so
+-- through pcall a normal error arrived as `(true, nil, err)`, the warning
+-- branch never ran, and the review was skipped in silence. That is the exact
+-- defect the guard existed to prevent, one line lower down.
+;(function()
+  local src = table.concat(vim.fn.readfile(
+    plugin_root .. "/lua/auto-finder/views/repos/tree.lua"), "\n")
+  ok("[7] the review.load guard binds all THREE pcall results",
+    src:match("local ok_doc, doc, load_err = pcall%(review%.load") ~= nil,
+    "only two results are bound — a returned error is invisible")
+  ok("[7] a THROWN error is reported at ERROR",
+    src:match("threw while loading") ~= nil)
+  ok("[7] *** a RETURNED error is reported too, on its own branch ***",
+    src:match("elseif load_err then") ~= nil)
+
+  -- Behavioural: the two shapes must be distinguishable at the call boundary.
+  local function load_returning_err() return nil, "invalid review" end
+  local okc, doc, lerr = pcall(load_returning_err)
+  ok("[7] a returned error yields (true, nil, err) through pcall",
+    okc == true and doc == nil and lerr == "invalid review",
+    ("%s / %s / %s"):format(tostring(okc), tostring(doc), tostring(lerr)))
+  local function load_throwing() error("boom") end
+  local okt, terr = pcall(load_throwing)
+  ok("[7] CONTROL — a thrown error yields (false, msg), a different shape",
+    okt == false and tostring(terr):find("boom") ~= nil, tostring(terr))
+end)()
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 io.stdout:flush()
 vim.fn.delete(sandbox, "rf")

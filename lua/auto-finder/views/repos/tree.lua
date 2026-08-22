@@ -440,10 +440,24 @@ function M.open_diff(row)
       -- longer throws on a scalar comment element, but a review store is
       -- written by agents and hand-editable — a bad file must cost the reader
       -- that file, not the whole diff view.
-      local ok_doc, doc = pcall(review.load, row.repo.slug, sha, revs[i].revision)
+      --
+      -- THREE results are bound, not two (r3 #4). `review.load` reports
+      -- malformed JSON and failed validation NORMALLY as `(nil, err)` — it does
+      -- not throw — so through pcall that arrives as `(true, nil, err)`. Binding
+      -- only `(ok, doc)` meant the warning branch never ran for the COMMON
+      -- malformed-file case and the review was skipped in silence: the very
+      -- defect this guard was added to fix, reintroduced one line lower. Now a
+      -- thrown error and a returned error are distinguished and both reported.
+      local ok_doc, doc, load_err = pcall(review.load, row.repo.slug, sha,
+        revs[i].revision)
       if not ok_doc then
-        logger.notify(("repos: skipping unreadable review r%d — %s")
+        logger.notify(("repos: review r%d threw while loading — %s")
           :format(revs[i].revision, tostring(doc)),
+          { level = vim.log.levels.ERROR })
+        doc = nil
+      elseif load_err then
+        logger.notify(("repos: skipping unreadable review r%d — %s")
+          :format(revs[i].revision, tostring(load_err)),
           { level = vim.log.levels.WARN })
         doc = nil
       end
