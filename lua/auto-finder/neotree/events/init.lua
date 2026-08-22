@@ -108,5 +108,9 @@ M.fire_event = q.fire_event
 
 M.subscribe = q.subscribe
 M.unsubscribe = q.unsubscribe
+-- Observability for the files-panel benchmark's subscription census, which was
+-- previously blind to this module entirely (ADR-0060 r1 SF5).
+M.count_subscribers = q.count_subscribers
+M.subscribed_events = q.subscribed_events
 
 return M

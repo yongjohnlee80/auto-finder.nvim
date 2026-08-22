@@ -4,13 +4,14 @@
 ---every byte of data arrives through `worktree.repos`, and this view never
 ---shells git itself. The tree it draws:
 ---
----    repo
----      worktree              ● watched
----        UNCOMMITTED (n files)
----          <changed file>
----        <commit>
----          <changed file>
----          <review json>
+---    ▾ repo
+---      ▾ worktree            ● watched
+---        ▾ UNCOMMITTED (n files)
+---            <changed file>
+---        ▾ <commit>
+---            <changed file>
+---            <review json>
+---      ▸ <collapsed worktree>
 ---
 ---**Everything is cached per node id.** A repaint (cursor move, watch toggle,
 ---focus change) must cost ZERO git subprocesses — the panel this replaces ran a
@@ -71,7 +72,18 @@ local function _row(rows, lines, hls, opts)
   return #lines
 end
 
-local function _chevron(expanded) return expanded and "" or "" end
+---_chevron marks a container's expansion state on its OWN row (ADR-0060 §2.2's
+---tree grammar). Both states returned the empty string, so collapsed vs
+---expanded was inferable only by scanning ahead to the next line's indent —
+---recoverable, but not where a reader looks (r1 nit).
+---
+---Applied uniformly to every container, including a collapsed commit. The ADR's
+---diagram omits the glyph there, but that is an inconsistency in the diagram
+---rather than a rule: its "Rules" list never restates the grammar, and a
+---collapsed commit needs the affordance as much as a collapsed worktree.
+---Both glyphs are one display cell and the call site appends a space, so leaf
+---rows (independently indented at IND*3) do not move.
+local function _chevron(expanded) return expanded and "▾" or "▸" end
 
 -- Johno's scheme (ADR-0060 §2.2): deleted RED, modified GREEN, added GREEN
 -- with a `+`. Added and modified share the colour on purpose; the MARKER is

@@ -155,6 +155,28 @@ paint()
 ok("p4: unwatching hides the commits again",
   text():find("feature work", 1, true) == nil, text())
 
+-- ── p5: expansion state is visible on the node's own row (r1 nit) ──
+-- _chevron returned "" for BOTH states, so a collapsed container was
+-- distinguishable from an expanded one only by scanning ahead to the next
+-- line's indent. The render harness never pinned the glyphs, which is exactly
+-- why it survived to review.
+tree.invalidate(nil)
+paint()
+local shown = text()
+ok("p5: an EXPANDED container carries ▾ on its own row",
+  shown:find("▾", 1, true) ~= nil, shown)
+
+-- Collapse everything, then assert the collapsed marker appears and the
+-- expanded one does not — a state change the reader can see in place.
+for id in pairs(tree._expanded) do tree._expanded[id] = nil end
+paint()
+local collapsed = text()
+ok("p5: a COLLAPSED container carries ▸", collapsed:find("▸", 1, true) ~= nil, collapsed)
+ok("p5: and no ▾ remains when nothing is expanded",
+  collapsed:find("▾", 1, true) == nil, collapsed)
+ok("p5: the two states are DISTINGUISHABLE (the nit's actual defect)",
+  collapsed ~= shown)
+
 vim.fn.delete(sb, "rf")
 print(string.format("\n%d passed, %d failed", pass, fail))
 vim.cmd(fail > 0 and "cq" or "qa!")

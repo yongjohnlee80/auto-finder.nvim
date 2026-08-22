@@ -33,6 +33,38 @@ M.clear_all_events = function()
   event_queues = {}
 end
 
+---count_subscribers reports how many handlers are registered for `event_name`.
+---
+---`event_queues` is a module local, so before this existed there was no way to
+---observe it from outside: auto-finder's files-panel benchmark reached for
+---`rawget(events, "subscriptions")`, found nothing, and reported an empty
+---neo-tree census BOTH before and after the ADR-0060 git-subscription removal.
+---That reading was an artifact, not a measurement, and it sat inside the
+---evidence for the removal (ADR-0060 r1 SF5). An assertion is only worth
+---hanging on a number something can actually observe.
+---
+---Read-only and allocation-free; 0 for an event nobody has subscribed to.
+---@param event_name neotree.EventName|string
+---@return integer
+M.count_subscribers = function(event_name)
+  local queue = event_queues[event_name]
+  if not queue or not queue._list then return 0 end
+  return queue._list.size or 0
+end
+
+---subscribed_events lists every event name that currently has a queue, so a
+---census can assert on what IS registered rather than only probing names it
+---already thought to ask about.
+---@return string[]
+M.subscribed_events = function()
+  local out = {}
+  for name, queue in pairs(event_queues) do
+    if queue and queue._list and (queue._list.size or 0) > 0 then out[#out + 1] = name end
+  end
+  table.sort(out)
+  return out
+end
+
 ---@class neotree.event.Definition
 ---@field teardown function?
 ---@field setup function?

@@ -237,15 +237,23 @@ local function subscription_census()
       out.auto_core[topic] = ok_c and n or nil
     end
   end
+  -- Reads neo-tree's REAL subscriber count. This used to reach for
+  -- `rawget(nev, "subscriptions")` / `"event_handlers"`, neither of which
+  -- exists — neo-tree keeps handlers in a module-local `event_queues` inside
+  -- neotree/events/queue.lua. So the neo-tree census was EMPTY both before and
+  -- after the ADR-0060 git-subscription removal: an artifact that looked like a
+  -- measurement, sitting inside the evidence for that removal (r1 SF5).
+  -- `count_subscribers` was added to the fork to make it observable.
   local ok_ne, nev = pcall(require, "auto-finder.neotree.events")
-  if ok_ne then
+  if ok_ne and type(nev.count_subscribers) == "function" then
     for _, name in ipairs({ "GIT_EVENT", "GIT_STATUS_CHANGED", "FS_EVENT", "BEFORE_GIT_STATUS" }) do
       local id = nev[name]
-      local subs = rawget(nev, "subscriptions") or rawget(nev, "event_handlers")
-      if id and type(subs) == "table" and type(subs[id]) == "table" then
-        out.neotree[name] = #subs[id]
-      end
+      if id then out.neotree[name] = nev.count_subscribers(id) end
     end
+    out.neotree_blind = false
+  else
+    -- Say so loudly rather than reporting an empty table that reads as zero.
+    out.neotree_blind = true
   end
   return out
 end
@@ -398,6 +406,76 @@ if base_path and vim.fn.filereadable(base_path) == 1 then
         cmp("git:   " .. s.label, s.git_calls, b.git_calls, 0)
       end
     end
+  end
+end
+
+-- ── ABSOLUTE post-P6 invariants ──────────────────────────────────────
+-- The baseline comparison above pins the IMPROVEMENT; it cannot pin the
+-- INVARIANT. Against the P0 baseline of 13 total / 7 at mount, a regression to
+-- 5 git subprocesses still reads "ok" — and with BENCH_BASE unset there is no
+-- gate at all. Post-P6 the files panel must issue ZERO git subprocesses, so
+-- assert zero absolutely and unconditionally (r1 SF5).
+print("\n── absolute post-P6 invariants ──")
+local function must_be_zero(label, n)
+  local bad = type(n) ~= "number" or n ~= 0
+  if bad then failed = true end
+  print(string.format("  %-6s %-44s %s", bad and "VIOLATED" or "ok", label, tostring(n)))
+end
+must_be_zero("total git subprocesses == 0", total_git)
+must_be_zero("mount git subprocesses == 0", mount_git)
+for _, s in ipairs(scenarios) do
+  must_be_zero("git == 0: " .. s.label, s.git_calls)
+end
+
+-- Subscription invariants. ADR-0060 §2.8 removed exactly these three neo-tree
+-- git subscriptions plus auto-finder's translated git topic.
+local subs = subscription_census()
+if subs.neotree_blind then
+  failed = true
+  print("  VIOLATED neo-tree census is BLIND — the numbers below prove nothing")
+else
+  for _, name in ipairs({ "GIT_EVENT", "GIT_STATUS_CHANGED", "FS_EVENT" }) do
+    must_be_zero("neotree " .. name .. " subscribers == 0", subs.neotree[name] or 0)
+  end
+end
+must_be_zero("auto-finder.core.git:changed subscribers == 0",
+  subs.auto_core["auto-finder.core.git:changed"] or 0)
+
+-- NOT zero, deliberately: `core.git.state:changed` STAYS as a direct upstream
+-- subscription through v0.2.x (shared/neotree.lua's own comment), and ADR-0060
+-- §2.8 never listed it. Pinned to its expected count so neither a silent
+-- removal nor a new duplicate slips through — a blanket "all git subscriptions
+-- are zero" assertion would have failed on day one.
+do
+  local n = subs.auto_core["core.git.state:changed"]
+  local expected = 2
+  local bad = type(n) ~= "number" or n ~= expected
+  if bad then failed = true end
+  print(string.format("  %-6s %-44s %s (expected %d, deliberately NOT zero)",
+    bad and "VIOLATED" or "ok", "core.git.state:changed subscribers", tostring(n), expected))
+end
+
+-- POSITIVE CONTROL for the census itself: a zero above must mean "nobody is
+-- subscribed", not "this instrument cannot see subscribers". Register a canary
+-- on one of the very topics asserted zero and confirm the census counts it.
+do
+  local ok_ne, nev = pcall(require, "auto-finder.neotree.events")
+  if ok_ne and type(nev.count_subscribers) == "function" then
+    nev.subscribe({ event = nev.GIT_EVENT, id = "bench-census-canary",
+                    handler = function() end })
+    local seen = subscription_census().neotree.GIT_EVENT or 0
+    nev.unsubscribe({ event = nev.GIT_EVENT, id = "bench-census-canary",
+                      handler = function() end })
+    if seen < 1 then
+      failed = true
+      print("  VIOLATED census control: a real GIT_EVENT subscriber was NOT seen"
+        .. " — every zero above is meaningless")
+    else
+      print("  ok     census control: a real subscriber IS observed (" .. seen .. ")")
+    end
+  else
+    failed = true
+    print("  VIOLATED census control: count_subscribers is unavailable")
   end
 end
 
