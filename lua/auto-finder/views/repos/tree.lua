@@ -349,12 +349,12 @@ function M.toggle_watch(row)
   _rerender()
 end
 
----open_diff is `o` on a commit.
+---open_diff is `o` on a commit: the three-column diff view (§2.5), with any
+---recorded review comments rendered inline where they belong.
 ---
----ADR-0060 §2.5 puts the three-column view in P5. Until then this renders the
----parsed diff into one scratch buffer with the P2 highlight groups — the same
----data, a simpler presentation — so the key is never dead and the parser is
----exercised by hand.
+---Annotations come from the review JSONs already attached to the commit, so a
+---review written by an agent shows up next to the code without any extra step
+---— requirement 8's "see agent's or my review feedback right on the panel".
 function M.open_diff(row)
   local backend = _repos()
   if not (backend and row and row.repo) then return end
@@ -371,50 +371,56 @@ function M.open_diff(row)
     return
   end
 
-  local ok_marks, marks = pcall(require, "auto-core.ui.marks")
-  local lines, paint = {}, {}
-  for _, f in ipairs(files) do
-    lines[#lines + 1] = f.path .. (f.kind ~= "modified" and ("  [" .. f.kind .. "]") or "")
-    paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffHeader" }
-    if f.binary then
-      lines[#lines + 1] = "  (binary)"
-      paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffContext" }
-    end
-    for _, h in ipairs(f.hunks) do
-      lines[#lines + 1] = h.header
-      paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffHunk" }
-      for _, l in ipairs(h.lines) do
-        local pfx = l.kind == "add" and "+" or (l.kind == "del" and "-" or " ")
-        lines[#lines + 1] = pfx .. l.text
-        if l.kind == "add" then
-          paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffAdd" }
-        elseif l.kind == "del" then
-          paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffDelete" }
+  -- Merge every revision's comments, newest revision last so a later pass
+  -- renders over an earlier one rather than being hidden by it.
+  local annotations = {}
+  local ok_rev, review = pcall(require, "worktree.review")
+  if ok_rev then
+    local revs = backend.reviews(row.repo, sha)
+    for i = #revs, 1, -1 do
+      local doc = review.load(row.repo.slug, sha, revs[i].revision)
+      if doc then
+        for path, list in pairs(review.by_path(doc)) do
+          annotations[path] = annotations[path] or {}
+          for _, c in ipairs(list) do
+            c.author = c.author or doc.reviewer
+            table.insert(annotations[path], c)
+          end
         end
       end
     end
-    lines[#lines + 1] = ""
   end
 
-  local buf = vim.api.nvim_create_buf(false, true)
-  vim.bo[buf].bufhidden = "wipe"
-  vim.bo[buf].buftype = "nofile"
-  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-  vim.bo[buf].modifiable = false
-  pcall(vim.api.nvim_buf_set_name, buf, "auto-finder://diff/" .. tostring(row.node.short))
-
-  local w = _editor_win()
-  if w then
-    pcall(vim.api.nvim_set_current_win, w)
-    pcall(vim.api.nvim_win_set_buf, w, buf)
-  else
-    pcall(vim.cmd, "botright vsplit")
-    pcall(vim.api.nvim_win_set_buf, vim.api.nvim_get_current_win(), buf)
+  local ok_dv, dv = pcall(require, "auto-core.ui.diffview")
+  if not ok_dv then
+    logger.notify("repos: auto-core.ui.diffview is unavailable",
+      { level = vim.log.levels.ERROR })
+    return
   end
-  if ok_marks then
-    local ns = marks.ns("repos-diff")
-    marks.clear(buf, ns)
-    for _, p in ipairs(paint) do marks.line(buf, ns, p.row, p.hl) end
+  local handle, err = dv.open({
+    files = files,
+    annotations = annotations,
+    title = " " .. tostring(row.node.short) .. "  "
+      .. tostring((row.node.commit or {}).subject or "") .. " ",
+  })
+  if not handle then
+    -- Refusing on a narrow window is deliberate (auto-core sets MIN_COLUMNS):
+    -- half a diff read as a whole one is worse than none.
+    logger.notify("repos: " .. tostring(err), { level = vim.log.levels.WARN })
+    return
+  end
+
+  -- Feedback anchored to a line the diff does not show would otherwise vanish
+  -- silently; name it instead.
+  local lost = dv.unplaced_for(files, annotations)
+  if #lost > 0 then
+    local names = {}
+    for _, l in ipairs(lost) do
+      names[#names + 1] = l.path .. ":" .. tostring(l.line)
+    end
+    logger.notify("repos: " .. #lost .. " review comment(s) are not on a line in "
+      .. "this diff — " .. table.concat(names, ", "),
+      { level = vim.log.levels.WARN })
   end
 end
 
@@ -492,7 +498,7 @@ local HELP = {
   "  repo → worktree → UNCOMMITTED / commits → files · reviews",
   "",
   "  <CR>  expand · open a file · open a review JSON",
-  "  o     diff the commit under the cursor",
+  "  o     diff the commit — three columns: files | a/ (old) | b/ (new)",
   "  w     watch / unwatch this worktree (persists)",
   "  m     load another window of commits",
   "  i     info about the node          R  reload (all with no node)",

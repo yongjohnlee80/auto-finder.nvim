@@ -121,16 +121,32 @@ ok("p4: the row model is parallel to the buffer lines",
   #tree._rows == #vim.api.nvim_buf_get_lines(buf, 0, -1, false),
   #tree._rows .. " vs " .. #vim.api.nvim_buf_get_lines(buf, 0, -1, false))
 
--- `o` on a commit renders a coloured diff (P5 precursor, not a dead key)
-local before_wins = #vim.api.nvim_list_wins()
+-- `o` on a commit opens the P5 three-column diff view, with any recorded
+-- review comments rendered inline.
 local rowobj
 for _, r in ipairs(tree._rows) do if r.kind == "commit" then rowobj = r end end
+vim.o.columns = 200   -- above ui.diffview.MIN_COLUMNS, else it rightly refuses
 tree.open_diff(rowobj)
-local found_diff = false
-for _, b in ipairs(vim.api.nvim_list_bufs()) do
-  if (vim.api.nvim_buf_get_name(b) or ""):find("auto%-finder://diff/") then found_diff = true end
+local dv = require("auto-core.ui").diffview
+ok("p5: o on a commit opens the three-column diff view", dv.is_open() == true)
+local dst = dv._state_for_tests()
+ok("p5: it shows the file the commit touched",
+  dst and #dst.files >= 1
+  and table.concat(vim.api.nvim_buf_get_lines(dst.float:bufnr("left"), 0, -1, false), "\n")
+    :find("newfile.txt", 1, true) ~= nil,
+  dst and vim.inspect(vim.tbl_map(function(f) return f.path end, dst.files)))
+-- The review saved above targets newfile.txt:1 on the RIGHT (b/) side, so it
+-- must render as a virt_lines annotation there — requirement 8's whole point.
+local marks = require("auto-core.ui").marks
+local ns = marks.ns("diffview")
+local ann = 0
+for _, m in ipairs(vim.api.nvim_buf_get_extmarks(dst.float:bufnr("preview"), ns, 0, -1,
+  { details = true })) do
+  if m[4] and m[4].virt_lines then ann = ann + 1 end
 end
-ok("p4: o on a commit opens a diff buffer (o is not a dead key)", found_diff)
+ok("p5: the recorded review comment renders inline on the b/ side", ann == 1, tostring(ann))
+dv.close()
+ok("p5: closing the diff view disposes it", dv.is_open() == false)
 
 -- unwatch clears the commits again
 backend.toggle_watch(feat.path)
