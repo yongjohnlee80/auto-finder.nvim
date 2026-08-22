@@ -169,7 +169,21 @@ local function _render(bufnr)
                 cc.items, cc.meta = nodes, meta
               end
               if #cc.items == 0 then
-                msg(2, "(no commits, clean tree)")
+                -- A FAILED read must never render as a clean tree (ADR-0060 r1
+                -- SF3). `children()` reports git failures in meta; claiming
+                -- "clean" when the status read errored tells the user they have
+                -- no uncommitted work when we simply could not look.
+                local rerr = cc.meta and (cc.meta.status_err or cc.meta.log_err)
+                if rerr then
+                  msg(2, "git read failed — R to retry", "AutoCoreGitDeleted")
+                else
+                  msg(2, "(no commits, clean tree)")
+                end
+              elseif cc.meta and (cc.meta.status_err or cc.meta.log_err) then
+                -- Partial success: commits listed but the status read failed, so
+                -- the absence of an UNCOMMITTED row is not evidence of a clean
+                -- tree. Say so rather than letting omission imply it.
+                msg(2, "working-tree status unavailable", "AutoCoreGitDeleted")
               end
               for _, node in ipairs(cc.items) do
                 local nid = node.kind == "uncommitted"
@@ -364,7 +378,17 @@ function M.open_diff(row)
       { level = vim.log.levels.WARN })
     return
   end
-  local files = backend.diff(row.repo, sha)
+  -- Guarded because `diff()` reaches into auto-core's diff parser. availability
+  -- is probed up front, but an unprotected call here surfaced as a raw keymap
+  -- traceback rather than a message if that surface was ever incomplete
+  -- (ADR-0060 r1 SF2). A missing capability is a notification, not a stacktrace.
+  local dok, files = pcall(backend.diff, row.repo, sha)
+  if not dok then
+    logger.notify("repos: cannot diff — " .. tostring(files),
+      { level = vim.log.levels.ERROR })
+    return
+  end
+  files = files or {}
   if #files == 0 then
     logger.notify("repos: no diff for " .. tostring(row.node.short),
       { level = vim.log.levels.WARN })
