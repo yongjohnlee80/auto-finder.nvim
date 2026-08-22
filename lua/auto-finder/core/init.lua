@@ -277,6 +277,24 @@ function M.ensure_started(cfg)
       })
   end)
 
+  -- ADR-0060: the repos panel also needs to know when the worktree SET
+  -- changes and when a watch is toggled elsewhere. Both are UPSTREAM topics,
+  -- and the A1 invariant forbids a view from subscribing to those directly —
+  -- so they are translated here onto the same auto-finder.core.repos:changed
+  -- the view already listens to. One translated topic, one subscriber.
+  for _, up_topic in ipairs({
+    "worktree:added", "worktree:removed", "worktree.watch:changed",
+  }) do
+    _sub("upstream_repos_" .. up_topic, up_topic, function(payload)
+      require("auto-finder.core.repos").invalidate()
+      require("auto-finder.core.events").publish(
+        "auto-finder.core.repos:changed", {
+          kind = up_topic,
+          path = (type(payload) == "table" and payload.path) or nil,
+        })
+    end)
+  end
+
   -- worktree:switched →
   --   - publish auto-finder.core.repos:changed { kind = 'worktree_switched' }
   --   - invoke init.lua's existing reseed handler (was at

@@ -1,0 +1,611 @@
+---View — the repos explorer over worktree.nvim (ADR-0060 §2.2).
+---
+---A pure renderer, the same shape as `views/dbase/tree.lua` is over autodb:
+---every byte of data arrives through `worktree.repos`, and this view never
+---shells git itself. The tree it draws:
+---
+---    repo
+---      worktree              ● watched
+---        UNCOMMITTED (n files)
+---          <changed file>
+---        <commit>
+---          <changed file>
+---          <review json>
+---
+---**Everything is cached per node id.** A repaint (cursor move, watch toggle,
+---focus change) must cost ZERO git subprocesses — the panel this replaces ran a
+---blocking `git status` per worktree on every navigate plus a `git config` per
+---repo, which is what made it expensive. Git is paid on first expand and after
+---an explicit invalidation only.
+---@module 'auto-finder.views.repos.tree'
+
+local logger = require("auto-finder.log")
+
+local M = {}
+
+local NS = vim.api.nvim_create_namespace("auto_finder_repos_tree")
+
+---REFRESH_TOPIC is the single translated topic this view listens to. The core
+---translator publishes it for worktree switch/add/remove AND for a watch
+---toggled elsewhere, so the view never subscribes upstream (invariant A1).
+M.REFRESH_TOPIC = "auto-finder.core.repos:changed"
+local FILETYPE = "auto-finder"
+
+-- ─── backend access (optional dependency) ─────────────────────
+
+---_repos returns worktree.nvim's repos surface, or nil when it is absent or
+---too old. Nil is a normal state: the panel renders an explanation.
+local function _repos()
+  local ok, r = pcall(require, "worktree.repos")
+  if not ok or type(r) ~= "table" then return nil end
+  if type(r.available) ~= "function" or not r.available() then return nil end
+  return r
+end
+
+-- ─── cache ────────────────────────────────────────────────────
+
+M._expanded = {}
+M._cache = {}
+M._bufnr = nil
+M._rows = nil
+M._more = {}   -- node id -> extra commit windows requested
+
+local function _cache(id)
+  M._cache[id] = M._cache[id] or {}
+  return M._cache[id]
+end
+
+---invalidate drops one node's cached children, or everything.
+function M.invalidate(id)
+  if id then M._cache[id] = nil else M._cache = {} end
+end
+
+local _rerender  -- forward declaration
+
+-- ─── row model ────────────────────────────────────────────────
+
+local function _row(rows, lines, hls, opts)
+  lines[#lines + 1] = opts.text
+  rows[#rows + 1] = opts
+  if opts.hl then hls[#hls + 1] = { lnum = #lines - 1, hl = opts.hl } end
+  return #lines
+end
+
+local function _chevron(expanded) return expanded and "" or "" end
+
+-- Johno's scheme (ADR-0060 §2.2): deleted RED, modified GREEN, added GREEN
+-- with a `+`. Added and modified share the colour on purpose; the MARKER is
+-- what distinguishes them.
+local KIND_HL = {
+  added      = "AutoCoreGitAdded",
+  modified   = "AutoCoreGitModified",
+  deleted    = "AutoCoreGitDeleted",
+  renamed    = "AutoCoreGitRenamed",
+  untracked  = "AutoCoreGitUntracked",
+  conflicted = "AutoCoreGitConflicted",
+}
+local KIND_MARK = {
+  added = "+", modified = "M", deleted = "D",
+  renamed = "R", untracked = "+", conflicted = "!",
+}
+
+-- ─── render ───────────────────────────────────────────────────
+
+local function _render(bufnr)
+  if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return end
+  local ok_hl, hl = pcall(require, "auto-core.ui.highlights")
+  if ok_hl then hl.ensure() end
+
+  local lines, rows, hls = {}, {}, {}
+  local IND = "  "
+  local backend = _repos()
+
+  local function msg(depth, text, group)
+    _row(rows, lines, hls, { kind = "message", hl = group or "AutoCoreDimmed",
+      text = string.rep(IND, depth) .. text })
+  end
+
+  local function container(depth, opts)
+    local open = M._expanded[opts.id] == true
+    _row(rows, lines, hls, {
+      kind = opts.kind, id = opts.id, expandable = true,
+      repo = opts.repo, worktree = opts.worktree, node = opts.node,
+      hl = opts.hl,
+      text = string.rep(IND, depth) .. _chevron(open) .. " "
+        .. opts.label .. (opts.suffix or ""),
+    })
+    return open
+  end
+
+  if not backend then
+    msg(0, "worktree.nvim's repos surface is unavailable.", "AutoCoreDimmed")
+    msg(0, "Install/update yongjohnlee80/worktree.nvim to use this panel.")
+  else
+    -- ── root: repositories ──
+    local root = _cache("root")
+    if not root.items then root.items = backend.repos() end
+    if #root.items == 0 then
+      msg(0, "No repositories found under the workspace root.", "AutoCoreDimmed")
+      msg(0, "? for help")
+    end
+
+    for _, repo in ipairs(root.items) do
+      local rid = "repo:" .. repo.common_dir
+      local ropen = container(0, {
+        kind = "repo", id = rid, repo = repo, hl = "AutoCorePanelTitle",
+        label = repo.label, suffix = repo.is_bare and "  (bare)" or "",
+      })
+      if ropen then
+        local rc = _cache(rid)
+        if not rc.items then rc.items = backend.worktrees(repo) end
+        if #rc.items == 0 then
+          msg(1, "(no worktrees)")
+        end
+        for _, wt in ipairs(rc.items) do
+          local wid = "wt:" .. wt.path
+          -- The watch marker is the panel's one piece of persistent state the
+          -- user drives; show it plainly so `w` has visible feedback.
+          local suffix = wt.watched and "  ● watched" or ""
+          if wt.is_base then suffix = suffix .. "  (base)" end
+          local wopen = container(1, {
+            kind = "worktree", id = wid, repo = repo, worktree = wt,
+            hl = wt.watched and "AutoCoreSectionActive" or "AutoCoreSectionInactive",
+            label = wt.branch or vim.fn.fnamemodify(wt.path, ":t")
+              .. (wt.detached and "  (detached)" or ""),
+            suffix = suffix,
+          })
+          if wopen then
+            if not wt.watched then
+              -- §2.3: an unwatched worktree computes NOTHING. Say why, so the
+              -- empty expansion reads as a choice rather than a failure.
+              msg(2, "not watched — w to watch and list commits")
+            else
+              local cc = _cache(wid)
+              if not cc.items then
+                local extra = (M._more[wid] or 0)
+                local nodes, meta = backend.children(repo, wt, {
+                  limit = 15 + extra * 15,
+                })
+                cc.items, cc.meta = nodes, meta
+              end
+              if #cc.items == 0 then
+                msg(2, "(no commits, clean tree)")
+              end
+              for _, node in ipairs(cc.items) do
+                local nid = node.kind == "uncommitted"
+                  and ("unc:" .. wt.path) or ("commit:" .. node.sha)
+                local nopen = container(2, {
+                  kind = node.kind, id = nid, repo = repo, worktree = wt,
+                  node = node,
+                  hl = node.kind == "uncommitted" and "AutoCoreGitModified" or nil,
+                  label = node.label,
+                })
+                if nopen then
+                  local fc = _cache(nid)
+                  if not fc.items then
+                    if node.kind == "uncommitted" then
+                      fc.items = backend.uncommitted(wt)
+                      fc.reviews = {}
+                    else
+                      fc.items = backend.commit_files(repo, node.sha)
+                      fc.reviews = backend.reviews(repo, node.sha)
+                    end
+                  end
+                  if #fc.items == 0 and #(fc.reviews or {}) == 0 then
+                    msg(3, "(no files)")
+                  end
+                  for _, f in ipairs(fc.items) do
+                    _row(rows, lines, hls, {
+                      kind = "file", repo = repo, worktree = wt, node = node,
+                      file = f, hl = KIND_HL[f.kind] or "AutoCoreDimmed",
+                      text = string.rep(IND, 3) .. (KIND_MARK[f.kind] or "?")
+                        .. " " .. f.path
+                        .. (f.orig and ("  ← " .. f.orig) or ""),
+                    })
+                  end
+                  -- Requirement 9: review files sit beside the changed files.
+                  for _, rv in ipairs(fc.reviews or {}) do
+                    _row(rows, lines, hls, {
+                      kind = "review", repo = repo, worktree = wt, node = node,
+                      review = rv, hl = "AutoCoreReviewFrame",
+                      text = string.rep(IND, 3) .. "R " .. rv.name,
+                    })
+                  end
+                end
+              end
+              -- Only a bounded window shows a load-more affordance; a
+              -- divergence range is already complete by definition.
+              if cc.meta and cc.meta.mode == "window" and #cc.items > 0 then
+                _row(rows, lines, hls, {
+                  kind = "more", id = wid, repo = repo, worktree = wt,
+                  hl = "AutoCoreDimmed",
+                  text = string.rep(IND, 2) .. "… m for more commits",
+                })
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+
+  if #lines == 0 then msg(0, "(nothing to show)") end
+
+  -- Keep the cursor where it was: a background refresh must not move the user.
+  local win = vim.fn.bufwinid(bufnr)
+  local cursor = win ~= -1 and vim.api.nvim_win_get_cursor(win) or nil
+
+  vim.bo[bufnr].modifiable = true
+  vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  for _, h in ipairs(hls) do
+    pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, 0,
+      { end_line = h.lnum + 1, hl_group = h.hl })
+  end
+  vim.bo[bufnr].modifiable = false
+
+  if cursor and win ~= -1 then
+    pcall(vim.api.nvim_win_set_cursor, win,
+      { math.min(cursor[1], math.max(#lines, 1)), cursor[2] })
+  end
+  M._rows = rows
+end
+
+_rerender = function()
+  if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then _render(M._bufnr) end
+end
+
+-- ─── actions ──────────────────────────────────────────────────
+
+local function _row_under_cursor(panel_winid)
+  if not (M._rows and panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
+    return nil
+  end
+  return M._rows[vim.api.nvim_win_get_cursor(panel_winid)[1]]
+end
+
+local function _toggle(row)
+  if not row or not row.id or not row.expandable then return false end
+  if M._expanded[row.id] then
+    M._expanded[row.id] = nil
+    -- Collapsing invalidates: re-expanding must re-read, because the tree
+    -- shows work in flight and it moves.
+    M.invalidate(row.id)
+  else
+    M._expanded[row.id] = true
+  end
+  _rerender()
+  return true
+end
+
+---_editor_win finds a normal window to open a file into — never the panel.
+local function _editor_win()
+  local af = require("auto-finder")
+  if af._editor_target_winid then
+    local w = af._editor_target_winid()
+    if w then return w end
+  end
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    local b = vim.api.nvim_win_get_buf(w)
+    if vim.bo[b].buftype == "" and vim.bo[b].buflisted then return w end
+  end
+  return nil
+end
+
+---_open_path opens a real file in the editor area (requirement 10).
+local function _open_path(path)
+  if not path or path == "" then return end
+  local esc = vim.fn.fnameescape(path)
+  local w = _editor_win()
+  if w then
+    pcall(vim.api.nvim_set_current_win, w)
+    pcall(vim.cmd, "edit " .. esc)
+  else
+    pcall(vim.cmd, "botright vsplit " .. esc)
+  end
+end
+
+---_activate is `<CR>`.
+local function _activate(row)
+  if not row then return end
+  if row.kind == "file" then
+    -- A file under UNCOMMITTED exists on disk; one under a commit may not
+    -- (it could be deleted, or from another worktree), so resolve against the
+    -- worktree and fall back to telling the user rather than opening nothing.
+    local abs = (row.worktree and row.worktree.path or "") .. "/" .. row.file.path
+    if vim.fn.filereadable(abs) == 1 then return _open_path(abs) end
+    logger.notify("repos: " .. row.file.path .. " is not present in this worktree",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  if row.kind == "review" then return _open_path(row.review.path) end
+  if row.kind == "more" then return M.load_more(row) end
+  _toggle(row)
+end
+
+---load_more requests another commit window (§2.4, `m`).
+function M.load_more(row)
+  if not row or not row.worktree then return end
+  local wid = "wt:" .. row.worktree.path
+  M._more[wid] = (M._more[wid] or 0) + 1
+  M.invalidate(wid)
+  _rerender()
+end
+
+---toggle_watch is `w` — the panel's one persistent user decision (§2.3).
+function M.toggle_watch(row)
+  local backend = _repos()
+  if not (backend and row and row.worktree) then
+    logger.notify("repos: put the cursor on a worktree to watch it",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local watched = backend.toggle_watch(row.worktree.path)
+  -- The worktree row's own cache holds the stale `watched` flag, and its
+  -- children must be recomputed (or discarded) either way.
+  M.invalidate("repo:" .. row.repo.common_dir)
+  M.invalidate("wt:" .. row.worktree.path)
+  if watched then M._expanded["wt:" .. row.worktree.path] = true end
+  _rerender()
+end
+
+---open_diff is `o` on a commit.
+---
+---ADR-0060 §2.5 puts the three-column view in P5. Until then this renders the
+---parsed diff into one scratch buffer with the P2 highlight groups — the same
+---data, a simpler presentation — so the key is never dead and the parser is
+---exercised by hand.
+function M.open_diff(row)
+  local backend = _repos()
+  if not (backend and row and row.repo) then return end
+  local sha = row.node and row.node.sha
+  if not sha then
+    logger.notify("repos: put the cursor on a commit to diff it",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local files = backend.diff(row.repo, sha)
+  if #files == 0 then
+    logger.notify("repos: no diff for " .. tostring(row.node.short),
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local ok_marks, marks = pcall(require, "auto-core.ui.marks")
+  local lines, paint = {}, {}
+  for _, f in ipairs(files) do
+    lines[#lines + 1] = f.path .. (f.kind ~= "modified" and ("  [" .. f.kind .. "]") or "")
+    paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffHeader" }
+    if f.binary then
+      lines[#lines + 1] = "  (binary)"
+      paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffContext" }
+    end
+    for _, h in ipairs(f.hunks) do
+      lines[#lines + 1] = h.header
+      paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffHunk" }
+      for _, l in ipairs(h.lines) do
+        local pfx = l.kind == "add" and "+" or (l.kind == "del" and "-" or " ")
+        lines[#lines + 1] = pfx .. l.text
+        if l.kind == "add" then
+          paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffAdd" }
+        elseif l.kind == "del" then
+          paint[#paint + 1] = { row = #lines - 1, hl = "AutoCoreDiffDelete" }
+        end
+      end
+    end
+    lines[#lines + 1] = ""
+  end
+
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.bo[buf].buftype = "nofile"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+  vim.bo[buf].modifiable = false
+  pcall(vim.api.nvim_buf_set_name, buf, "auto-finder://diff/" .. tostring(row.node.short))
+
+  local w = _editor_win()
+  if w then
+    pcall(vim.api.nvim_set_current_win, w)
+    pcall(vim.api.nvim_win_set_buf, w, buf)
+  else
+    pcall(vim.cmd, "botright vsplit")
+    pcall(vim.api.nvim_win_set_buf, vim.api.nvim_get_current_win(), buf)
+  end
+  if ok_marks then
+    local ns = marks.ns("repos-diff")
+    marks.clear(buf, ns)
+    for _, p in ipairs(paint) do marks.line(buf, ns, p.row, p.hl) end
+  end
+end
+
+---_info is `i`.
+local function _info(row)
+  if not row then return end
+  local lines
+  if row.kind == "repo" then
+    lines = {
+      "Repository: " .. tostring(row.repo.label),
+      "  common dir: " .. tostring(row.repo.common_dir),
+      "  bare:       " .. tostring(row.repo.is_bare),
+      "  slug:       " .. tostring(row.repo.slug),
+      "  remote:     " .. tostring(row.repo.url or "(none)"),
+      "",
+      "Reviews for this repo are stored under its slug.",
+    }
+  elseif row.kind == "worktree" then
+    lines = {
+      "Worktree: " .. tostring(row.worktree.branch or row.worktree.path),
+      "  path:     " .. tostring(row.worktree.path),
+      "  head:     " .. tostring(row.worktree.head),
+      "  detached: " .. tostring(row.worktree.detached),
+      "  watched:  " .. tostring(row.worktree.watched),
+      "  is base:  " .. tostring(row.worktree.is_base),
+      "",
+      "An unwatched worktree costs no git calls; w toggles it.",
+    }
+  elseif row.kind == "commit" then
+    local c = row.node.commit or {}
+    lines = {
+      "Commit " .. tostring(row.node.short),
+      "  " .. tostring(c.subject),
+      "  author:  " .. tostring(c.author) .. " <" .. tostring(c.email) .. ">",
+      "  date:    " .. os.date("%Y-%m-%d %H:%M", tonumber(c.ts) or 0),
+      "  parents: " .. tostring(#(c.parents or {})),
+      "  merge:   " .. tostring(c.merge),
+      "",
+      "o opens its diff.",
+    }
+  elseif row.kind == "file" then
+    lines = {
+      "File: " .. tostring(row.file.path),
+      "  change:   " .. tostring(row.file.kind),
+      "  index:    " .. tostring(row.file.x) .. "  worktree: " .. tostring(row.file.y),
+      row.file.orig and ("  renamed from: " .. row.file.orig) or "",
+    }
+  elseif row.kind == "review" then
+    lines = {
+      "Review: " .. tostring(row.review.name),
+      "  revision: " .. tostring(row.review.revision),
+      "  path:     " .. tostring(row.review.path),
+      "",
+      "<CR> opens the JSON.",
+    }
+  else
+    return
+  end
+  local ok, float = pcall(require, "auto-core.ui.float")
+  if ok and float and float.help_overlay then
+    pcall(float.help_overlay, lines, { title = "repos" })
+  else
+    logger.notify(table.concat(lines, "\n"), { level = vim.log.levels.INFO })
+  end
+end
+
+local function _reload(row)
+  if row and row.id then M.invalidate(row.id) else M.invalidate(nil) end
+  _rerender()
+end
+
+local HELP = {
+  "auto-finder repos — worktree explorer",
+  "",
+  "  repo → worktree → UNCOMMITTED / commits → files · reviews",
+  "",
+  "  <CR>  expand · open a file · open a review JSON",
+  "  o     diff the commit under the cursor",
+  "  w     watch / unwatch this worktree (persists)",
+  "  m     load another window of commits",
+  "  i     info about the node          R  reload (all with no node)",
+  "  ?     this help",
+  "",
+  "  An UNWATCHED worktree lists no commits, on purpose: it costs no",
+  "  git calls at all. Press w on the worktree you are working in.",
+}
+
+local function _help()
+  local ok, float = pcall(require, "auto-core.ui.float")
+  if ok and float and float.help_overlay then
+    pcall(float.help_overlay, HELP, { title = "repos" })
+  else
+    logger.notify(table.concat(HELP, "\n"), { level = vim.log.levels.INFO })
+  end
+end
+
+-- ─── keymaps + subscriptions ──────────────────────────────────
+
+local function _apply_keymaps(bufnr, panel_winid)
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  local set = function(lhs, fn, desc)
+    pcall(vim.keymap.set, "n", lhs, fn,
+      { buffer = bufnr, silent = true, nowait = true, desc = desc })
+  end
+  set("<CR>", function() _activate(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: expand / open")
+  set("o", function() M.open_diff(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: diff this commit")
+  set("w", function() M.toggle_watch(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: watch / unwatch this worktree")
+  set("m", function() M.load_more(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: load more commits")
+  set("i", function() _info(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: info")
+  set("R", function() _reload(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: reload")
+  set("?", _help, "auto-finder.repos: help")
+end
+
+---_ensure_subscriptions keeps exactly one handler per topic.
+---
+---`view_subs:replace` rather than a `_subscribed` boolean: the boolean form
+---silently survives a bus reset and the view then stops updating with no sign
+---anything is wrong ([[view-subs-over-subscribe-flags]]).
+local function _ensure_subscriptions()
+  local ok_vs, vs = pcall(require, "auto-finder.shared.view_subs")
+  if not ok_vs then return end
+  M._subs = M._subs or vs.new()
+
+  -- ONE subscription, to the TRANSLATED topic. The A1 invariant (ADR-0026
+  -- Phase 4) forbids a view from subscribing to an upstream topic such as
+  -- `worktree:switched` or `worktree.watch:changed`; auto-finder's core
+  -- translator folds all of those onto `auto-finder.core.repos:changed`, which
+  -- is the only thing this view listens to.
+  M._subs:replace("repos-core", M.REFRESH_TOPIC, function()
+    M.invalidate(nil)
+    vim.schedule(_rerender)
+  end)
+end
+
+local function _dispose_subscriptions()
+  if M._subs and M._subs.dispose_all then
+    pcall(function() M._subs:dispose_all() end)
+  end
+  M._subs = nil
+end
+
+-- ─── view lifecycle contract ──────────────────────────────────
+
+function M.get_buffer(panel_winid)
+  if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
+    _apply_keymaps(M._bufnr, panel_winid)
+    _ensure_subscriptions()
+    return M._bufnr
+  end
+  local b = vim.api.nvim_create_buf(false, true)
+  vim.bo[b].bufhidden = "hide"
+  vim.bo[b].buftype = "nofile"
+  vim.bo[b].swapfile = false
+  vim.bo[b].filetype = FILETYPE
+  vim.b[b].auto_finder_view = "repos"
+  pcall(vim.api.nvim_buf_set_name, b, "auto-finder://repos")
+  M._bufnr = b
+  _render(b)
+  _apply_keymaps(b, panel_winid)
+  _ensure_subscriptions()
+  return b
+end
+
+function M.on_focus(panel_winid, bufnr)
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  _apply_keymaps(bufnr, panel_winid)
+  _ensure_subscriptions()
+  _render(bufnr)
+end
+
+function M.on_close()
+  _dispose_subscriptions()
+  -- The cache goes with the panel: on the next open the work in flight may
+  -- have moved, and a stale tree is worse than a brief re-read.
+  M.invalidate(nil)
+  M._bufnr = nil
+  M._rows = nil
+end
+
+function M.refresh()
+  M.invalidate(nil)
+  _rerender()
+end
+
+M._render_for_tests = _render
+M._row_under_cursor_for_tests = _row_under_cursor
+
+return M

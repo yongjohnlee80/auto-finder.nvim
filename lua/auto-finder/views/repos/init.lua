@@ -19,7 +19,26 @@
 ---`auto-finder.views.repos`. Original path remains valid via facade.
 ---@module 'auto-finder.views.repos'
 
-return require("auto-finder.shared.neotree").build_section({
+-- ADR-0060 (P4): the repos slot moves from the `auto-finder-repos` neo-tree
+-- source to worktree.nvim's own explorer. The switch is by AVAILABILITY rather
+-- than configuration [DECISION -- Johno, 2026-08-22], exactly as the dbase slot
+-- switched to autodb (ADR-0058): a worktree.nvim exposing `repos.available()`
+-- IS the cutover, and until then the neo-tree path below is untouched.
+--
+-- Delegation rather than a rewrite in place, deliberately: a developer
+-- mid-session keeps a working panel either way, and the change reverses by
+-- downgrading one plugin. Hard removal of the old source may follow in a later
+-- minor (ADR-0060 §6.3).
+local function _worktree_view()
+  local ok, r = pcall(require, "worktree.repos")
+  if not ok or type(r) ~= "table" then return nil end
+  if type(r.available) ~= "function" or not r.available() then return nil end
+  local ok_tree, tree = pcall(require, "auto-finder.views.repos.tree")
+  if ok_tree then return tree end
+  return nil
+end
+
+local _legacy = require("auto-finder.shared.neotree").build_section({
   name = "repos",
   description = "registered repos × git worktrees",
   source = "auto-finder-repos",
@@ -30,3 +49,52 @@ return require("auto-finder.shared.neotree").build_section({
   -- core.repos.snapshot_now directly.
   core_refresh_topic = "auto-finder.core.repos:changed",
 })
+
+---The view the registry sees. Each hook delegates to worktree.nvim's explorer
+---when it is available, else to the legacy neo-tree section. The probe runs per
+---hook rather than once at load: worktree.nvim may be lazy-loaded after this
+---module is required, and a one-shot probe would latch the wrong answer.
+local M = {
+  name = _legacy.name,
+  description = "repos x worktrees x work in flight",
+  -- Re-declared, not inherited by accident: `shared.neotree.build_section`
+  -- wires the legacy path's subscription from this field, and the Phase 6
+  -- acceptance ledger asserts the view still declares it. Both paths refresh
+  -- off the SAME translated topic.
+  _core_refresh_topic = _legacy._core_refresh_topic
+    or "auto-finder.core.repos:changed",
+}
+
+function M.get_buffer(panel_winid)
+  local v = _worktree_view()
+  if v then return v.get_buffer(panel_winid) end
+  return _legacy.get_buffer(panel_winid)
+end
+
+function M.on_focus(panel_winid, bufnr)
+  local v = _worktree_view()
+  if v then return v.on_focus(panel_winid, bufnr) end
+  if _legacy.on_focus then return _legacy.on_focus(panel_winid, bufnr) end
+end
+
+function M.on_close()
+  -- Close BOTH: whichever one mounted, its resources must go. Calling the
+  -- inactive one's on_close is a no-op, and that is cheaper than tracking
+  -- which path was live across a plugin being loaded mid-session.
+  local v = _worktree_view()
+  if v then pcall(v.on_close) end
+  if _legacy.on_close then pcall(_legacy.on_close) end
+end
+
+function M.refresh()
+  local v = _worktree_view()
+  if v and v.refresh then return v.refresh() end
+  if _legacy.refresh then return _legacy.refresh() end
+end
+
+---_legacy_for_tests exposes the fallback so the smoke suite can assert BOTH
+---paths rather than only whichever one this machine happens to resolve.
+M._legacy_for_tests = _legacy
+M._probe_for_tests = _worktree_view
+
+return M
