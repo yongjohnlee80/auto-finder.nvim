@@ -7677,6 +7677,7 @@ print("\n[50] ADR-0058 M7 — dbase slot delegates by availability")
     has_autodb == false, "autodb.session present = " .. tostring(has_autodb))
 end)()
 
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
