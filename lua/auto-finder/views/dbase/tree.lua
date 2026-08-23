@@ -1,7 +1,7 @@
 ---View — autodb explorer tree (ADR-0058 §3.3).
 ---
 ---Flat scratch-buffer view on the `todos`/`tests` pattern, replacing the
----nvim-dbee wrapper. A pure renderer over autodb's Lua surface: every
+---A pure renderer over autodb's Lua surface: every
 ---byte of data arrives through `autodb.session`, and this view never
 ---dials a daemon, holds a token, or re-derives which connection is
 ---active ([[auto-family-state-ownership]], [[shared-resolver-single-source-of-truth]]).

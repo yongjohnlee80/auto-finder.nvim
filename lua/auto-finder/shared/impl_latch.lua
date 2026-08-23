@@ -3,7 +3,8 @@
 ---ADR-0060 r1 MF6. Two views in this plugin choose between a preferred
 ---implementation and a fallback by PROBING at call time: the repos slot
 ---(worktree.nvim's explorer vs the legacy neo-tree source) and the dbase slot
----(autodb vs dbee). Probing per hook looks defensive — a lazily-loaded plugin
+---(the repos slot: worktree.nvim vs the legacy in-plugin implementation).
+---Probing per hook looks defensive — a lazily-loaded plugin
 ---appearing mid-session is real, and a one-shot probe would latch the wrong
 ---answer forever — but it is incompatible with how the panel caches buffers.
 ---

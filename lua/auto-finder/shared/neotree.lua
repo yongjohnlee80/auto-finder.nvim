@@ -776,7 +776,7 @@ function M.build_section(opts)
   -- so for neo-tree-backed views (files / buffers / repos)
   -- Phase 7 keeps the synchronous mount and only uses the
   -- placeholder pattern in `views/dbase` (where A16 requires
-  -- it because `dbee.setup` is genuinely slow on first run
+  -- it because a cold backend setup is genuinely slow on first run
   -- and dbase doesn't go through auto-core's Registry).
   --
   -- The `_generation` + `_owned_bufs` + `_still_current`

@@ -47,7 +47,7 @@ run_suite() {
   # Summary sentinel: did the suite reach its end-of-file terminal
   # marker? Suites use three heterogeneous but recognised formats:
   #   • "N passed, M failed"                      (smoke, adr0048, …)
-  #   • "<prefix>: N passed, M failed, K skipped" (dbase_spike, vault)
+  #   • "<prefix>: N passed, M failed, K skipped" (legacy prefixed form)
   #   • "RESULT: all expectations met|NOT met"    (adr0059-e2e)
   # Anything else means the suite truncated before its end-of-file.
   local saw_summary=0
@@ -80,8 +80,6 @@ run_suite "smoke_automation" tests/smoke-automation.lua
 # [45] (ADR-0044 worktree:switched) — extracted from smoke.lua; needs a
 # freshly-materialised panel window, which only happens early in a run.
 run_suite "smoke_adr0044"   tests/smoke-adr0044.lua
-run_suite "dbase_spike"     tests/dbase_spike.lua
-run_suite "encrypted_vault" tests/encrypted_vault_smoke.lua
 # [46]/[47]/[48] (ADR-0048 Phase 3, views.tests/debug/env) — canonical
 # home for these panel-materialisation sections (see the file header).
 run_suite "adr0048"         tests/smoke-adr0048.lua

@@ -91,7 +91,7 @@ function M.setup(user_opts)
       "scan.started",
       "scan.completed.slow",
       -- dbase section (auto-finder.dbase.*) — opt-in toast events
-      -- for informational dbee lifecycle. ERROR-class failures
+      -- for informational dbase lifecycle. ERROR-class failures
       -- (`dbase.call.failed`, `dbase.setup.failed`) are NOT in this
       -- list because `log.error(...)` toasts by default per the
       -- auto-family-logging convention's level-semantics table
@@ -234,7 +234,7 @@ function M.setup(user_opts)
   -- If `dbase` is enabled, forward the consumer's `cfg.dbase` (sources
   -- + extra) to the section. The section reads it lazily on the first
   -- `get_buffer` call — when `_dbase_setup.ensure_setup(opts)` runs —
-  -- so we can plumb the config here without dbee having to be loaded
+  -- so we can plumb the config here without the backend having to be loaded
   -- yet. Safe to call even when dbase isn't enabled (no-op).
   if require("auto-finder.views")._by_name["dbase"] then
     local dbase_section = require("auto-finder.views.dbase")

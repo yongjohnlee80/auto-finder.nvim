@@ -65,7 +65,7 @@
 ---  ?     help overlay listing every keymap on this buffer
 ---
 ---Soft dependency: auto-run.nvim. When absent the view renders a
----one-line hint and every action no-ops (dbase-without-dbee
+---one-line hint and every action no-ops (dbase-without-a-backend
 ---precedent). nvim-dap absence degrades the Sessions/Breakpoints
 ---sections to empty — the Entry Points section still works.
 ---

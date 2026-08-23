@@ -64,7 +64,7 @@
 ---  ?     help overlay listing every keymap on this buffer
 ---
 ---Soft dependency: auto-run.nvim. When absent the view renders a
----one-line hint and every action no-ops (the dbase-without-dbee
+---one-line hint and every action no-ops (the dbase-without-a-backend
 ---precedent) — the rest of the panel is unaffected.
 ---
 ---Event-driven refresh honors the no-hijack invariant (ADR-0009):
@@ -365,7 +365,7 @@ local function _render(bufnr)
   local ar = _auto_run()
   if not ar then
     -- Soft-dep absent: one-line hint, no data access (the
-    -- dbase-without-dbee precedent).
+    -- dbase-without-a-backend precedent).
     local hint = "(auto-run.nvim not installed — tests view unavailable)"
     lines[1] = hint
     mark(0, 0, #hint, HL.empty)

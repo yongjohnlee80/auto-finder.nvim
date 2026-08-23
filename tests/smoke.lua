@@ -75,11 +75,11 @@ vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-default"
 vim.fn.delete("/tmp/auto-finder-smoke-state-default", "rf")
 vim.env.XDG_STATE_HOME = "/tmp/auto-finder-smoke-state-default"
 
--- v0.2.34: force the legacy plaintext storage code path for this smoke
--- regardless of whether age/gpg is installed on the runner. The dbase
--- REPL tests below were written before encrypted vaults existed and
--- assume plaintext file layout (`<name>.json`, no passphrase prompt).
--- The encrypted-path coverage lives in `tests/encrypted_vault_smoke.lua`.
+-- Vestigial since v0.4.0, kept as a belt-and-braces guard. It used to force
+-- the legacy plaintext storage path for the dbase REPL tests regardless of
+-- whether age/gpg was installed. Those tests, the encrypted vault, and
+-- crypto.lua all went with nvim-dbee (ADR-0063 / roadmap M8) — autodb owns
+-- connection storage and encryption on its own backend now.
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 
 local fail_count = 0
@@ -2316,324 +2316,11 @@ pcall(vim.cmd, "bwipeout " .. vim.fn.bufnr(tmp_hijack))
 vim.fn.delete(tmp_hijack)
 
 -- ───────────────────────── 23. dbase file/conn management ─────────────────────────
--- Exercises lua/auto-finder/sections/_dbase_files.lua: filesystem-backed
+-- Exercises the files section's durable state: filesystem-backed
 -- connection-file CRUD, pinned-active swap semantics, and admin REPL
 -- dispatch routing for the new `dbase` verb. dbee is NOT required —
 -- _reload_dbee soft-fails when dbee isn't loaded, and the durable
 -- state-of-truth lives in plain JSON files we read back directly.
-print("\n[23] dbase file/conn management")
-
--- XDG_STATE_HOME was overridden at the top of the driver, so
--- stdpath("state") points into our isolated tmpdir. Clean any
--- artifacts from earlier test sections that may have touched it
--- so [23a] sees a pristine dir.
-local _dbase_state_dir = vim.fn.stdpath("state") .. "/auto-finder/dbase"
-vim.fn.delete(_dbase_state_dir, "rf")
-
-local files = require("auto-finder.sections._dbase_files")
-
--- [23a] state dir is created on first access; _active.json is
--- materialized as an empty JSON array.
-ok("state_dir created on first call",
-  vim.fn.isdirectory(files.state_dir()) == 1,
-  "expected " .. _dbase_state_dir)
-local active_p = files.active_path()
-ok("active_path created _active.json on first call",
-  vim.fn.filereadable(active_p) == 1, "expected file at " .. active_p)
-ok("_active.json starts as a JSON array",
-  (function()
-    local f = io.open(active_p, "r")
-    if not f then return false end
-    local c = f:read("*a") or ""
-    f:close()
-    return c:match("^%s*%[%s*%]%s*$") ~= nil
-  end)(), "expected '[]'")
-
--- [23b] new / list round-trip. `.json` is auto-appended; the
--- pinned _active.json is excluded from `list()`.
-local _, new_err = files.new("work")
-ok("dbase new 'work' creates work.json", new_err == nil, new_err)
-local _, new_err2 = files.new("personal.json")
-ok("dbase new 'personal.json' tolerates explicit .json suffix",
-  new_err2 == nil, new_err2)
-local listed = files.list()
-local has_work, has_personal, has_active = false, false, false
-for _, n in ipairs(listed) do
-  if n == "work" then has_work = true end
-  if n == "personal" then has_personal = true end
-  if n == "_active" then has_active = true end
-end
-ok("list() contains 'work'", has_work)
-ok("list() contains 'personal'", has_personal)
-ok("list() excludes the pinned _active.json", not has_active)
-
--- [23c] `new` rejects duplicates so an accidental re-create doesn't
--- clobber a populated file.
-local _, dup_err = files.new("work")
-ok("dbase new rejects duplicate name",
-  dup_err ~= nil and dup_err:match("already exists") ~= nil,
-  tostring(dup_err))
-
--- [23d] normalize_name rejects path separators (security: don't let
--- `dbase new ../etc/passwd` escape the state dir).
-local _, traverse_err = files.new("../escape")
-ok("dbase new rejects path separators",
-  traverse_err ~= nil and traverse_err:match("path separators") ~= nil,
-  tostring(traverse_err))
-
--- [23e] load swaps _active.json content + persists current().
--- Pre-populate work.json with a real connection so the swap is
--- observable.
-do
-  local p = files.state_dir() .. "/work.json"
-  local f = assert(io.open(p, "w+"))
-  f:write('[{"name":"local-pg","type":"postgres","url":"postgres://u:p@h/db"}]')
-  f:close()
-end
-local loaded, load_err = files.load("work")
-ok("dbase load 'work' returns the basename",
-  loaded == "work.json", "got " .. tostring(loaded))
-ok("dbase load reports no error", load_err == nil, load_err)
-ok("current() == 'work' after load", files.current() == "work")
-local active_conns = files.connections()
-ok("connections() returns work.json contents",
-  #active_conns == 1 and active_conns[1].name == "local-pg",
-  "got " .. vim.inspect(active_conns))
-
--- [23f] conn add appends to active + mirrors back into the named
--- file so the change is durable across future loads.
-local add_ok, add_err = files.conn_add({
-  name = "prod-pg", type = "postgres",
-  url = "postgres://ro:x@prod/db",
-})
-ok("conn_add returns true", add_ok, add_err)
-local after_add = files.connections()
-ok("active file now has 2 connections", #after_add == 2,
-  "got " .. tostring(#after_add))
-do
-  local f = assert(io.open(files.state_dir() .. "/work.json", "r"))
-  local c = f:read("*a"); f:close()
-  ok("conn_add mirrored into work.json",
-    c:find("prod%-pg", 1, false) ~= nil, "work.json: " .. c)
-end
-
--- [23g] conn add rejects duplicate name.
-local _, dup_conn_err = files.conn_add({
-  name = "prod-pg", type = "postgres", url = "postgres://u:p@h/db",
-})
-ok("conn_add rejects duplicate name",
-  dup_conn_err ~= nil and dup_conn_err:match("already exists") ~= nil,
-  tostring(dup_conn_err))
-
--- [23h] conn add validates required fields.
-local _, no_url_err = files.conn_add({ name = "missing-url", type = "postgres" })
-ok("conn_add requires url",
-  no_url_err ~= nil and no_url_err:match("url") ~= nil,
-  tostring(no_url_err))
-
--- [23i] conn rm removes by name from active + mirror.
-local rm_ok, rm_err = files.conn_remove("prod-pg")
-ok("conn_remove returns true", rm_ok, rm_err)
-local after_rm = files.connections()
-ok("active file is back to 1 connection after rm",
-  #after_rm == 1, "got " .. tostring(#after_rm))
-local _, rm_miss_err = files.conn_remove("does-not-exist")
-ok("conn_remove rejects unknown name",
-  rm_miss_err ~= nil and rm_miss_err:match("no such") ~= nil,
-  tostring(rm_miss_err))
-
--- [23j] load can swap between files; _active.json reflects the new
--- file's contents and previous-file connections drop from the
--- drawer's view.
-do
-  local p = files.state_dir() .. "/personal.json"
-  local f = assert(io.open(p, "w+"))
-  f:write('[{"name":"home-sqlite","type":"sqlite","url":"/tmp/home.db"}]')
-  f:close()
-end
-local _, swap_err = files.load("personal")
-ok("load 'personal' succeeds", swap_err == nil, swap_err)
-ok("current() == 'personal' after swap", files.current() == "personal")
-local swapped = files.connections()
-ok("active connections came from personal.json",
-  #swapped == 1 and swapped[1].name == "home-sqlite",
-  "got " .. vim.inspect(swapped))
-
--- [23k] remove() of the active file clears active marker + resets
--- _active.json to empty so the drawer doesn't keep stale entries.
-local rm_active_ok, rm_active_err = files.remove("personal")
-ok("remove() of active file succeeds", rm_active_ok, rm_active_err)
-ok("current() is nil after removing the active file",
-  files.current() == nil)
-ok("_active.json reset to empty after removing active",
-  #files.connections() == 0)
-
--- [23l] admin REPL dispatch routes the new verb without error.
--- We're not asserting the emit() output text — that's UX surface,
--- not contract. We assert that dispatch doesn't raise and that
--- side-effects on the filesystem match.
-local admin = require("auto-finder.panel.admin")
-admin.get_or_create_buffer()  -- materialize the prompt buffer
--- new via REPL
-admin.dispatch("dbase new repl-created")
-ok("`dbase new repl-created` produced repl-created.json on disk",
-  vim.fn.filereadable(files.state_dir() .. "/repl-created.json") == 1)
--- ls via REPL — just exercise the code path.
-local ls_ok = pcall(admin.dispatch, "dbase ls")
-ok("`dbase ls` dispatches without raising", ls_ok)
--- rm via REPL
-admin.dispatch("dbase rm repl-created")
-ok("`dbase rm repl-created` removed the file",
-  vim.fn.filereadable(files.state_dir() .. "/repl-created.json") == 0)
--- invalid subcommand emits an error line but does NOT raise.
-local bad_ok = pcall(admin.dispatch, "dbase bogus")
-ok("`dbase bogus` is rejected without raising", bad_ok)
-
--- [23m] completion candidates include `dbase` at the top level + the
--- expected sub-verbs.
-local _, top_cands = admin._complete_at("", 0)
-local has_dbase = false
-for _, c in ipairs(top_cands) do
-  if c == "dbase" then has_dbase = true; break end
-end
-ok("completion at root includes 'dbase'", has_dbase,
-  "got " .. table.concat(top_cands, ", "))
-local _, dbase_cands = admin._complete_at("dbase ", 6)
-local sub_set = {}
-for _, c in ipairs(dbase_cands) do sub_set[c] = true end
-ok("completion after 'dbase ' includes new/ls/rm/load/conn",
-  sub_set.new and sub_set.ls and sub_set.rm and sub_set.load and sub_set.conn,
-  "got " .. table.concat(dbase_cands, ", "))
-local _, conn_cands = admin._complete_at("dbase conn ", 11)
-local conn_set = {}
-for _, c in ipairs(conn_cands) do conn_set[c] = true end
-ok("completion after 'dbase conn ' includes add/ls/rm",
-  conn_set.add and conn_set.ls and conn_set.rm,
-  "got " .. table.concat(conn_cands, ", "))
-
--- [23n] conn_add stamps a dbee-compatible id on the spec so
--- `Handler:source_reload` doesn't reject it. The user reported this
--- as a `connection without an id: { name: "lm-unit-test", ... }`
--- runtime error in v0.2.18.
-do
-  -- Fresh active file so we control its contents.
-  files._write_json(files.active_path(), {})
-  local add_ok2, add_err2 = files.conn_add({
-    name = "id-check", type = "postgres",
-    url = "postgres://u:p@h/db",
-  })
-  ok("conn_add succeeded", add_ok2, add_err2)
-  local got = files.connections()
-  ok("conn_add stamped a non-empty id on the new spec",
-    type(got[1]) == "table"
-      and type(got[1].id) == "string" and got[1].id ~= "",
-    "got " .. vim.inspect(got))
-  ok("stamped id matches dbee's file_source_/ prefix",
-    type(got[1].id) == "string"
-      and got[1].id:match("^file_source_/") ~= nil,
-    "got id=" .. tostring(got[1] and got[1].id))
-end
-
--- [23o] legacy id-less entries get healed when `load` swaps them
--- into _active.json. Simulates a v0.2.18 file on disk.
-do
-  local legacy_path = files.state_dir() .. "/legacy.json"
-  local f = assert(io.open(legacy_path, "w+"))
-  f:write('[{"name":"legacy-pg","type":"postgres","url":"postgres://u:p@h/db"}]')
-  f:close()
-  local _, load_err2 = files.load("legacy")
-  ok("load 'legacy' succeeds", load_err2 == nil, load_err2)
-  local active = files.connections()
-  ok("load healed id-less legacy entry in _active.json",
-    type(active[1]) == "table"
-      and type(active[1].id) == "string" and active[1].id ~= "",
-    "got " .. vim.inspect(active))
-  -- Heal was persisted back to the named file too. vim's
-  -- json_encode emits `"id": "..."` with a space after the colon,
-  -- so we match against the value pattern, not the whole key+value.
-  local f2 = assert(io.open(legacy_path, "r"))
-  local body = f2:read("*a"); f2:close()
-  ok("heal persisted back into legacy.json",
-    body:find('"file_source_/', 1, true) ~= nil,
-    "legacy.json body: " .. body)
-end
-
--- [23p] _ensure_ids is idempotent: a second pass over an already-
--- healed list reports no changes.
-do
-  local healed = { { name = "a", type = "postgres", url = "u",
-                     id = "file_source_/abcdefghij" } }
-  local _, changed = files._ensure_ids(healed)
-  ok("ensure_ids reports no change when ids already present", not changed)
-end
-
--- [23q] `dbase conn add` REPL verb starts the wizard rather than
--- popping vim.fn.input(): after dispatching, the wizard module
--- reports active and feeding the three steps drives conn_add to
--- completion. The buffer was created earlier in [23l].
-do
-  local wizard = require("auto-finder.panel.wizard")
-  if wizard.is_active() then wizard.cancel() end  -- defensive
-  -- Ensure there's an active file so the new connection persists.
-  files._write_json(files.active_path(), {})
-  admin.dispatch("dbase conn add")
-  ok("dbase conn add activated the wizard", wizard.is_active())
-  wizard.feed("smoke-conn")  -- step 1: name
-  wizard.feed("postgres")    -- step 2: type
-  wizard.feed("postgres://u:p@h/db")  -- step 3: url
-  ok("wizard completed (no longer active)", not wizard.is_active())
-  local got2 = files.connections()
-  local found = false
-  for _, c in ipairs(got2) do
-    if c.name == "smoke-conn" then
-      found = (type(c.id) == "string" and c.id ~= "")
-      break
-    end
-  end
-  ok("wizard's conn_add wrote the new connection with an id", found,
-    "got " .. vim.inspect(got2))
-end
-
--- [23r] DBASE_TYPES exposes every dbee-supported alias the REPL
--- offers (no trailing "..." — the user complained about that in
--- v0.2.18). Verify the list shape and that postgres is in it.
-do
-  ok("DBASE_TYPES is a non-empty list",
-    type(files.TYPES) == "table" and #files.TYPES >= 10,
-    "got " .. tostring(#(files.TYPES or {})))
-  local has_pg, has_mongo, has_sqlserver = false, false, false
-  for _, t in ipairs(files.TYPES) do
-    if t == "postgres" then has_pg = true end
-    if t == "mongodb" then has_mongo = true end
-    if t == "sqlserver" then has_sqlserver = true end
-  end
-  ok("TYPES covers postgres + mongodb + sqlserver",
-    has_pg and has_mongo and has_sqlserver,
-    "got " .. table.concat(files.TYPES or {}, ", "))
-end
-
--- ───────────────────────── 24. (REMOVED — flaky, see flaky-test catalog) ──
--- Section [24] (show-race regression test) was removed during the
--- ADR 0026 structural refactor. The production guard at
--- `lua/auto-finder/neotree/command/init.lua` works correctly; the
--- test's stub plumbing was unreachable because earlier sections
--- leave filesystem-source state mounted, so `do_show_or_focus`
--- short-circuits past the stubbed `manager.navigate`. Captured in
--- `tests/auto-finder-flaky.test.md` with the user story and a
--- reimplementation plan. Re-add when Phase 7's view mount contract
--- lands (the placeholder/generation guard re-frames the test
--- against a stable state-reset boundary).
-
--- ───────────────────────── 25. deferred scan.started load toast ─────────────
---
--- v0.2.22: the "mapping …" toast is now deferred behind
--- `fs_scan.MAPPING_TOAST_MS`. Fast scans complete before the timer
--- fires and stay silent; slow scans surface a toast.
---
--- Tested by stubbing `af_log.notifyIf` to count "scan.started"
--- fires, then driving fs_scan with the threshold flipped between
--- "huge" (toast won't fire in test duration) and "zero" (toast
--- fires immediately).
 print("\n[25] v0.2.22 — deferred scan.started load toast")
 section(function()
   local fs_scan = require("auto-finder.neotree.sources.filesystem.lib.fs_scan")
@@ -3172,10 +2859,6 @@ local pairs_to_check = {
   -- shared helper relocated out of sections/ entirely; facade keeps
   -- the old require path valid.
   { sec = "auto-finder.sections._neotree",      view = "auto-finder.shared.neotree" },
-  { sec = "auto-finder.sections._dbase_files",  view = "auto-finder.views.dbase.files" },
-  { sec = "auto-finder.sections._dbase_layout", view = "auto-finder.views.dbase.layout" },
-  { sec = "auto-finder.sections._dbase_events", view = "auto-finder.views.dbase.events" },
-  { sec = "auto-finder.sections._dbase_setup",  view = "auto-finder.views.dbase.setup" },
 }
 for _, pair in ipairs(pairs_to_check) do
   local sec_mod = require(pair.sec)
@@ -4309,162 +3992,47 @@ do
   end
 end
 
--- ── A16: dbase placeholder migration ──
--- dbase isn't built via build_section. Its bespoke get_buffer
--- + on_focus carry the same placeholder + generation pattern.
--- Cold-focus dbase, assert get_buffer returns a placeholder
--- (the real dbee mount happens behind vim.schedule).
+-- ── A16: dbase mounts synchronously; no-backend path is explained ──
+-- Rewritten for v0.4.0. This used to assert a `shared.loading` placeholder on
+-- cold mount, because nvim-dbee mounted behind `vim.schedule` and the section
+-- had to show something first. dbee is gone and autodb's `tree.get_buffer`
+-- returns a real buffer synchronously, so there is no cold placeholder and no
+-- generation counter to match — asserting the old contract would now be
+-- asserting removed machinery.
+--
+-- autodb is not on the headless rtp, so this exercises the no-backend path:
+-- a self-describing placeholder that names AUTODB (never dbee, which AutoVim
+-- deliberately removed).
 do
   local dbase = require("auto-finder.views.dbase")
   dbase._bufnr = nil
   dbase._owned_bufs = {}
-  -- get_buffer should return a placeholder, not the dbee drawer.
+
   local b = dbase.get_buffer(0)
-  ok("A16: dbase view.get_buffer returns a placeholder on cold mount",
-    b ~= nil and loading.is_placeholder(b) == true,
-    "got bufnr=" .. tostring(b) .. " is_placeholder=" ..
-    tostring(loading.is_placeholder(b)))
-  ok("A16: dbase placeholder is tagged view='dbase'",
-    loading.matches(b, "dbase", dbase._generation) == true)
+  ok("A16: dbase.get_buffer returns a valid buffer with no backend installed",
+    type(b) == "number" and vim.api.nvim_buf_is_valid(b), tostring(b))
+  ok("A16: the no-backend buffer is tagged view='dbase'",
+    vim.b[b].auto_finder_view == "dbase", tostring(vim.b[b].auto_finder_view))
+  ok("A16: it is the dbase placeholder, by name",
+    vim.api.nvim_buf_get_name(b):find("auto-finder-dbase://placeholder", 1, true) ~= nil,
+    vim.api.nvim_buf_get_name(b))
 
-  -- on_focus should not crash even if dbee isn't on the rtp.
-  -- (The deferred callback exits with a placeholder_buffer or
-  -- the real drawer; either is acceptable for A16's "doesn't
-  -- crash + doesn't duplicate" contract.)
-  local on_focus_ok = pcall(dbase.on_focus, 0, b)
-  ok("A16: dbase on_focus is safe even without a real panel winid",
-    on_focus_ok)
-  -- Settle any scheduled callbacks; cleanup the placeholder so
-  -- the smoke doesn't leave a wipeable buffer behind.
-  vim.wait(50)
-  pcall(vim.api.nvim_buf_delete, b, { force = true })
+  local text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("A16: it points the user at autodb", text:find("autodb", 1, true) ~= nil, text)
+  -- The regression guard that matters post-cutover: never send anyone to dbee.
+  ok("A16: *** it does NOT mention dbee, which AutoVim removed on purpose ***",
+    text:lower():find("dbee", 1, true) == nil, text)
+
+  ok("A16: dbase.on_focus is safe with no backend and no real panel winid",
+    pcall(dbase.on_focus, 0, b))
+
+  dbase.on_close()
+  ok("A16: on_close disposes the buffer it owned",
+    vim.api.nvim_buf_is_valid(b) == false)
   dbase._bufnr = nil
   dbase._owned_bufs = {}
 end
 
--- ── A16b: dbase post-_notify_remount registry repair (ADR-0033) ──
--- A16 above stops at get_buffer (the cold placeholder). This block
--- drives the *deferred* mount to its dbee-unavailable terminal
--- branch (views/dbase/init.lua:259-267) and asserts the three
--- side-effects `_notify_remount` → `Registry:section_did_remount`
--- repairs — the regression the production bug shipped without
--- ([[2026-05-20-auto-finder-dbase-winbar-remount-bug-analysis]]):
---   1. `_bufs[dbase]` reseats to the real (post-swap) buffer,
---   2. buffer-local `0..9` / `q` rebind on that real buffer,
---   3. the winbar refreshes with dbase active.
--- dbee is NOT on the headless rtp, so we force the unavailable
--- branch by monkey-patching `setup_mod.ensure_setup` → false. The
--- registry side-effects are identical whether `real_bufnr` is the
--- dbee drawer or the fallback placeholder (ADR-0033 §"Headless
--- feasibility"). Restore is non-negotiable: the patch + the
--- temporary section-list mutation are undone in an xpcall finally
--- arm so the rest of the suite is unaffected (ADR-0033 §Decision.2).
-do
-  local dbase     = require("auto-finder.views.dbase")
-  local setup_mod = require("auto-finder.views.dbase.setup")
-
-  -- Window-independent buffer-local keymap probe (the panel may not
-  -- be the current window, and section_did_remount does not swap it).
-  local function has_map(bufnr, lhs, needle)
-    if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return false end
-    for _, m in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
-      if m.lhs == lhs and (m.desc or ""):find(needle, 1, true) then
-        return true
-      end
-    end
-    return false
-  end
-
-  -- Snapshot the LIVE section-name list. The field _rebuild_section_
-  -- registry consumes is `state.config.sections` (a string[]), not
-  -- `state.sections`; mirror the restore pattern used elsewhere in
-  -- this suite (vim.deepcopy + rebuild on the finally arm).
-  local prior = vim.deepcopy(af.state.config.sections)
-  setup_mod.reset()
-  local orig_ensure = setup_mod.ensure_setup
-
-  local function run()
-    -- Force the dbee-unavailable terminal branch of on_focus.
-    setup_mod.ensure_setup = function()
-      return false, "dbee unavailable: forced for smoke"
-    end
-
-    -- Rebuild with dbase enabled, focusing config (0) so the next
-    -- focus(dbase) is a genuine cold mount.
-    af._rebuild_section_registry({ "config", "files", "dbase" },
-      { focus_after = 0 })
-
-    local dbnum = dbase.number
-    ok("A16b: dbase registered with a section number",
-      type(dbnum) == "number", "number=" .. tostring(dbnum))
-
-    -- Cold-focus dbase; let the vim.schedule-deferred mount run.
-    af.focus(dbnum)
-    vim.wait(200)
-
-    -- (1) THE load-bearing production-bug assertion: the registry
-    --     cache points at the real (post-remount) buffer, not the
-    --     discarded shared.loading placeholder.
-    ok("A16b: _bufs[dbase] reseated to dbase._bufnr after remount",
-      af._registry._bufs[dbnum] == dbase._bufnr,
-      "_bufs=" .. tostring(af._registry._bufs[dbnum]) ..
-      " _bufnr=" .. tostring(dbase._bufnr))
-
-    -- (2) buffer-local section-hop (0) + close (q) on the real buffer
-    ok("A16b: 0 (section-hop) bound buffer-locally on the real buffer",
-      has_map(dbase._bufnr, "0", "focus section"))
-    ok("A16b: q (close panel) bound buffer-locally on the real buffer",
-      has_map(dbase._bufnr, "q", "close panel"))
-
-    -- (3) winbar refreshed with dbase as the active marker
-    local wb = vim.api.nvim_get_option_value("winbar",
-      { win = af.state.panel_winid })
-    ok("A16b: winbar shows dbase as the active section after remount",
-      type(wb) == "string"
-        and wb:find("AutoCoreSectionActive#%[" .. dbnum) ~= nil,
-      "winbar=" .. tostring(wb))
-
-    -- (4) the real buffer is the static dbee-unavailable placeholder,
-    --     distinct from the shared.loading cold placeholder.
-    ok("A16b: real buffer is the dbee-unavailable placeholder",
-      vim.api.nvim_buf_is_valid(dbase._bufnr)
-        and vim.api.nvim_buf_get_name(dbase._bufnr)
-          :find("auto-finder-dbase://placeholder", 1, true) ~= nil)
-    ok("A16b: real buffer is NOT a shared.loading cold placeholder",
-      loading.is_placeholder(dbase._bufnr) == false)
-
-    -- (5) re-mount idempotency. The dbee-unavailable fallback
-    --     placeholder is `bufhidden=wipe` (views/dbase/init.lua), so
-    --     focusing away wipes it and the return is a fresh cold mount
-    --     — a SECOND trip through _notify_remount. (The real dbee
-    --     drawer is persistent, so it would warm-reuse; this branch
-    --     can only exercise the fallback.) Assert the hook stays
-    --     idempotent: the registry cache + keymaps are re-repaired and
-    --     stay consistent with the view's current buffer.
-    af.focus(0)
-    vim.wait(50)
-    af.focus(dbnum)
-    vim.wait(200)
-    ok("A16b: re-focus keeps _bufs[dbase] consistent with dbase._bufnr",
-      af._registry._bufs[dbnum] == dbase._bufnr
-        and vim.api.nvim_buf_is_valid(dbase._bufnr),
-      "_bufs=" .. tostring(af._registry._bufs[dbnum]) ..
-      " _bufnr=" .. tostring(dbase._bufnr))
-    ok("A16b: re-focus keeps q bound on the current dbase buffer",
-      has_map(dbase._bufnr, "q", "close panel"))
-  end
-
-  -- Finally arm — runs even if an assertion path errors, so the
-  -- patch + section list never leak into later smoke sections.
-  local okrun, errrun = xpcall(run, debug.traceback)
-  setup_mod.ensure_setup = orig_ensure
-  setup_mod.reset()
-  dbase._bufnr = nil
-  dbase._owned_bufs = {}
-  af._rebuild_section_registry(prior, { focus_after = 0 })
-  ok("A16b: harness restored prior section registry without error",
-    okrun, okrun and "" or tostring(errrun))
-end
 
 -- Restore: focus the config view so later sections don't fight
 -- the panel state created here.
@@ -6154,23 +5722,6 @@ section(function()
       "files_sec=" .. tostring(files_sec ~= nil))
   end
 
-  -- 43e. Batch B: dbase connection-config writes are atomic — valid
-  -- JSON on disk, no temp strays.
-  local dbase_files = require("auto-finder.views.dbase.files")
-  local ddir43 = vim.fn.tempname() .. "_p43-dbase"
-  local dpath43 = ddir43 .. "/persistence.json"
-  local w_ok, w_err = dbase_files._write_json(dpath43,
-    { { name = "p43", url = "sqlite://tmp" } })
-  ok("43e: _write_json succeeds (mkdir included)", w_ok == true, tostring(w_err))
-  local fh43 = io.open(dpath43, "r")
-  local raw43 = fh43 and fh43:read("*a") or ""
-  if fh43 then fh43:close() end
-  local dec_ok43, dec43 = pcall(vim.fn.json_decode, raw43)
-  ok("43e: persisted JSON round-trips",
-    dec_ok43 and type(dec43) == "table" and dec43[1] and dec43[1].name == "p43",
-    raw43:sub(1, 60))
-  local strays43 = vim.fn.glob(ddir43 .. "/.tmp-*", false, true)
-  ok("43e: no atomic-write temp strays", #strays43 == 0, vim.inspect(strays43))
 end)
 
 -- ─────────── [44] ADR-0040 Batches C+D ───────────
@@ -6558,21 +6109,12 @@ section(function()
   tree._reset_for_tests()
 end)
 
-print("\n[50] ADR-0058 M7 — dbase slot delegates by availability")
-section(function()
-  local dbase = require("auto-finder.views.dbase")
-  ok("p50: the slot still exposes the view contract",
-    type(dbase.get_buffer) == "function" and type(dbase.on_focus) == "function"
-    and type(dbase.on_close) == "function")
-
-  -- With autodb absent the dbee path is untouched: the delegation is
-  -- by availability, so a developer mid-session keeps a working panel
-  -- and the change is reversible by uninstalling one plugin.
-  local has_autodb = pcall(require, "autodb.session")
-  ok("p50: autodb is absent in this environment, so dbee remains in charge",
-    has_autodb == false, "autodb.session present = " .. tostring(has_autodb))
-end)
-
+-- [50] "ADR-0058 M7 — dbase slot delegates by availability" was removed here in
+-- v0.4.0. It asserted that with autodb absent "dbee remains in charge" — the
+-- availability delegation between two backends. dbee is retired (ADR-0063 /
+-- roadmap M8), so there is one backend and nothing to delegate between. The
+-- surviving no-backend behaviour is pinned by §[35] A16, and the view contract
+-- it also checked is enforced by the section registry itself.
 
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))

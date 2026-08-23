@@ -36,8 +36,6 @@ Last verified: **2026-08-23**, `tests/run-all.sh` → **OK**, 9 suites,
 | smoke | `smoke.lua` | 672 | the whole panel/section/view/state surface — setup, width/pin, winfixbuf, section switching, store+namespace migration, buffers/repos/marks slots, live-refresh wiring, log wrapper, follow-mode, ADR-0026 core refactor (phases 1-9), views.todos + automation panel rendering, ADR-0040 restore/async-git, ADR-0059 files:changed classification, views._config_section, views.dbase.tree, dbase slot delegation | live |
 | smoke_automation | `smoke-automation.lua` | 29 | ADR-0035 [41] automation diagnostics (malformed-cron/execute diagnostics, bash-disabled indicator) + [42] `s`-modal scaffold on `automated` promotion | live (isolated — see below) |
 | smoke_adr0044 | `smoke-adr0044.lua` | 6 | ADR-0044 [45] `worktree:switched` re-anchors the panel tree to the new cwd WITHOUT displacing a non-panel editor split | live (isolated) |
-| dbase_spike | `dbase_spike.lua` | 101 | dbee window-contract spike — availability probe, drawer mount/winfixbuf survival, config forwarding, log bridge, event bridge, companion-pane layout (editor/result/call_log), keymap audit, cross-panel exclusion | live |
-| encrypted_vault | `encrypted_vault_smoke.lua` | 54 | crypto provider + encrypted source CRUD (age/gpg), passphrase flow | live |
 | adr0048 | `smoke-adr0048.lua` | 146 | ADR-0048 Phase 3 [46] views.tests (auto-run discovery consumer), [47] views.debug (entry points/sessions/breakpoints + secret masking), [48] r5 Env section | live (isolated — canonical home for [46]/[47]) |
 | adr0059-e2e | `adr0059-e2e.lua` | 5 | ADR-0059 real `fs.watch` → translator → mounted panel, counting actual root scans (the only suite over the REAL pipeline; smoke [50] stubs the tree) | live |
 | adr0060-repos | `adr0060-repos-render.lua` | 23 | ADR-0060 repos panel renders worktree.nvim's work-in-flight tree; git shed from the files panel | live |
@@ -106,7 +104,6 @@ and non-monotonic in source order; they are labels, not an ordering.)
 | `[47]` views.debug | smoke.lua (removed) → `smoke-adr0048.lua` | passed in smoke but a sync-hazard duplicate | **CONSOLIDATE** with [46] | adr0048 146/0 |
 | `[49]` dbase.tree toggle | smoke.lua (reimplemented in place) | 3 fails | **REIMPLEMENT** — `_toggle` now gates on `row.expandable` (a flag on chevron rows, tree.lua ~L230), not `kind`; a nil row returns `false` not `nil`. Invariant unchanged; row shape moved | smoke 672/0 |
 | `smoke-adr0048` p47 `d`-delete (×10) | `smoke-adr0048.lua` (pruned) | 10 fails | **PRUNE** — the breakpoint-delete surface was deliberately removed in `73b2293` ("views.debug: … drop delete surface"); `d` now means DEBUG. Rendering assertions (typed rows, file/section headers, orphaned marker) kept | commit `73b2293`; adr0048 146/0 |
-| `dbase_spike` `[6b.9]` | `dbase_spike.lua` (reimplemented) | 1 fail | **REIMPLEMENT** — asserted panel `ft ~ ^dbee`, but post-ADR-0058/0060 the dbase slot hosts the autodb explorer (`ft=auto-finder`, `auto_finder_view=dbase`) with dbee as fallback. Rewrote as a backend-agnostic "companion mounts did not clobber the panel buffer" pin | dbase_spike 101/0 |
 
 **No `dark`, `stale`, or `pty-required` sections remain.**
 
@@ -144,3 +141,31 @@ That is the shape this turn settled on. smoke.lua keeps everything that
 runs deterministically to completion (672 assertions) and reaches its
 summary cleanly; the standalones each own one fragile concern and are
 all wired into `run-all.sh`.
+
+
+## Retired coverage — nvim-dbee removal (v0.4.0)
+
+`dbase_spike.lua` (101) and `encrypted_vault_smoke.lua` (54) were **deleted**,
+along with `smoke.lua` §[23] (47), §[35] A16b (~13), the second §[50] (2),
+§[43] 43e (3), and `adr0060-r1-view-lifecycle.lua` §[4]/§[6] (15). Roughly 235
+assertions in total.
+
+They covered nvim-dbee: the drawer window contract, `dbee.setup` ownership and
+config forwarding, companion editor/result/call_log panes, the plaintext and
+encrypted (age/gpg) connection stores, and the autodb-vs-dbee ownership latch on
+the dbase slot. dbee was retired in AutoVim v0.4.0
+([[0063-autovim-single-branch-runtime-platform-detection]] / autodb roadmap M8),
+and every module under test went with it.
+
+**This is a deliberate reduction, not a regression.** The behaviour that
+survived is still pinned:
+
+- dbase's no-backend path — `smoke.lua` §[35] A16, which also asserts the
+  placeholder never mentions dbee.
+- the autodb explorer itself — `smoke.lua` §[49] (16 assertions).
+- the ownership latch — `adr0060-r1-view-lifecycle.lua` §[1]/§[2]/§[3]/§[5],
+  via the **repos** slot, which still has two implementations.
+
+Connection storage, encryption and users are now autodb's, tested in that repo.
+
+Totals after removal: **881** across 8 suites (was 1113 across 10).

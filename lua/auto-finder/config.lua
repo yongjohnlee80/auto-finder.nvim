@@ -116,37 +116,17 @@ M.defaults = {
     -- mid-session.
     follow = false,
   },
-  -- Per-section opts for the `dbase` section (auto-finder.nvim's
-  -- nvim-dbee wrapper). Forwarded to `auto-finder.sections.dbase`
-  -- via `section.configure(opts)` on setup so the consumer doesn't
-  -- need to live-import the section module.
+  -- Per-section opts for the `dbase` section, forwarded to
+  -- `auto-finder.sections.dbase` via `section.configure(opts)` on setup so the
+  -- consumer doesn't need to live-import the section module.
   --
-  -- `sources` is a list of dbee Source instances (see
-  -- `nvim-dbee/lua/dbee/sources.lua` — MemorySource / EnvSource /
-  -- FileSource). When nil or empty, dbase falls back to a single
-  -- empty MemorySource so the drawer renders against a benign baseline.
-  --
-  -- Example:
-  --   local dbee_sources = require("dbee.sources")
-  --   {
-  --     dbase = {
-  --       sources = {
-  --         dbee_sources.FileSource:new(vim.fn.stdpath("config")
-  --           .. "/auto-finder/dbase/connections.json"),
-  --         dbee_sources.EnvSource:new("DBASE_CONNECTIONS"),
-  --       },
-  --     },
-  --   }
-  --
-  -- `extra` is a passthrough table merged into `dbee.setup`'s config
-  -- (under keys not already set by `sources`) — escape hatch for the
-  -- per-tile dbee options (`drawer = {...}`, `editor = {...}` etc).
-  -- Use sparingly; we may surface specific knobs at the top level
-  -- once usage patterns settle.
-  dbase = {
-    sources = nil,
-    extra = nil,
-  },
+  -- Empty since v0.4.0. This used to carry dbee's `sources` (a list of dbee
+  -- Source instances) and an `extra` passthrough merged into `dbee.setup`.
+  -- nvim-dbee was retired (ADR-0063 / roadmap M8) and autodb owns connection
+  -- storage, users and encryption on its own backend, so there is nothing left
+  -- to forward. Kept as a table rather than deleted so the registry's
+  -- config-forwarding path and any consumer passing `dbase = {}` keep working.
+  dbase = {},
   hijack_directories = true,
   -- Forwarded as-is to `require("auto-finder.neotree").setup()`
   -- before any section mounts. The forked neo-tree no longer needs

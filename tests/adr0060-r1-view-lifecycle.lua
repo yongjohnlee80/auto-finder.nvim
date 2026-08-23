@@ -234,51 +234,22 @@ end)()
   local _ = held
 end)()
 
--- ── [4] the dbase slot carries the SAME latch (r1 MF6, already shipped) ──
--- The identical per-hook-probe structure went out in v0.3.4 and is latent only
--- because autodb.session happens to be installed, so that probe is true from
--- the first call and never transitions. Pinned here so it cannot rot back, and
--- so the mechanism stays shared rather than becoming a third copy.
-;(function()
-  local dbase = require("auto-finder.views.dbase")
-  ok("[4] dbase exposes the same latch type as repos",
-    type(dbase._latch_for_tests) == "table", type(dbase._latch_for_tests))
-  ok("[4] and it is a DISTINCT instance from the repos slot's",
-    dbase._latch_for_tests ~= require("auto-finder.views.repos")._latch_for_tests)
-
-  dbase._latch_for_tests:reset()
-  dbase._latch_for_tests:claim(7001, "dbee")
-  ok("[4] a dbee-owned buffer reports dbee", dbase._latch_for_tests:owner(7001) == "dbee")
-  dbase._latch_for_tests:claim(7002, "autodb")
-  ok("[4] an autodb-owned buffer reports autodb",
-    dbase._latch_for_tests:owner(7002) == "autodb")
-  dbase._latch_for_tests:reset()
-
-  -- Neither the latch nor the key constants may leak as globals — the
-  -- local-vs-global scoping trap that has bitten this project before.
-  ok("[4] no `_latch` global leaked from dbase", rawget(_G, "_latch") == nil)
-  ok("[4] no key-constant globals leaked",
-    rawget(_G, "DBEE") == nil and rawget(_G, "AUTODB") == nil
-      and rawget(_G, "NEW") == nil and rawget(_G, "LEGACY") == nil)
-
-  -- prune() must drop dead buffers so a long session cannot grow the map, and
-  -- a recycled bufnr cannot inherit a stale owner.
-  local real = vim.api.nvim_create_buf(false, true)
-  dbase._latch_for_tests:claim(real, "dbee")
-  vim.api.nvim_buf_delete(real, { force = true })
-  dbase._latch_for_tests:prune()
-  ok("[4] prune() forgets buffers nvim has destroyed",
-    dbase._latch_for_tests:owner(real) == nil)
-  -- CONTROL: prune must not drop a LIVE claim.
-  local alive = vim.api.nvim_create_buf(false, true)
-  dbase._latch_for_tests:claim(alive, "dbee")
-  dbase._latch_for_tests:prune()
-  ok("[4] CONTROL — prune() keeps a live claim",
-    dbase._latch_for_tests:owner(alive) == "dbee")
-  vim.api.nvim_buf_delete(alive, { force = true })
-  dbase._latch_for_tests:reset()
-end)()
-
+-- ── [4]/[6] REMOVED — dbase no longer has two implementations ──
+--
+-- These sections asserted the ownership latch on the dbase slot: that a
+-- dbee-built buffer could never be handed to autodb once autodb appeared
+-- (r1 MF6), and that dbase's teardown ran UNCHECKED (r2 #3).
+--
+-- nvim-dbee was retired in AutoVim v0.4.0 (ADR-0063 / roadmap M8), so dbase
+-- has exactly one backend and the cross-implementation defect these sections
+-- guarded is not reachable there. They are deleted rather than skipped: a
+-- section that can no longer fail is not coverage, and leaving it green would
+-- misreport the latch as still under test on that slot.
+--
+-- The latch itself is NOT gone and is still covered — the REPOS slot still has
+-- two implementations (worktree.nvim vs the legacy in-plugin path), which
+-- sections [1], [2], [3] and [5] exercise, including the reverse transition.
+-- dbase's surviving no-backend behaviour is pinned by `smoke.lua` §[35] A16.
 -- ── [5] r2: the REVERSE transition must not cross implementations ──
 -- Section [2] covers legacy->new (availability appearing). The inverse was
 -- never covered, and it is broken: `_impl_for` re-probed for a NEW owner and
@@ -364,79 +335,6 @@ end)()
 
   view._probe_for_tests, view._legacy_for_tests, view._unchecked_for_tests = sp, sl, su
   view._latch_for_tests:reset()
-end)()
-
--- ── [6] r2: dbase parity — remount claims, and teardown is unchecked ──
--- Section [4] only exercised the latch DATA STRUCTURE for dbase with
--- fabricated bufnrs; get_buffer/on_focus/on_close were never called. Two real
--- defects hid behind that (r2 #3).
-;(function()
-  local dbase = require("auto-finder.views.dbase")
-
-  ok("[6] dbase exposes an UNCHECKED resolver seam, like repos",
-    type(dbase._unchecked_for_tests) == "function",
-    type(dbase._unchecked_for_tests))
-  ok("[6] dbase exposes its autodb probe as a seam (so this is testable "
-    .. "without intercepting require)",
-    type(dbase._autodb_for_tests) == "function", type(dbase._autodb_for_tests))
-  if type(dbase._unchecked_for_tests) ~= "function" then return end
-
-  local calls = {}
-  local function stub(tag)
-    return {
-      get_buffer = function()
-        calls[#calls + 1] = tag .. ".get_buffer"
-        return vim.api.nvim_create_buf(false, true)
-      end,
-      on_focus = function(_, b) calls[#calls + 1] = tag .. ".on_focus:" .. tostring(b) end,
-      on_close = function() calls[#calls + 1] = tag .. ".on_close" end,
-    }
-  end
-  local autodb = stub("autodb")
-  local sa, sau = dbase._autodb_for_tests, dbase._unchecked_for_tests
-
-  -- A remount replaces the claimed placeholder with the real buffer. That
-  -- replacement was never claimed, so the next focus saw owner=nil and — once
-  -- autodb appeared — routed a dbee buffer to autodb. dbee's own
-  -- `_owned_bufs` guard sits AFTER the autodb branch, so it never protected it.
-  dbase._latch_for_tests:reset()
-  local placeholder = vim.api.nvim_create_buf(false, true)
-  local real = vim.api.nvim_create_buf(false, true)
-  dbase._latch_for_tests:claim(placeholder, "dbee")
-  dbase._notify_remount_for_tests(real, placeholder)
-  ok("[6] *** a remount CLAIMS the replacement buffer ***",
-    dbase._latch_for_tests:owner(real) == "dbee",
-    tostring(dbase._latch_for_tests:owner(real)))
-  ok("[6] and forgets the discarded placeholder",
-    dbase._latch_for_tests:owner(placeholder) == nil)
-
-  -- With the replacement claimed, an autodb lazy-load must NOT capture it.
-  dbase._autodb_for_tests = function() return autodb end
-  calls = {}
-  dbase.on_focus(1000, real)
-  ok("[6] *** a dbee-owned buffer is NOT routed to autodb after it appears ***",
-    not vim.tbl_contains(calls, "autodb.on_focus:" .. tostring(real)), vim.inspect(calls))
-
-  -- Teardown must not be availability-gated: the skipped path disposes
-  -- autodb's TOPIC_* subscriptions and deletes its named buffer, so skipping it
-  -- leaks both — the very MF6/SF1 pair the repos side was fixed for.
-  dbase._latch_for_tests:reset()
-  dbase._autodb_for_tests = function() return autodb end
-  local ab = dbase.get_buffer(1000)
-  ok("[6] mount with autodb available uses autodb",
-    vim.tbl_contains(calls, "autodb.get_buffer") or ab ~= nil, vim.inspect(calls))
-  dbase._autodb_for_tests = function() return nil end   -- availability drops
-  dbase._unchecked_for_tests = function() return autodb end
-  calls = {}
-  dbase.on_close()
-  ok("[6] *** on_close tears autodb down even when availability has dropped ***",
-    vim.tbl_contains(calls, "autodb.on_close"), vim.inspect(calls))
-
-  dbase._autodb_for_tests, dbase._unchecked_for_tests = sa, sau
-  dbase._latch_for_tests:reset()
-  for _, b in ipairs({ placeholder, real }) do
-    pcall(vim.api.nvim_buf_delete, b, { force = true })
-  end
 end)()
 
 -- ── [7] r3 #4: a RETURNED review-load error is surfaced, not swallowed ──
