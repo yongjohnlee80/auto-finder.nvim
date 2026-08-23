@@ -2,7 +2,7 @@
 
 A multi-view side panel for Neovim. One window hosts purpose-built
 **views** — filesystem, open buffers, git worktrees, an
-nvim-dbee drawer, and a prompt-style config REPL — each reachable
+autodb explorer, and a prompt-style config REPL — each reachable
 with a single keystroke.
 
 Built on top of [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
@@ -42,7 +42,7 @@ Five views in the box:
 | 1 | **files** | Filesystem tree (neo-tree filesystem source). Live-refresh on filesystem events; git status decorations from the auto-core git layer. |
 | 2 | **repos** | Auto-discovered git repos × worktrees from [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim). No registry, no manual add — what worktree.nvim sees is what shows up. fs_event watchers refresh on worktree mutations. |
 | 3 | **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. Tracked via Buf* autocmds through the core's buffer cache. |
-| 4 | **dbase** | [`nvim-dbee`](https://github.com/kndndrj/nvim-dbee) drawer mounted inside the panel. Soft dep — renders a placeholder buffer if dbee isn't installed. Connection vaults are at-rest encrypted (via `age` / `gpg`) and managed from the config REPL. |
+| 4 | **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) explorer inside the panel. Soft dep — renders a "no backend" buffer when autodb is absent |
 
 More registrable views ship in the box but aren't in the default
 slot list — add them with `slot add <name>` from the config REPL
@@ -102,7 +102,7 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   `lua/auto-finder/neotree/` (since v0.1.3) and the two will
   collide on the same require path. Disable upstream
   explicitly if you had it installed: `{ "nvim-neo-tree/neo-tree.nvim", enabled = false }`.
-- [`kndndrj/nvim-dbee`](https://github.com/kndndrj/nvim-dbee) —
+- [`yongjohnlee80/autodb`](https://github.com/yongjohnlee80/autodb) —
   soft dep for the **dbase** view. When absent, the view shows
   a placeholder explaining the dependency; the rest of the
   panel is unaffected.
@@ -128,14 +128,8 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
     "MunifTanjim/nui.nvim",               -- bundled neo-tree fork deps
     "nvim-lua/plenary.nvim",
     "nvim-tree/nvim-web-devicons",
-    -- nvim-dbee — soft dep for the dbase view. The `build` hook
-    -- downloads dbee's Go binary so first launch is ready-to-run.
-    -- IMPORTANT: do not add a `config = function() ... end` here;
-    -- auto-finder owns dbee.setup via its internal setup module.
-    {
-      "kndndrj/nvim-dbee",
-      build = function() require("dbee").install() end,
-    },
+    -- autodb is NOT listed: the dbase view probes for it and degrades to a
+    -- "no backend" buffer, so the panel works without it.
   },
   opts = {
     -- Width spec — pick ONE of `default` or `percentage`.
@@ -160,10 +154,9 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
     repos   = { window = { mappings = {} } },
     buffers = { window = { mappings = {} } },
 
-    -- dbase forwards to dbee.setup. `sources` is a list of dbee
-    -- Source instances; nil/empty falls back to the connection-
-    -- file workflow managed by the config REPL (recommended).
-    dbase = { sources = nil, extra = nil },
+    -- dbase takes no options since v0.4.0 — autodb owns connections,
+    -- users and encryption on its own backend.
+    dbase = {},
   },
   keys = {
     { "<leader>e",  "<cmd>AutoFinder<cr>",        desc = "auto-finder: toggle panel" },
@@ -198,7 +191,7 @@ Inside the panel, press `0` to focus the config view. Type
 focus 1                  # jump to files (numeric or name)
 focus files              # same thing
 focus repos              # jump to the repos × worktrees view
-focus dbase              # jump to the nvim-dbee drawer
+focus dbase              # jump to the autodb explorer
 panel resize 50          # pin width to 50 cols (hard cap)
 panel reset              # release the pin (alias: panel dynamic)
 panel show               # show mode / default / range / live width
@@ -226,129 +219,46 @@ Tab-completion works on every verb, including numeric width
 candidates inside the configured `[width.min .. width.max]`
 range.
 
-## DBase view — nvim-dbee inside the panel
+## DBase view — autodb inside the panel
 
-The **dbase** view mounts the nvim-dbee drawer directly into
-the panel. Selecting a connection sets it active across dbee:
-`:Dbee` opens the editor + result panes against the same
-connection, and cmp-dbee's completion in SQL scratchpads sees
-the connection's schema.
+The **dbase** view hosts [autodb](https://github.com/yongjohnlee80/autodb)'s
+explorer in the panel: connections, workspaces, notes and script history, beside
+your files and repos.
 
-### Inside the drawer
+autodb is a **soft dependency and is not declared here**. The view probes for it
+and, when it is absent, renders a short buffer saying so rather than failing —
+the panel stays usable without a database backend installed.
 
-| Key      | Action                                                       |
-|----------|--------------------------------------------------------------|
-| `o`      | Toggle expand / collapse on the focused node                 |
-| `<CR>`   | Set the connection active **and** mount the editor + result panes (auto-finder override of dbee's stock `<CR>`) |
-| `cw`     | Rename / edit the focused node (dbee default)                |
-| `dd`     | Delete the focused node (dbee default)                       |
-| `r`      | Refresh the node (dbee default)                              |
+| Key    | Action                                  |
+|--------|-----------------------------------------|
+| `<CR>` | Activate the focused row                |
+| `o`    | Toggle expand / collapse on a container |
+| `i`    | Inspect the focused row                 |
+| `R`    | Refresh                                 |
+| `?`    | Help                                    |
 
-The `<CR>` override exists because dbee's stock `<CR>` calls
-`editor:set_current_note`, which silently no-ops if the editor
-window hasn't been bound yet. Auto-finder mounts the companion
-editor/result panes first, then forwards to dbee — so notes
-always render the first time.
+`h` and `l` are deliberately **not** bound — they stay ordinary cursor motions.
 
-### Connection vaults (encrypted)
+Connections, users, roles and at-rest encryption belong to autodb's own backend,
+so there is nothing to configure here and no connection file to protect.
 
-Rather than hand-authoring dbee `Source` instances in your
-lazy config, the config REPL manages connection vaults for you.
-**Connection URLs typically carry credentials in clear text**
-(passwords baked into the URL, API tokens as `?key=…`, etc.), so
-auto-finder encrypts vaults at rest.
+### nvim-dbee has been removed
 
-```
-0                       # focus the config view (REPL)
-dbase new work          # creates work.json.enc, prompts for a vault passphrase
-dbase load work         # activates the vault, decrypted only in memory
-dbase conn add          # prompts for name / type / url
-3                       # focus the dbase view — drawer renders the new entry
-```
+The dbase view mounted nvim-dbee's drawer from v0.2.16 through the 0.3 line.
+**v0.4.0 removed it completely** — it is not a fallback and is not maintained.
+Roughly 2450 lines went with it: the connection vault, its encrypted source and
+crypto provider, the drawer setup owner, the companion editor/result/call_log
+layout, the event bridge, and the `dbase` admin verb that managed connections.
+autodb owns all of that on its own backend, so keeping a second copy inside a
+file explorer made no sense.
 
-Vaults live under `stdpath('state') .. /auto-finder/dbase/<name>.json.enc`.
-On first access per nvim session the user is prompted for the
-vault passphrase via `vim.fn.inputsecret` (no echo). Plaintext
-exists only as decrypted bytes inside the running nvim process —
-it's never written to disk or to a log line.
+If you were using the dbee-backed dbase view, your connections still live in
+dbee's own store; move them into autodb (`<leader>Dc` in AutoVim, or the
+standalone TUI). Nothing here reads them any more.
 
-**Crypto provider.** The encryption itself is delegated to an
-external local tool. **`gpg` is the supported default.** Auto-finder
-orchestrates the passphrase prompt and file lifecycle; it does NOT
-implement cryptography. If `gpg` isn't on PATH at setup time, the
-section falls back to the legacy plaintext storage (see "Migration"
-below) and logs a WARN entry so you know.
-
-`age` is also supported but opt-in only — its passphrase automation
-relies on `AGE_PASSPHRASE` being honored by the local age build
-(`rage` and recent age do; stock age reads `/dev/tty` only). To
-prefer `age` when both are installed, set
-`AUTO_FINDER_DBASE_PROVIDER_AGE=1` in your shell environment before
-launching nvim. We'll revisit making age default once a real-provider
-smoke proves the passphrase path on each target platform.
-
-**Vault keymaps and verbs.**
-
-```
-dbase new <name>         # create a fresh empty encrypted vault
-dbase ls                 # list available vaults (active is *-marked)
-dbase rm <name>          # delete a vault
-dbase load [name]        # activate a vault (passphrase prompt on first decrypt)
-dbase conn add           # prompt for name/type/url, append to the active vault
-dbase conn ls            # list connections in the active vault
-dbase conn rm <name>     # remove a connection by name
-dbase lock               # forget the cached passphrase (re-prompt on next access)
-dbase status             # show storage mode + provider + active vault
-```
-
-### Migrating from plaintext (pre-v0.2.34)
-
-Earlier auto-finder versions stored connection files as plaintext
-JSON under `stdpath('state')/auto-finder/dbase/<name>.json`.
-v0.2.34 keeps those files readable but stops writing them — new
-operations land in the encrypted vault format. To move existing
-plaintext files into encrypted vaults:
-
-```
-dbase migrate <name>     # read <name>.json, encrypt to <name>.json.enc
-                         # plaintext file is LEFT IN PLACE for verification
-dbase load <name>        # activate the new encrypted vault
-                         # … verify your connections all work …
-dbase rmlegacy <name>    # delete the plaintext file once you've verified
-```
-
-`dbase migrate` is intentionally non-destructive — the plaintext
-file is preserved until you explicitly `rmlegacy` it. This lets
-you read both copies side-by-side until you're confident the
-migration round-tripped your connections correctly.
-
-If you'd rather pin sources from your lazy spec (e.g. an
-`EnvSource` reading `DBASE_CONNECTIONS` for secrets injected
-from `pass` / `1Password`), pass them through `opts.dbase.sources`
-— a non-empty list short-circuits the encrypted/legacy default
-path entirely.
-
-### Layout — full-width result strip
-
-The dbase view splits the screen into three areas: the drawer
-inside the auto-finder panel column, the SQL editor in the main
-editor area, and a full-width result strip across the bottom
-(spanning the width of the editor area). The bottom strip mirrors
-the gobugger / nvim-dap-view "bottom panel" shape — query
-results never feel squeezed regardless of how the user has split
-the editor area.
-
-The call-log tile splits below the result strip. Both tiles are
-created on first `<CR>` against a connection node in the drawer.
-
-### SQL note buffers are listed
-
-Since v0.2.34, dbee's SQL note buffers default to `buflisted = true`
-(dbee's stock default is `false`). This makes notes appear in
-auto-finder's `buffers` view, in autovim's editor-area winbar,
-and in any other surface that filters by `vim.fn.buflisted(b) == 1`.
-Override via `opts.dbase.extra.editor.buffer_options.buflisted = false`
-if you want dbee's original behavior.
+One consequence worth stating plainly: schema-aware SQL completion went with
+dbee. `cmp-dbee` hard-requires `dbee` and gates on `dbee.api.core.is_loaded()`,
+so it cannot outlive it, and autodb does not ship a completion source yet.
 
 ## Tests & Debug views (auto-run)
 
