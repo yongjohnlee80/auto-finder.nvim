@@ -440,32 +440,97 @@ end)()
 end)()
 
 -- ── [7] r3 #4: a RETURNED review-load error is surfaced, not swallowed ──
--- `review.load` reports malformed JSON and failed validation normally as
--- `(nil, err)` — it does not throw. The guard bound only `(ok, doc)`, so
--- through pcall a normal error arrived as `(true, nil, err)`, the warning
--- branch never ran, and the review was skipped in silence. That is the exact
--- defect the guard existed to prevent, one line lower down.
+-- `review.load` reports malformed JSON and failed validation NORMALLY as
+-- `(nil, err)` — it does not throw. The guard bound only `(ok, doc)`, so a
+-- normal error arrived as `(true, nil, err)`, the warning branch never ran, and
+-- the review was skipped in silence — the defect the guard existed to prevent.
+--
+-- Driven through the REAL `open_diff` with a stubbed `review.load`, not by
+-- grepping the source: r4 rightly pointed out that a source match and a generic
+-- pcall-shape check prove nothing about what the view actually does.
 ;(function()
-  local src = table.concat(vim.fn.readfile(
-    plugin_root .. "/lua/auto-finder/views/repos/tree.lua"), "\n")
-  ok("[7] the review.load guard binds all THREE pcall results",
-    src:match("local ok_doc, doc, load_err = pcall%(review%.load") ~= nil,
-    "only two results are bound — a returned error is invisible")
-  ok("[7] a THROWN error is reported at ERROR",
-    src:match("threw while loading") ~= nil)
-  ok("[7] *** a RETURNED error is reported too, on its own branch ***",
-    src:match("elseif load_err then") ~= nil)
+  local okw, wrepos = pcall(require, "worktree.repos")
+  if not (okw and type(wrepos.available) == "function" and wrepos.available()) then
+    ok("[7] SKIPPED — worktree.repos unavailable", false,
+      "this must not be skipped in a dev checkout")
+    return
+  end
+  local tree = require("auto-finder.views.repos.tree")
+  local review = require("worktree.review")
 
-  -- Behavioural: the two shapes must be distinguishable at the call boundary.
-  local function load_returning_err() return nil, "invalid review" end
-  local okc, doc, lerr = pcall(load_returning_err)
-  ok("[7] a returned error yields (true, nil, err) through pcall",
-    okc == true and doc == nil and lerr == "invalid review",
-    ("%s / %s / %s"):format(tostring(okc), tostring(doc), tostring(lerr)))
-  local function load_throwing() error("boom") end
-  local okt, terr = pcall(load_throwing)
-  ok("[7] CONTROL — a thrown error yields (false, msg), a different shape",
-    okt == false and tostring(terr):find("boom") ~= nil, tostring(terr))
+  local notes = {}
+  local logger = require("auto-finder.log")
+  local real_notify = logger.notify
+  logger.notify = function(msg, o) notes[#notes + 1] = { msg = msg, opts = o } end
+
+  local real_load = review.load
+  local real_reviews = wrepos.reviews
+  local real_diff = wrepos.diff
+  -- One recorded revision, whose load FAILS the ordinary way.
+  wrepos.reviews = function() return { { revision = 1, path = "x", name = "x" } } end
+  wrepos.diff = function()
+    return { { path = "f.txt", kind = "modified", hunks = {
+      { old_start = 1, old_count = 1, new_start = 1, new_count = 1,
+        lines = { { kind = "context", text = "a", old = 1, new = 1 } } } } } }
+  end
+  review.load = function() return nil, "invalid review: comments missing" end
+
+  local saved_cols = vim.o.columns
+  vim.o.columns = 200
+  local okrun = pcall(tree.open_diff, {
+    kind = "commit", repo = { common_dir = "/tmp/x", slug = "s", label = "l" },
+    node = { sha = string.rep("a", 40), short = "aaaaaaa" },
+  })
+  ok("[7] open_diff survives a review whose load RETURNS an error", okrun)
+  local found = false
+  for _, n in ipairs(notes) do
+    if type(n.msg) == "string" and n.msg:find("unreadable review", 1, true) then
+      found = true
+    end
+  end
+  ok("[7] *** and the returned error is NOTIFIED, not silently skipped ***",
+    found, vim.inspect(vim.tbl_map(function(n) return n.msg end, notes)))
+
+  -- CONTROL: a THROWING load is reported on its own branch, distinctly.
+  notes = {}
+  review.load = function() error("boom from load") end
+  pcall(tree.open_diff, {
+    kind = "commit", repo = { common_dir = "/tmp/x", slug = "s", label = "l" },
+    node = { sha = string.rep("b", 40), short = "bbbbbbb" },
+  })
+  local threw = false
+  for _, n in ipairs(notes) do
+    if type(n.msg) == "string" and n.msg:find("threw while loading", 1, true) then
+      threw = true
+    end
+  end
+  ok("[7] CONTROL — a THROWN load error reports on a different branch", threw,
+    vim.inspect(vim.tbl_map(function(n) return n.msg end, notes)))
+
+  -- CONTROL: a SUCCESSFUL load must notify nothing, or the assertions above
+  -- would pass for every code path.
+  notes = {}
+  review.load = function()
+    return { schema = review.SCHEMA, repo = { owner = "o", name = "n" },
+             commit = string.rep("c", 40), revision = 1, comments = {} }
+  end
+  pcall(tree.open_diff, {
+    kind = "commit", repo = { common_dir = "/tmp/x", slug = "s", label = "l" },
+    node = { sha = string.rep("c", 40), short = "ccccccc" },
+  })
+  local quiet = true
+  for _, n in ipairs(notes) do
+    if type(n.msg) == "string"
+      and (n.msg:find("unreadable review", 1, true)
+        or n.msg:find("threw while loading", 1, true)) then quiet = false end
+  end
+  ok("[7] CONTROL — a SUCCESSFUL load notifies no review error", quiet,
+    vim.inspect(vim.tbl_map(function(n) return n.msg end, notes)))
+
+  review.load, wrepos.reviews, wrepos.diff = real_load, real_reviews, real_diff
+  logger.notify = real_notify
+  vim.o.columns = saved_cols
+  pcall(require("auto-core.ui").diffview.close)
 end)()
 
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
