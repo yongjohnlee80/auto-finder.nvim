@@ -844,6 +844,36 @@ print("\n[48] ADR-0048 r5 — Env section (tests + debug views)")
   ok("p48: no selection marker before any `s`",
     txt:find("%* lm%-test%.env") == nil and txt:find("%* %.env") == nil)
 
+  -- ── row labels disambiguate same-basename env files (r5 carry-forward) ──
+  -- Drives the real labeller, both sides: the NEGATIVE control (distinct
+  -- basenames must stay bare) is what stops a labeller that simply always
+  -- returns the full path from passing the positive one.
+  do
+    local L = env_section._labels_for_tests
+    local bare = L({ { path = "/w/.env" }, { path = "/w/local.env" } })
+    ok("p48: CONTROL — distinct basenames stay bare (no gratuitous paths)",
+      bare["/w/.env"] == ".env" and bare["/w/local.env"] == "local.env",
+      vim.inspect(bare))
+
+    local clash = L({ { path = "/w/svc-a/.env" }, { path = "/w/svc-b/.env" },
+                      { path = "/w/prod.env" } })
+    ok("p48: colliding basenames widen to a unique parent-qualified label",
+      clash["/w/svc-a/.env"] == "svc-a/.env"
+        and clash["/w/svc-b/.env"] == "svc-b/.env", vim.inspect(clash))
+    ok("p48: a non-colliding sibling in the same list is NOT widened",
+      clash["/w/prod.env"] == "prod.env", vim.inspect(clash))
+
+    local deep = L({ { path = "/w/a/cfg/.env" }, { path = "/w/b/cfg/.env" } })
+    ok("p48: widening goes as deep as uniqueness needs, no deeper",
+      deep["/w/a/cfg/.env"] == "a/cfg/.env"
+        and deep["/w/b/cfg/.env"] == "b/cfg/.env", vim.inspect(deep))
+
+    -- The unresolvable case must terminate rather than widen forever.
+    local dup = L({ { path = "/w/.env" }, { path = "/w/.env" } })
+    ok("p48: an identical path listed twice terminates at the cap",
+      type(dup["/w/.env"]) == "string", vim.inspect(dup))
+  end
+
   local seen_maps = {}
   for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
     seen_maps[k.lhs] = k

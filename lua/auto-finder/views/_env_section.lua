@@ -138,6 +138,64 @@ function M.expand_key(path)
   return "env:" .. path
 end
 
+---The trailing `n` path segments of `path`.
+---@param path string
+---@param depth integer
+---@return string
+local function _suffix(path, depth)
+  local parts = vim.split(path, "/", { plain = true })
+  local first = math.max(1, #parts - depth + 1)
+  local take = {}
+  for i = first, #parts do take[#take + 1] = parts[i] end
+  return table.concat(take, "/")
+end
+
+---Row label per path: the basename, widened to the shortest parent-qualified
+---suffix that is unique among the rows that share it.
+---
+---Two `.env` files in different directories rendered as the same `.env` row
+---and were distinguishable only by the trailing `[source]` annotation — which
+---is not a path, and is identical whenever both come from the same kind of
+---source (r5 carry-forward). Only ambiguous names widen: a section with one
+---`.env` and one `local.env` still shows both bare, so the common case stays
+---terse.
+---@param list table[]
+---@return table<string, string> label_by_path
+local function _labels(list)
+  local by_base = {}
+  for _, c in ipairs(list) do
+    local base = vim.fn.fnamemodify(c.path, ":t")
+    by_base[base] = by_base[base] or {}
+    table.insert(by_base[base], c.path)
+  end
+
+  local out = {}
+  for base, paths in pairs(by_base) do
+    if #paths == 1 then
+      out[paths[1]] = base
+    else
+      -- Widen this group only. The cap terminates the genuinely
+      -- unresolvable case (the same path listed twice), where no depth
+      -- makes the labels differ.
+      local depth = 2
+      while depth <= 16 do
+        local seen, collides = {}, false
+        for _, p in ipairs(paths) do
+          local s = _suffix(p, depth)
+          if seen[s] then collides = true break end
+          seen[s] = true
+        end
+        if not collides then break end
+        depth = depth + 1
+      end
+      for _, p in ipairs(paths) do out[p] = _suffix(p, depth) end
+    end
+  end
+  return out
+end
+
+M._labels_for_tests = _labels
+
 ---Emit the section body (file rows + expanded children) into the
 ---host view's render arrays. The host has already emitted its own
 ---section header and decided the section is not collapsed.
@@ -161,9 +219,10 @@ function M.emit(ctx)
   end
 
   local env = _env()
+  local labels = _labels(ctx.list)
   for _, c in ipairs(ctx.list) do
     local marker = c.selected and "* " or "  "
-    local name = vim.fn.fnamemodify(c.path, ":t")
+    local name = labels[c.path] or vim.fn.fnamemodify(c.path, ":t")
     local ann = c.synthetic and "  (selected — unreferenced)"
       or ("  [" .. tostring(c.source) .. "]")
     local line = INDENT .. marker .. name .. ann
