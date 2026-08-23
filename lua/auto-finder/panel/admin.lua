@@ -296,10 +296,17 @@ local function start_slot_assign_wizard()
         if n > 1 and values[field(n - 1)] == nil then return true end
         return #remaining_for(values, n) == 0
       end,
-      prompt = function()
-        local now = current[n + 1]
-        return string.format("slot %d%s", n,
-          now and (" (now " .. now .. ")") or "")
+      -- The banner's `available:` list goes stale the moment slot 1 is
+      -- answered, so each question re-states what is still free. This
+      -- is why `wizard` step prompts had to accept a function of the
+      -- values collected so far — a static string cannot narrow.
+      prompt = function(values)
+        local now  = current[n + 1]
+        local free = table.concat(remaining_for(values, n), ", ")
+        local bits = {}
+        if now then bits[#bits + 1] = "now " .. now end
+        bits[#bits + 1] = "free: " .. free
+        return string.format("slot %d [%s]", n, table.concat(bits, " | "))
       end,
       -- Normalise before validation so a whitespace-only line reads as
       -- "empty" (end of list) rather than as a section named "  ".

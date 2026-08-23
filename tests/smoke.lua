@@ -6255,7 +6255,19 @@ ok("p51: the banner lists the current arrangement",
   banner:find("1:buffers", 1, true) ~= nil
     and banner:find("2:marks", 1, true) ~= nil)
 ok("p51: the first question shows the slot's current occupant",
-  banner:find("slot 1 (now buffers)", 1, true) ~= nil)
+  banner:find("slot 1 [now buffers", 1, true) ~= nil, banner)
+ok("p51: the first question lists what is still free",
+  banner:find("free: ", 1, true) ~= nil, banner)
+
+---Last transcript line matching `pat` — the questions repeat, so the
+---assertions below must read the most recent one, not the first.
+local function last_line(pat)
+  local found
+  for _, l in ipairs(vim.api.nvim_buf_get_lines(admin_buf, 0, -1, false)) do
+    if l:find(pat) then found = l end
+  end
+  return found or ""
+end
 
 -- A rejected entry re-asks the SAME slot instead of unwinding.
 wizard.feed("definitely-not-a-view")
@@ -6266,6 +6278,17 @@ ok("p51: the slot-0 section is refused mid-walk",
   wizard.is_active()
     and transcript():find("protected slot-0 section", 1, true) ~= nil)
 wizard.feed("marks")
+-- The banner's `available:` list is a snapshot; each question has to
+-- re-state what is STILL free or the walk misreports its own choices.
+local q2 = last_line("slot 2 %[")
+-- Scope the check to the `free:` list — "marks" also appears in this
+-- line's `now marks` label, so a whole-line search would pass on the
+-- wrong substring and prove nothing.
+local free2 = q2:match("free: (.*)%]") or ""
+ok("p51: the next question drops the type just assigned",
+  free2 ~= "" and free2:find("marks", 1, true) == nil, q2)
+ok("p51: the next question still offers an unassigned type",
+  free2:find("buffers", 1, true) ~= nil, q2)
 wizard.feed("marks")
 ok("p51: a duplicate is refused mid-walk",
   wizard.is_active()
@@ -6310,6 +6333,171 @@ ok("p51: cancelling mid-walk leaves the arrangement untouched",
 af.slot_assign(vim.list_slice(restore, 2, #restore))
 ok("p51: original arrangement restored",
   secs() == table.concat(restore, " "), secs())
+end)
+
+
+-- ───── [52] permutation preserves survivor buffers, keymaps, winbar ─────
+-- The high-risk half of `slot assign`. `_rebuild_section_registry` was
+-- written for add/remove, where a survivor keeps its section NUMBER.
+-- A permutation is the first caller that keeps every section but moves
+-- it to a different number, and the only thing carrying a mounted
+-- buffer across is the `old_bufs_by_name` bridge (init.lua §"Carry
+-- survivor `_bufs` entries forward"): old number → name → new number.
+--
+-- [51] asserts the re-numbered `views.enabled()` METADATA, which is
+-- cheap to get right and proves nothing about that bridge — with the
+-- bridge disabled outright, [51] still passed 651/0. This section
+-- pins the observable contract instead (ADR-0033's `_bufs` / keymap /
+-- winbar surface, and the [[0008-auto-finder-keymap-audit]] runtime
+-- slot-mutation addendum): the same buffer object must survive under
+-- its NEW number, stay valid, keep its buffer-local bindings, and
+-- still be what the numeric keymap mounts.
+--
+-- Two synthetic views are registered through `cfg.view_modules` rather
+-- than reusing `files` / `repos`: they mount synchronously, so the
+-- assertions are about the registry and not about neo-tree timing.
+-- Reported by lector on PR #2.
+print("\n[52] slot assign — survivors keep their buffers across a permutation")
+section(function()
+local restore_sections = vim.deepcopy(af.state.config.sections)
+local restore_modules  = af.state.config.view_modules
+
+-- Two trivial synchronous views. Each caches its own bufnr, exactly
+-- like a real view, so a re-mount is observable as a DIFFERENT bufnr.
+local function make_view(label)
+  local V = {}
+  V.get_buffer = function()
+    if V._bufnr and vim.api.nvim_buf_is_valid(V._bufnr) then return V._bufnr end
+    local b = vim.api.nvim_create_buf(false, true)
+    vim.bo[b].bufhidden = "hide"
+    vim.api.nvim_buf_set_lines(b, 0, -1, false, { "synthetic view: " .. label })
+    V._bufnr = b
+    return b
+  end
+  V.on_close = function() V._bufnr = nil end
+  return V
+end
+package.loaded["af_p52_alpha"] = make_view("alpha")
+package.loaded["af_p52_beta"]  = make_view("beta")
+af.state.config.view_modules = {
+  p52alpha = "af_p52_alpha",
+  p52beta  = "af_p52_beta",
+}
+
+local types = af._available_section_types()
+local function known(t)
+  for _, v in ipairs(types) do if v == t then return true end end
+  return false
+end
+ok("p52: third-party views are discoverable as slot types",
+  known("p52alpha") and known("p52beta"), table.concat(types, ","))
+
+local err = af.slot_assign({ "p52alpha", "p52beta" })
+ok("p52: assigned the two synthetic views", err == nil, err)
+
+-- Mount both so the registry actually caches a bufnr per section.
+af.open(true)
+af.focus(1)
+af.focus(2)
+local reg = af._registry
+local buf_alpha, buf_beta = reg._bufs[1], reg._bufs[2]
+ok("p52: both survivors are mounted before the permutation",
+  buf_alpha and buf_beta and vim.api.nvim_buf_is_valid(buf_alpha)
+    and vim.api.nvim_buf_is_valid(buf_beta),
+  tostring(buf_alpha) .. "/" .. tostring(buf_beta))
+ok("p52: the two survivors are distinct buffers", buf_alpha ~= buf_beta,
+  tostring(buf_alpha) .. "/" .. tostring(buf_beta))
+-- Control for the swap assertion below: BEFORE the permutation the
+-- mapping runs the other way round. Without this, "_bufs[1]==buf_beta"
+-- after the swap could be read as an accident of ordering.
+ok("p52: control — before the swap, slot 1 holds alpha",
+  reg._bufs[1] == buf_alpha and reg._bufs[2] == buf_beta)
+
+-- ── the permutation ──
+err = af.slot_assign({ "p52beta", "p52alpha" })
+ok("p52: the swap is accepted", err == nil, err)
+ok("p52: section list is swapped",
+  table.concat(af.state.config.sections, " ") == "config p52beta p52alpha",
+  table.concat(af.state.config.sections, " "))
+
+-- THE assertion the disabled-bridge mutation probe defeats.
+ok("p52: alpha's buffer followed it from slot 1 to slot 2",
+  af._registry._bufs[2] == buf_alpha,
+  "want " .. tostring(buf_alpha) .. " got " .. tostring(af._registry._bufs[2]))
+ok("p52: beta's buffer followed it from slot 2 to slot 1",
+  af._registry._bufs[1] == buf_beta,
+  "want " .. tostring(buf_beta) .. " got " .. tostring(af._registry._bufs[1]))
+-- A survivor must be CARRIED, not closed and re-created: both the
+-- buffer object and its contents have to be the originals.
+ok("p52: survivor buffers were not deleted",
+  vim.api.nvim_buf_is_valid(buf_alpha) and vim.api.nvim_buf_is_valid(buf_beta))
+ok("p52: alpha's buffer kept its contents (not re-mounted)",
+  vim.api.nvim_buf_get_lines(buf_alpha, 0, 1, false)[1] == "synthetic view: alpha",
+  vim.inspect(vim.api.nvim_buf_get_lines(buf_alpha, 0, 1, false)))
+
+-- ── the numeric keymap routes to the RE-NUMBERED section ──
+-- Resolve the window from the panel object rather than the
+-- `af.state.panel_winid` mirror. The mirror is maintained by the
+-- panel's on_open/on_close callbacks, and by this point in the suite
+-- it can be stale from earlier sections' open/close churn; the
+-- registry's own `focus()` reads `self.panel.winid`, so that is the
+-- window whose buffer actually changes. (Verified in isolation that a
+-- permutation leaves both in agreement — the drift is accumulated
+-- suite state, not something `slot assign` causes.)
+af.focus(1)
+local panel_winid = (af._registry and af._registry.panel
+  and af._registry.panel.winid) or af.state.panel_winid
+ok("p52: the panel window is resolvable for the routing checks",
+  panel_winid ~= nil and vim.api.nvim_win_is_valid(panel_winid),
+  tostring(panel_winid))
+ok("p52: focusing slot 1 mounts beta's buffer after the swap",
+  panel_winid and vim.api.nvim_win_get_buf(panel_winid) == buf_beta,
+  tostring(panel_winid and vim.api.nvim_win_get_buf(panel_winid)))
+
+local maps = vim.api.nvim_buf_get_keymap(buf_beta, "n")
+local map_2, map_q
+for _, m in ipairs(maps) do
+  if m.lhs == "2" then map_2 = m end
+  if m.lhs == "q" then map_q = m end
+end
+ok("p52: buffer-local numeric mapping survives the permutation",
+  map_2 ~= nil and map_2.callback ~= nil)
+ok("p52: buffer-local `q` mapping survives the permutation",
+  map_q ~= nil and map_q.callback ~= nil)
+-- Press `2` for real: it must mount alpha, which now lives at slot 2.
+if map_2 and map_2.callback then
+  pcall(map_2.callback)
+  ok("p52: pressing `2` mounts alpha at its new slot",
+    vim.api.nvim_win_get_buf(panel_winid) == buf_alpha,
+    tostring(vim.api.nvim_win_get_buf(panel_winid)))
+else
+  ok("p52: pressing `2` mounts alpha at its new slot", false, "no `2` mapping")
+end
+
+-- ── winbar reflects the new order and stays clickable ──
+local winbar = vim.api.nvim_get_option_value("winbar", { win = panel_winid })
+ok("p52: winbar lists both survivors after the permutation",
+  winbar:find("p52beta", 1, true) ~= nil
+    and winbar:find("p52alpha", 1, true) ~= nil, winbar)
+ok("p52: winbar keeps its click router after the permutation",
+  winbar:find("auto%-core%.ui%.winbar") ~= nil, winbar)
+ok("p52: winbar orders beta before alpha (the new arrangement)",
+  winbar:find("p52beta", 1, true) < winbar:find("p52alpha", 1, true), winbar)
+
+-- Restore the suite's arrangement, then unregister the synthetic views.
+af.slot_assign(vim.list_slice(restore_sections, 2, #restore_sections))
+af.state.config.view_modules = restore_modules
+package.loaded["af_p52_alpha"] = nil
+package.loaded["af_p52_beta"]  = nil
+for _, b in ipairs({ buf_alpha, buf_beta }) do
+  if b and vim.api.nvim_buf_is_valid(b) then
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+end
+ok("p52: original arrangement restored",
+  table.concat(af.state.config.sections, " ")
+    == table.concat(restore_sections, " "),
+  table.concat(af.state.config.sections, " "))
 end)
 
 -- ───────────────────────── summary ────────────────────────
