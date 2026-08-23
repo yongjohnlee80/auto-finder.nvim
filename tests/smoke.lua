@@ -6116,6 +6116,202 @@ end)
 -- surviving no-backend behaviour is pinned by §[35] A16, and the view contract
 -- it also checked is enforced by the section registry itself.
 
+
+-- ───── [51] `slot assign` — re-arrange the whole slot list ─────────
+-- The gap this fills: `slot modify N <type>` rejects a type that
+-- already lives in another slot, which is right for a single-slot
+-- edit but makes a SWAP impossible — moving `repos` from slot 2 to
+-- slot 1 collides with itself. `slot assign` replaces the whole list
+-- at once, so any permutation is legal and only duplicates WITHIN the
+-- new list are rejected. Three surfaces are pinned here: the
+-- `af.slot_assign(tail)` API, the one-line `slot assign <t…>` DSL,
+-- and the interactive walk driven through `panel.wizard`.
+--
+-- Runs last on purpose: it rewrites `cfg.sections` repeatedly. The
+-- original arrangement is restored at the end regardless.
+print("\n[51] slot assign — whole-list re-arrangement")
+section(function()
+local admin  = require("auto-finder.panel.admin")
+local wizard = require("auto-finder.panel.wizard")
+local st     = require("auto-finder.state")
+local restore = vim.deepcopy(af.state.config.sections)
+
+local function secs() return table.concat(af.state.config.sections, " ") end
+local function has(list, want)
+  for _, v in ipairs(list or {}) do if v == want then return true end end
+  return false
+end
+
+ok("p51: slot 0 is 'config' (baseline for the protected-head checks)",
+  af.state.config.sections[1] == "config", secs())
+ok("p51: SLOT_MAX is exposed for the walk's upper bound",
+  af.SLOT_MAX == 9, tostring(af.SLOT_MAX))
+
+-- (a) the permutation `slot modify` cannot express.
+af.slot_assign({ "files", "repos" })
+local mod_err = af.slot_modify(1, "repos")
+ok("p51: slot_modify still refuses a cross-slot swap (the contrast)",
+  mod_err ~= nil and mod_err:match("already lives at slot") ~= nil,
+  tostring(mod_err))
+local err = af.slot_assign({ "repos", "files" })
+ok("p51: slot_assign accepts the same swap", err == nil, err)
+ok("p51: order applied", secs() == "config repos files", secs())
+local reg = {}
+for _, s in ipairs(require("auto-finder.views").enabled()) do
+  reg[#reg + 1] = s.number .. ":" .. s.name
+end
+ok("p51: the live registry re-numbers to match",
+  table.concat(reg, " ") == "0:config 1:repos 2:files", table.concat(reg, " "))
+
+-- (b) validation is all-or-nothing: a bad entry anywhere leaves the
+-- current arrangement untouched rather than half-applying.
+local before = secs()
+err = af.slot_assign({ "files", "files" })
+ok("p51: duplicate rejected",
+  err ~= nil and err:match("already assigned to slot 1") ~= nil, tostring(err))
+ok("p51:   …and nothing was applied", secs() == before, secs())
+err = af.slot_assign({ "files", "config" })
+ok("p51: the slot-0 section is rejected in the tail",
+  err ~= nil and err:match("protected slot%-0 section") ~= nil, tostring(err))
+ok("p51:   …and the valid leading entry was NOT applied alone",
+  secs() == before, secs())
+err = af.slot_assign({ "definitely-not-a-view" })
+ok("p51: unknown type rejected",
+  err ~= nil and err:match("unknown section type") ~= nil, tostring(err))
+err = af.slot_assign({})
+ok("p51: an empty list is rejected (slot 0 alone is not an arrangement)",
+  err ~= nil and err:match("at least one section") ~= nil, tostring(err))
+err = af.slot_assign("files")
+ok("p51: a non-list is rejected",
+  err ~= nil and err:match("list of section types") ~= nil, tostring(err))
+local over = {}
+for i = 1, af.SLOT_MAX + 1 do over[i] = "slot" .. i end
+err = af.slot_assign(over)
+ok("p51: more than SLOT_MAX entries is rejected",
+  err ~= nil and err:match("at most 9 sections") ~= nil, tostring(err))
+
+-- (c) persistence. `_workspace_key()` is nil under headless `-u NONE`
+-- with no workspace_root, so a bare "is it stored?" read would come
+-- back nil and prove nothing either way. Stub the resolver to a key
+-- of our own, assert it is EMPTY first (the positive control that
+-- this check can tell written from unwritten), then assign and read.
+local core = require("auto-core")
+local real_root = core.git.worktree.get_workspace_root
+core.git.worktree.get_workspace_root = function() return "/tmp/af-p51-ws" end
+local wskey = af._workspace_key()
+ok("p51: workspace key resolves under the stub", type(wskey) == "string",
+  tostring(wskey))
+ok("p51: control — nothing is persisted for that key yet",
+  wskey and st.get_sections_for(wskey) == nil,
+  vim.inspect(wskey and st.get_sections_for(wskey)))
+af.slot_assign({ "repos", "files", "buffers" })
+local persisted = wskey and st.get_sections_for(wskey)
+ok("p51: the arrangement is persisted per workspace (NOT session-only)",
+  persisted ~= nil and table.concat(persisted, " ") == "config repos files buffers",
+  persisted and table.concat(persisted, " ") or "nil")
+core.git.worktree.get_workspace_root = real_root
+
+-- (d) the one-line DSL form.
+admin.dispatch("slot assign files repos")
+ok("p51: `slot assign <t…>` applies the whole arrangement",
+  secs() == "config files repos", secs())
+admin.dispatch("slot assign repos repos")
+ok("p51: the DSL form rejects duplicates too",
+  secs() == "config files repos", secs())
+
+-- (e) tab-completion, consistent with the other `slot` verbs.
+local _, subs = admin._complete_at("slot ", 5)
+ok("p51: `slot ` completes 'assign'", has(subs, "assign"),
+  table.concat(subs, ","))
+ok("p51: `slot ` still completes 'modify'", has(subs, "modify"),
+  table.concat(subs, ","))
+local _, c1 = admin._complete_at("slot assign ", 12)
+ok("p51: `slot assign ` completes section types", has(c1, "files"),
+  table.concat(c1, ","))
+ok("p51: `slot assign ` never offers the protected slot-0 section",
+  not has(c1, "config"), table.concat(c1, ","))
+local _, c2 = admin._complete_at("slot assign files ", 18)
+ok("p51: a type already on the line drops out of the candidates",
+  not has(c2, "files") and has(c2, "repos"), table.concat(c2, ","))
+
+-- (f) the interactive walk. Driven through wizard.feed(), which is
+-- exactly what the admin prompt buffer's <CR> callback calls while a
+-- wizard is active.
+local admin_buf = admin.get_or_create_buffer()
+local function transcript()
+  return table.concat(
+    vim.api.nvim_buf_get_lines(admin_buf, 0, -1, false), "\n")
+end
+
+admin.dispatch("slot assign buffers marks")
+ok("p51: staged a two-slot arrangement for the walk",
+  secs() == "config buffers marks", secs())
+admin.dispatch("slot assign")
+ok("p51: a bare `slot assign` starts the walk", wizard.is_active())
+local banner = transcript()
+ok("p51: the walk banner names the fixed slot 0",
+  banner:find("slot 0 'config' is fixed", 1, true) ~= nil)
+ok("p51: the banner lists the current arrangement",
+  banner:find("1:buffers", 1, true) ~= nil
+    and banner:find("2:marks", 1, true) ~= nil)
+ok("p51: the first question shows the slot's current occupant",
+  banner:find("slot 1 (now buffers)", 1, true) ~= nil)
+
+-- A rejected entry re-asks the SAME slot instead of unwinding.
+wizard.feed("definitely-not-a-view")
+ok("p51: an unknown type keeps the walk on the same slot",
+  wizard.is_active() and transcript():find("unknown type", 1, true) ~= nil)
+wizard.feed("config")
+ok("p51: the slot-0 section is refused mid-walk",
+  wizard.is_active()
+    and transcript():find("protected slot-0 section", 1, true) ~= nil)
+wizard.feed("marks")
+wizard.feed("marks")
+ok("p51: a duplicate is refused mid-walk",
+  wizard.is_active()
+    and transcript():find("is already at slot 1", 1, true) ~= nil)
+wizard.feed("buffers")
+wizard.feed("")   -- ends the list; both sections re-listed → no drop
+ok("p51: an empty entry ends the walk", not wizard.is_active())
+ok("p51: a pure re-arrangement applies with no confirmation step",
+  secs() == "config marks buffers", secs())
+
+-- Ending early DROPS the slots you never reached, so that case asks.
+admin.dispatch("slot assign")
+wizard.feed("buffers")
+wizard.feed("")
+ok("p51: ending early raises a confirmation step", wizard.is_active())
+ok("p51: the confirmation names what would be dropped",
+  transcript():find("dropping: marks", 1, true) ~= nil)
+wizard.feed("n")
+ok("p51: declining leaves the arrangement untouched",
+  not wizard.is_active() and secs() == "config marks buffers", secs())
+admin.dispatch("slot assign")
+wizard.feed("buffers")
+wizard.feed("")
+wizard.feed("y")
+ok("p51: confirming applies the drop",
+  not wizard.is_active() and secs() == "config buffers", secs())
+
+-- Whitespace-only reads as empty, not as a section named "  ".
+admin.dispatch("slot assign")
+wizard.feed("   ")
+ok("p51: a whitespace-only entry ends the walk without assigning",
+  not wizard.is_active() and secs() == "config buffers", secs())
+
+-- <C-c> mid-walk changes nothing.
+admin.dispatch("slot assign")
+wizard.feed("marks")
+wizard.cancel()
+ok("p51: cancelling mid-walk leaves the arrangement untouched",
+  not wizard.is_active() and secs() == "config buffers", secs())
+
+-- Restore whatever the suite was running with.
+af.slot_assign(vim.list_slice(restore, 2, #restore))
+ok("p51: original arrangement restored",
+  secs() == table.concat(restore, " "), secs())
+end)
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

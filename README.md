@@ -53,6 +53,16 @@ pair **tests** / **debug** consuming
 [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)
 (see [Tests & Debug views](#tests--debug-views-auto-run)).
 
+To **re-order** the slots rather than edit one at a time, use `slot
+assign` — a walk over slots 1..9 that asks for a section type per
+slot, showing the current occupant and refusing duplicates; an empty
+entry ends the list and `<C-c>` cancels. `slot assign <t1> <t2> …`
+does the same in one line. It exists because `slot modify` refuses a
+type that already lives elsewhere, so it can never swap two slots;
+`assign` replaces the whole list at once, making any permutation
+legal. Slot 0 (config) is fixed. Arrangements are stored per
+workspace and survive a restart.
+
 Plus the foundations behind the views, all centralized in
 `lua/auto-finder/core/`:
 

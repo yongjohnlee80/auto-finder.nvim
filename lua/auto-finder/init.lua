@@ -1739,6 +1739,96 @@ function M.slot_modify(n, new_type)
   return nil
 end
 
+---Highest addressable panel slot number. Slot 0 is the protected
+---config slot, so a full arrangement is `config` plus slots 1..9 —
+---which is also the ceiling the single-digit `focus N` shorthand
+---and the winbar's numbered tab strip can address.
+M.SLOT_MAX = 9
+
+---Re-arrange the entire slot list in one shot. `tail` is the ordered
+---list of section types for slots 1..#tail; slot 0 keeps whatever
+---occupies it today (the config slot).
+---
+---This is the seam `slot modify` cannot cover. `slot_modify` rejects
+---a type that already lives in another slot, which is correct for a
+---single-slot edit but makes a swap impossible — moving `repos` from
+---slot 2 to slot 1 collides with itself. Here the whole list is
+---replaced at once, so any PERMUTATION of the live sections is
+---legal; only duplicates WITHIN the new list are rejected.
+---
+---Validation is all-or-nothing: the registry is rebuilt only once
+---every entry has passed, so a bad entry late in the list leaves the
+---current arrangement untouched.
+---
+---Persisted per workspace, like every other slot mutation —
+---`_rebuild_section_registry` writes the new list through
+---`state.set_sections_for(workspace_key, …)`, so the arrangement
+---survives a restart.
+---@param tail string[]  section types for slots 1..N (slot 0 excluded)
+---@return string|nil err
+function M.slot_assign(tail)
+  if type(tail) ~= "table" then
+    return "slot assign: a list of section types is required"
+  end
+  local cfg = M.state and M.state.config
+  if not cfg or not cfg.sections or not cfg.sections[1] then
+    return "config not initialized"
+  end
+  if #tail == 0 then
+    return "slot assign: at least one section is required "
+      .. "(slot 0 is the config slot and is not assignable)"
+  end
+  if #tail > M.SLOT_MAX then
+    return string.format(
+      "slot assign: at most %d sections (slots 1..%d), got %d",
+      M.SLOT_MAX, M.SLOT_MAX, #tail)
+  end
+
+  -- Whatever sits at slot 0 today stays there. Resolved from the live
+  -- list rather than hardcoded to "config" so a consumer that seeded
+  -- a different head section keeps it protected too.
+  local head = cfg.sections[1]
+
+  local types = M._available_section_types()
+  local known = {}
+  for _, t in ipairs(types) do known[t] = true end
+
+  local seen = {}
+  for i, name in ipairs(tail) do
+    if type(name) ~= "string" or name == "" then
+      return string.format(
+        "slot assign: slot %d — section type must be a non-empty string", i)
+    end
+    if name == head then
+      return string.format(
+        "slot assign: slot %d — '%s' is the protected slot-0 section", i, head)
+    end
+    if not known[name] then
+      return string.format(
+        "slot assign: slot %d — unknown section type '%s' (available: %s)",
+        i, name, table.concat(types, ", "))
+    end
+    if seen[name] then
+      return string.format(
+        "slot assign: slot %d — '%s' is already assigned to slot %d",
+        i, name, seen[name])
+    end
+    seen[name] = i
+  end
+
+  local new_sections = { head }
+  for _, name in ipairs(tail) do
+    new_sections[#new_sections + 1] = name
+  end
+
+  -- Same focus policy as `slot add` / `slot remove`: the command came
+  -- from the admin REPL in slot 0, and the slot the user was on may
+  -- not exist (or may hold something else) afterwards. Keep them
+  -- where they are typing.
+  M._rebuild_section_registry(new_sections, { focus_after = 0 })
+  return nil
+end
+
 ---Register the `auto-finder-repos` neo-tree source so
 ---`cmd.execute({ source = "auto-finder-repos", … })` works inside the
 ---repos section.
