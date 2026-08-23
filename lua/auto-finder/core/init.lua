@@ -282,8 +282,23 @@ function M.ensure_started(cfg)
   -- and the A1 invariant forbids a view from subscribing to those directly —
   -- so they are translated here onto the same auto-finder.core.repos:changed
   -- the view already listens to. One translated topic, one subscriber.
+  -- `auto-finder.core.git:changed` joins them. It is auto-core's
+  -- `core.git.state:changed` ALREADY translated by `core/git.lua` — HEAD, the
+  -- reflog tip and merge markers moving, i.e. commit / checkout / reset /
+  -- staging. Folding the existing translation in beats a second upstream
+  -- subscription: the view keeps listening to exactly one topic (A1) and there
+  -- is still only one place subscribed to the upstream event.
+  --
+  -- Without it the repos panel kept showing an UNCOMMITTED node and a stale
+  -- commit list after a commit, and the only way to see the truth was to
+  -- collapse the worktree and expand it again.
+  --
+  -- Noisier than the worktree topics (staging fires it too), which is
+  -- affordable because the handler only DROPS caches: the next render re-reads,
+  -- and an unexpanded node re-reads nothing.
   for _, up_topic in ipairs({
     "worktree:added", "worktree:removed", "worktree.watch:changed",
+    "auto-finder.core.git:changed",
   }) do
     _sub("upstream_repos_" .. up_topic, up_topic, function(payload)
       require("auto-finder.core.repos").invalidate()

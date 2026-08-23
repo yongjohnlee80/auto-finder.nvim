@@ -96,10 +96,27 @@ local KIND_HL = {
   untracked  = "AutoCoreGitUntracked",
   conflicted = "AutoCoreGitConflicted",
 }
+-- Fallback marker for items with no index side (a commit's files).
 local KIND_MARK = {
   added = "+", modified = "M", deleted = "D",
   renamed = "R", untracked = "+", conflicted = "!",
 }
+
+---_status_mark renders a change's marker.
+---
+---Working-tree items carry porcelain `x`/`y`, and showing BOTH columns is how
+---git itself conveys staged-vs-unstaged: a file staged and then modified again
+---reads `MM`, which a single glyph cannot express. Commit items have no index
+---side, so they keep the one-glyph kind mark, padded to the same width so the
+---paths stay aligned in both cases.
+---@param f table
+---@return string
+local function _status_mark(f)
+  if type(f.x) == "string" and type(f.y) == "string" and #f.x == 1 and #f.y == 1 then
+    return f.x .. f.y
+  end
+  return (KIND_MARK[f.kind] or "?") .. " "
+end
 
 -- ─── render ───────────────────────────────────────────────────
 
@@ -405,9 +422,11 @@ end
 function M.open_diff(row)
   local backend = _repos()
   if not (backend and row and row.repo) then return end
-  local sha = row.node and row.node.sha
-  if not sha then
-    logger.notify("repos: put the cursor on a commit to diff it",
+  local node = row.node
+  local uncommitted = node and node.kind == "uncommitted"
+  local sha = node and node.sha
+  if not sha and not uncommitted then
+    logger.notify("repos: put the cursor on a commit or UNCOMMITTED to diff it",
       { level = vim.log.levels.WARN })
     return
   end
@@ -415,7 +434,15 @@ function M.open_diff(row)
   -- is probed up front, but an unprotected call here surfaced as a raw keymap
   -- traceback rather than a message if that surface was ever incomplete
   -- (ADR-0060 r1 SF2). A missing capability is a notification, not a stacktrace.
-  local dok, files = pcall(backend.diff, row.repo, sha)
+  -- UNCOMMITTED has no sha; it diffs the WORKING TREE instead. Until now `o`
+  -- on it warned "put the cursor on a commit" and returned, so the one node
+  -- whose diff you most often want was the only one you could not open.
+  local dok, files
+  if uncommitted then
+    dok, files = pcall(backend.diff_working, row.worktree)
+  else
+    dok, files = pcall(backend.diff, row.repo, sha)
+  end
   if not dok then
     logger.notify("repos: cannot diff — " .. tostring(files),
       { level = vim.log.levels.ERROR })
@@ -423,7 +450,8 @@ function M.open_diff(row)
   end
   files = files or {}
   if #files == 0 then
-    logger.notify("repos: no diff for " .. tostring(row.node.short),
+    logger.notify("repos: no diff for "
+      .. tostring(uncommitted and "UNCOMMITTED" or row.node.short),
       { level = vim.log.levels.WARN })
     return
   end
@@ -432,7 +460,8 @@ function M.open_diff(row)
   -- renders over an earlier one rather than being hidden by it.
   local annotations = {}
   local ok_rev, review = pcall(require, "worktree.review")
-  if ok_rev then
+  -- Reviews are keyed by commit; UNCOMMITTED has none to merge.
+  if ok_rev and sha then
     local revs = backend.reviews(row.repo, sha)
     for i = #revs, 1, -1 do
       -- pcall'd: only the `require` above was guarded, so ONE malformed review
