@@ -801,9 +801,23 @@ local function _debug(row)
     local LISTENER_KEY = "auto-finder-tests-ephemeral-bp"
     local function cleanup()
       -- Remove only the specific injected breakpoint, not user ones.
-      -- dap.breakpoints.remove(bufnr, lnum) is cursor-independent.
+      -- Route through auto-run when it can: clearing nvim-dap's registry
+      -- alone leaves the STORE holding this line, because auto-run
+      -- reconciles on autocmds and on an interval — so an ephemeral
+      -- breakpoint set for one debug run gets persisted mid-session and is
+      -- then re-applied by `restore()` on the next read of that file, as a
+      -- breakpoint the user never set. `remove(path, lnum)` drops it from
+      -- both and is equally cursor-independent. Capability-probed; older
+      -- auto-run falls back to the registry-only removal, which is no worse
+      -- than before.
       if vim.api.nvim_buf_is_valid(injected_bufnr) then
-        pcall(dap_bps.remove, injected_bufnr, injected_line)
+        local path = vim.api.nvim_buf_get_name(injected_bufnr)
+        local removed = false
+        if ar and type(ar.breakpoints) == "table"
+          and type(ar.breakpoints.remove) == "function" and path ~= "" then
+          removed = pcall(ar.breakpoints.remove, path, injected_line)
+        end
+        if not removed then pcall(dap_bps.remove, injected_bufnr, injected_line) end
         log().info("view.tests",
           "removed ephemeral breakpoint at line " .. injected_line)
       end
