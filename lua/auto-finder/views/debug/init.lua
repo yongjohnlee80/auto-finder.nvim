@@ -456,17 +456,21 @@ end
 ---@param name string
 ---@return string?
 local function _config_file(name)
-  local ok, paths = pcall(require, "auto-run.store.paths")
-  if not ok then return nil end
-  local okd, dirs = pcall(paths.resolve_run_dirs)
-  if not okd or type(dirs) ~= "table" then return nil end
-  for _, tier_dir in ipairs({ dirs.tracked, dirs.shared }) do
-    if type(tier_dir) == "string" then
-      local candidate = paths.configs_dir(tier_dir) .. "/" .. name .. ".json"
-      if vim.fn.filereadable(candidate) == 1 then return candidate end
-    end
+  -- auto-run owns where a config lives; ask it rather than rebuilding
+  -- `configs_dir() .. "/" .. name .. ".json"` here, which duplicated the
+  -- store's layout in this view and would rot silently if the record naming
+  -- changed ([[auto-family-state-ownership]]). Capability-probed rather than
+  -- version-gated: auto-run's M.version lags its releases, so the function's
+  -- presence is the only honest signal (added auto-run v0.1.x, ADR-0048 P3
+  -- follow-up). Older auto-run → nil, and both call sites already treat nil
+  -- as "no editable store file".
+  local ar = _auto_run()
+  if not ar or type(ar.store) ~= "table"
+    or type(ar.store.config_file) ~= "function" then
+    return nil
   end
-  return nil
+  local ok, path = pcall(ar.store.config_file, name)
+  return ok and path or nil
 end
 
 -- ─── render ───────────────────────────────────────────────────

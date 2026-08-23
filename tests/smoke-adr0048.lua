@@ -598,6 +598,21 @@ print("\n[47] ADR-0048 Phase 3 — views.debug (entry points / sessions / breakp
     },
   })
   ok("p47: kind=debug config added", p1 ~= nil, tostring(e1))
+
+  -- The cross-plugin contract the debug view's `e` keymap rides on. The view
+  -- capability-probes `store.config_file` and returns nil when it is absent,
+  -- so a silently-missing API degrades to "no editable store file" with no
+  -- error — exactly the failure a contract assertion has to catch here rather
+  -- than at a user's keystroke (ADR-0048 P3 follow-up).
+  ok("p47: auto-run exposes store.config_file (the `e` keymap's resolver)",
+    type(store.config_file) == "function", type(store.config_file))
+  if type(store.config_file) == "function" then
+    ok("p47: config_file resolves to the file add() wrote",
+      store.config_file("dbg-app") == p1,
+      tostring(store.config_file("dbg-app")) .. " vs " .. tostring(p1))
+    ok("p47: config_file is nil for a name with no store file (shim/absent)",
+      store.config_file("not-a-real-config") == nil)
+  end
   local p2, e2 = store.add({
     name = "run-app", kind = "run", program = "sh",
     args = { "-c", "true" },
