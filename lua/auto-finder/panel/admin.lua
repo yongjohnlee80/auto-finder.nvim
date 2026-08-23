@@ -42,6 +42,8 @@ local function help_lines()
     "  slot add <type>              add a section of <type> at the end of the slot list",
     "  slot remove <N>              remove section at slot N (N>=1; slot 0 is protected)",
     "  slot modify <N> <type>       replace the section at slot N with <type>",
+    "  slot assign                  walk slots 1..9 and re-arrange them interactively",
+    "  slot assign <t1> <t2> …      set the whole arrangement in one line",
     "  slot types                   list available section types",
     "  dbase new <name>             create empty connections vault (encrypted if age/gpg present)",
     "  dbase ls                     list available vaults",
@@ -219,6 +221,194 @@ end
 
 local function is_help_token(tok)
   return tok == "help" or tok == "?" or tok == ":h"
+end
+
+---Build + start the interactive `slot assign` walk.
+---
+---Runs through `panel.wizard` — the same step runner the dbase
+---wizards use — rather than a `vim.ui.input` chain, so the whole
+---re-arrangement stays in the REPL transcript and <C-c> cancels it
+---like every other multi-step prompt in this buffer.
+---
+---One step per slot 1..`SLOT_MAX`:
+---   <type>   assign that section type to this slot
+---   <CR>     (empty) finish the list here — unreached slots are dropped
+---   <C-c>    cancel; the current arrangement is untouched
+---
+---A rejected entry re-asks the SAME slot rather than unwinding the
+---walk, so a typo costs one line and not the whole arrangement. The
+---end-of-walk drop is confirmed only when it actually removes a
+---section — a pure re-arrangement applies straight through.
+local function start_slot_assign_wizard()
+  local wizard = require("auto-finder.panel.wizard")
+  local af = require("auto-finder")
+  local cfg = af.state and af.state.config
+  if not cfg or not cfg.sections or not cfg.sections[1] then
+    emit({ "slot assign: config not initialized" })
+    return
+  end
+
+  local current  = cfg.sections
+  local head     = current[1]
+  local max_slot = af.SLOT_MAX or 9
+
+  -- Everything the registry knows about minus the protected slot-0
+  -- section. Recomputed per invocation (not cached) so third-party
+  -- sections registered since the last call are offered too.
+  local offerable = {}
+  for _, t in ipairs(af._available_section_types()) do
+    if t ~= head then offerable[#offerable + 1] = t end
+  end
+
+  local function field(n) return "slot" .. n end
+
+  ---Types assigned by steps 1..n-1, in slot order. Stops at the first
+  ---unset slot, which is exactly where the walk ended.
+  local function assigned_before(values, n)
+    local out = {}
+    for i = 1, n - 1 do
+      local v = values[field(i)]
+      if v == nil then break end
+      out[#out + 1] = v
+    end
+    return out
+  end
+
+  local function remaining_for(values, n)
+    local taken = {}
+    for _, t in ipairs(assigned_before(values, n)) do taken[t] = true end
+    local out = {}
+    for _, t in ipairs(offerable) do
+      if not taken[t] then out[#out + 1] = t end
+    end
+    return out
+  end
+
+  local steps = {}
+  for n = 1, max_slot do
+    steps[#steps + 1] = {
+      field = field(n),
+      -- Both skip conditions are derived from `values`, so the runner
+      -- needs no extra state: skip once the walk has ended (the
+      -- previous slot came back empty) or once every offerable type
+      -- is already spoken for.
+      skip = function(values)
+        if n > 1 and values[field(n - 1)] == nil then return true end
+        return #remaining_for(values, n) == 0
+      end,
+      -- The banner's `available:` list goes stale the moment slot 1 is
+      -- answered, so each question re-states what is still free. This
+      -- is why `wizard` step prompts had to accept a function of the
+      -- values collected so far — a static string cannot narrow.
+      prompt = function(values)
+        local now  = current[n + 1]
+        local free = table.concat(remaining_for(values, n), ", ")
+        local bits = {}
+        if now then bits[#bits + 1] = "now " .. now end
+        bits[#bits + 1] = "free: " .. free
+        return string.format("slot %d [%s]", n, table.concat(bits, " | "))
+      end,
+      -- Normalise before validation so a whitespace-only line reads as
+      -- "empty" (end of list) rather than as a section named "  ".
+      parse = function(v)
+        if v == nil then return nil end
+        v = vim.trim(tostring(v))
+        if v == "" then return nil end
+        return v
+      end,
+      validate = function(value, values)
+        if value == nil then return true end   -- empty → end of list
+        if value == head then
+          return false, "'" .. value .. "' is the protected slot-0 section"
+        end
+        for i, t in ipairs(assigned_before(values, n)) do
+          if t == value then
+            return false, "'" .. value .. "' is already at slot " .. i
+          end
+        end
+        for _, t in ipairs(offerable) do
+          if t == value then return true end
+        end
+        return false, "unknown type '" .. value .. "' — remaining: "
+          .. table.concat(remaining_for(values, n), ", ")
+      end,
+    }
+  end
+
+  local function apply(tail, out)
+    local err = af.slot_assign(tail)
+    if err then
+      out({ "  ! " .. err })
+      return
+    end
+    out({
+      "  slots: " .. table.concat(af.state.config.sections, " "),
+      "  saved for this workspace — survives a restart.",
+    })
+  end
+
+  local shown = {}
+  for i = 2, #current do
+    shown[#shown + 1] = (i - 1) .. ":" .. current[i]
+  end
+
+  wizard.start({
+    name = "slot assign",
+    banner = {
+      "slot assign — re-arrange slots 1.." .. max_slot
+        .. " (slot 0 '" .. head .. "' is fixed)",
+      "  current:   " .. (#shown > 0 and table.concat(shown, "  ") or "(none)"),
+      "  available: " .. table.concat(offerable, ", "),
+      "  empty <CR> ends the list; slots you never reach are dropped.",
+    },
+    steps = steps,
+    on_cancel = function(out)
+      if out then out({ "  slot assign: cancelled — slots unchanged." }) end
+    end,
+    on_complete = function(values, out)
+      local tail = assigned_before(values, max_slot + 1)
+      if #tail == 0 then
+        out({ "  slot assign: nothing assigned — slots unchanged." })
+        return
+      end
+
+      local kept = {}
+      for _, t in ipairs(tail) do kept[t] = true end
+      local dropped = {}
+      for i = 2, #current do
+        if not kept[current[i]] then dropped[#dropped + 1] = current[i] end
+      end
+      if #dropped == 0 then return apply(tail, out) end
+
+      -- Ending the walk early removes every section you did not
+      -- re-list, taking its buffer with it. Cheap to do by accident on
+      -- a wide arrangement, so this one case asks first.
+      out({
+        "  result:   " .. head .. " " .. table.concat(tail, " "),
+        "  dropping: " .. table.concat(dropped, ", "),
+      })
+      local noun = (#dropped == 1) and "section" or "sections"
+      wizard.start({
+        name = "slot assign — confirm",
+        steps = { {
+          field   = "confirm",
+          prompt  = "apply, dropping " .. #dropped .. " " .. noun .. "?",
+          choices = { "y", "n" },
+          default = "n",
+        } },
+        on_cancel = function(cout)
+          if cout then cout({ "  slot assign: cancelled — slots unchanged." }) end
+        end,
+        on_complete = function(cvals, cout)
+          if tostring(cvals.confirm or "n"):lower():match("^y") then
+            apply(tail, cout)
+          else
+            cout({ "  slot assign: cancelled — slots unchanged." })
+          end
+        end,
+      }, out)
+    end,
+  }, emit)
 end
 
 -- Forward declarations: dispatch() needs help_topic_lines and
@@ -413,12 +603,30 @@ local function dispatch(input)
             .. "   sections: " .. table.concat(af.state.config.sections, " ") })
         end
       end
+    elseif sub == "assign" then
+      if toks[3] then
+        -- One-line form: `slot assign <t1> [<t2> …]` replaces the
+        -- whole arrangement without prompting. Same all-or-nothing
+        -- validation as the walk — for a user who already knows the
+        -- layout they want (and the seam tests drive).
+        local tail = {}
+        for i = 3, #toks do tail[#tail + 1] = toks[i] end
+        local err = af.slot_assign(tail)
+        if err then
+          emit({ err })
+        else
+          emit({ "slot assign: sections: "
+            .. table.concat(af.state.config.sections, " ") })
+        end
+      else
+        start_slot_assign_wizard()
+      end
     elseif sub == "types" then
       local types = af._available_section_types()
       emit({ "available section types: " .. table.concat(types, ", ") })
     else
-      emit({ "slot: subcommand must be 'add', 'remove', 'modify', or 'types' (got '"
-        .. tostring(sub) .. "')" })
+      emit({ "slot: subcommand must be 'add', 'remove', 'modify', "
+        .. "'assign', or 'types' (got '" .. tostring(sub) .. "')" })
     end
 
   else
@@ -592,7 +800,20 @@ local function complete_at(prompt, cursor_col)
   elseif #prev_toks == 2 and prev_toks[1] == "repos" and prev_toks[2] == "follow" then
     candidates = { "on", "off", "toggle" }
   elseif #prev_toks == 1 and prev_toks[1] == "slot" then
-    candidates = { "add", "remove", "modify", "types" }
+    candidates = { "add", "remove", "modify", "assign", "types" }
+  elseif #prev_toks >= 2 and prev_toks[1] == "slot"
+      and prev_toks[2] == "assign" then
+    -- `slot assign <t1> <t2> …` takes a type at every position, so
+    -- offer everything not already named on this line and not the
+    -- protected slot-0 section.
+    candidates = {}
+    local af = require("auto-finder")
+    local sections = af.state.config.sections or {}
+    local used = { [sections[1] or ""] = true }
+    for i = 3, #prev_toks do used[prev_toks[i]] = true end
+    for _, t in ipairs(af._available_section_types()) do
+      if not used[t] then candidates[#candidates + 1] = t end
+    end
   elseif #prev_toks == 2 and prev_toks[1] == "slot"
       and (prev_toks[2] == "add" or prev_toks[2] == "modify") then
     -- For add: only types NOT already in cfg.sections (no dupes).
@@ -760,6 +981,8 @@ local TOPIC_HELP = {
       "  slot add <type>              append a section of <type> at the end",
       "  slot remove <N>              remove section at slot N (N >= 1)",
       "  slot modify <N> <type>       replace the section at slot N",
+      "  slot assign                  interactive walk over slots 1..9",
+      "  slot assign <t1> <t2> …      set the whole arrangement in one line",
       "  slot types                   list all available section types",
       "",
       "  <type> must be one of `slot types`'s output. Available right now:",
@@ -767,11 +990,24 @@ local TOPIC_HELP = {
       "  Third-party sections registered via `cfg.section_modules` also",
       "  show up; the list is recomputed on every `slot types` call.",
       "",
-      "  Slot 0 (config) is protected — `remove` / `modify` reject it.",
+      "  Slot 0 (config) is protected — `remove` / `modify` / `assign`",
+      "  all reject it.",
       "  Duplicates are rejected: a section type can only live in one slot",
-      "  at a time. Mutations are SESSION-ONLY in v0.2.5 (do not survive",
-      "  nvim restart); persisting via the auto-finder state namespace is",
-      "  a follow-up.",
+      "  at a time.",
+      "",
+      "  `assign` is the one that can RE-ARRANGE. `modify` edits a single",
+      "  slot and refuses a type that already lives elsewhere, so it can",
+      "  never swap two slots; `assign` replaces the whole list at once,",
+      "  so any permutation of the live sections is legal.",
+      "  The walk asks slot by slot, showing the current occupant. An",
+      "  empty <CR> ends the list — every slot you did not reach is",
+      "  dropped, and that case asks for confirmation before applying.",
+      "  <C-c> cancels the walk with nothing changed.",
+      "",
+      "  Slot mutations PERSIST per workspace (keyed by workspace root)",
+      "  via the auto-finder state namespace, so an arrangement survives",
+      "  an nvim restart. (Superseded the session-only behaviour this",
+      "  help used to describe.)",
       "",
     }
   end,

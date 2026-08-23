@@ -20,7 +20,7 @@ local M = {}
 
 ---@class AutoFinderWizardStep
 ---@field field string
----@field prompt string
+---@field prompt any                -- string, or function(values) -> string
 ---@field default? any              -- string, or function(values) -> string
 ---@field choices? string[]
 ---@field placeholder? string
@@ -55,6 +55,12 @@ local function reset()
 end
 
 local function compose_question(step, values)
+  -- `prompt` may be a function of the values collected so far, the
+  -- same way `default` already can. Lets a step's question name what
+  -- earlier steps chose (e.g. the slot-assign walk showing which
+  -- section types are still unassigned).
+  local prompt = step.prompt
+  if type(prompt) == "function" then prompt = prompt(values) end
   local default = step.default
   if type(default) == "function" then default = default(values) end
   local placeholder = step.placeholder
@@ -64,7 +70,7 @@ local function compose_question(step, values)
     hint = " (" .. table.concat(step.choices, "|") .. ")"
   end
   local default_hint = placeholder and ("  [" .. placeholder .. "]") or ""
-  return step.prompt .. hint .. default_hint .. ":"
+  return tostring(prompt) .. hint .. default_hint .. ":"
 end
 
 local function render_step()

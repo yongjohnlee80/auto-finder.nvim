@@ -6116,6 +6116,390 @@ end)
 -- surviving no-backend behaviour is pinned by §[35] A16, and the view contract
 -- it also checked is enforced by the section registry itself.
 
+
+-- ───── [51] `slot assign` — re-arrange the whole slot list ─────────
+-- The gap this fills: `slot modify N <type>` rejects a type that
+-- already lives in another slot, which is right for a single-slot
+-- edit but makes a SWAP impossible — moving `repos` from slot 2 to
+-- slot 1 collides with itself. `slot assign` replaces the whole list
+-- at once, so any permutation is legal and only duplicates WITHIN the
+-- new list are rejected. Three surfaces are pinned here: the
+-- `af.slot_assign(tail)` API, the one-line `slot assign <t…>` DSL,
+-- and the interactive walk driven through `panel.wizard`.
+--
+-- Runs last on purpose: it rewrites `cfg.sections` repeatedly. The
+-- original arrangement is restored at the end regardless.
+print("\n[51] slot assign — whole-list re-arrangement")
+section(function()
+local admin  = require("auto-finder.panel.admin")
+local wizard = require("auto-finder.panel.wizard")
+local st     = require("auto-finder.state")
+local restore = vim.deepcopy(af.state.config.sections)
+
+local function secs() return table.concat(af.state.config.sections, " ") end
+local function has(list, want)
+  for _, v in ipairs(list or {}) do if v == want then return true end end
+  return false
+end
+
+ok("p51: slot 0 is 'config' (baseline for the protected-head checks)",
+  af.state.config.sections[1] == "config", secs())
+ok("p51: SLOT_MAX is exposed for the walk's upper bound",
+  af.SLOT_MAX == 9, tostring(af.SLOT_MAX))
+
+-- (a) the permutation `slot modify` cannot express.
+af.slot_assign({ "files", "repos" })
+local mod_err = af.slot_modify(1, "repos")
+ok("p51: slot_modify still refuses a cross-slot swap (the contrast)",
+  mod_err ~= nil and mod_err:match("already lives at slot") ~= nil,
+  tostring(mod_err))
+local err = af.slot_assign({ "repos", "files" })
+ok("p51: slot_assign accepts the same swap", err == nil, err)
+ok("p51: order applied", secs() == "config repos files", secs())
+local reg = {}
+for _, s in ipairs(require("auto-finder.views").enabled()) do
+  reg[#reg + 1] = s.number .. ":" .. s.name
+end
+ok("p51: the live registry re-numbers to match",
+  table.concat(reg, " ") == "0:config 1:repos 2:files", table.concat(reg, " "))
+
+-- (b) validation is all-or-nothing: a bad entry anywhere leaves the
+-- current arrangement untouched rather than half-applying.
+local before = secs()
+err = af.slot_assign({ "files", "files" })
+ok("p51: duplicate rejected",
+  err ~= nil and err:match("already assigned to slot 1") ~= nil, tostring(err))
+ok("p51:   …and nothing was applied", secs() == before, secs())
+err = af.slot_assign({ "files", "config" })
+ok("p51: the slot-0 section is rejected in the tail",
+  err ~= nil and err:match("protected slot%-0 section") ~= nil, tostring(err))
+ok("p51:   …and the valid leading entry was NOT applied alone",
+  secs() == before, secs())
+err = af.slot_assign({ "definitely-not-a-view" })
+ok("p51: unknown type rejected",
+  err ~= nil and err:match("unknown section type") ~= nil, tostring(err))
+err = af.slot_assign({})
+ok("p51: an empty list is rejected (slot 0 alone is not an arrangement)",
+  err ~= nil and err:match("at least one section") ~= nil, tostring(err))
+err = af.slot_assign("files")
+ok("p51: a non-list is rejected",
+  err ~= nil and err:match("list of section types") ~= nil, tostring(err))
+local over = {}
+for i = 1, af.SLOT_MAX + 1 do over[i] = "slot" .. i end
+err = af.slot_assign(over)
+ok("p51: more than SLOT_MAX entries is rejected",
+  err ~= nil and err:match("at most 9 sections") ~= nil, tostring(err))
+
+-- (c) persistence. `_workspace_key()` is nil under headless `-u NONE`
+-- with no workspace_root, so a bare "is it stored?" read would come
+-- back nil and prove nothing either way. Stub the resolver to a key
+-- of our own, assert it is EMPTY first (the positive control that
+-- this check can tell written from unwritten), then assign and read.
+local core = require("auto-core")
+local real_root = core.git.worktree.get_workspace_root
+core.git.worktree.get_workspace_root = function() return "/tmp/af-p51-ws" end
+local wskey = af._workspace_key()
+ok("p51: workspace key resolves under the stub", type(wskey) == "string",
+  tostring(wskey))
+ok("p51: control — nothing is persisted for that key yet",
+  wskey and st.get_sections_for(wskey) == nil,
+  vim.inspect(wskey and st.get_sections_for(wskey)))
+af.slot_assign({ "repos", "files", "buffers" })
+local persisted = wskey and st.get_sections_for(wskey)
+ok("p51: the arrangement is persisted per workspace (NOT session-only)",
+  persisted ~= nil and table.concat(persisted, " ") == "config repos files buffers",
+  persisted and table.concat(persisted, " ") or "nil")
+core.git.worktree.get_workspace_root = real_root
+
+-- (d) the one-line DSL form.
+admin.dispatch("slot assign files repos")
+ok("p51: `slot assign <t…>` applies the whole arrangement",
+  secs() == "config files repos", secs())
+admin.dispatch("slot assign repos repos")
+ok("p51: the DSL form rejects duplicates too",
+  secs() == "config files repos", secs())
+
+-- (e) tab-completion, consistent with the other `slot` verbs.
+local _, subs = admin._complete_at("slot ", 5)
+ok("p51: `slot ` completes 'assign'", has(subs, "assign"),
+  table.concat(subs, ","))
+ok("p51: `slot ` still completes 'modify'", has(subs, "modify"),
+  table.concat(subs, ","))
+local _, c1 = admin._complete_at("slot assign ", 12)
+ok("p51: `slot assign ` completes section types", has(c1, "files"),
+  table.concat(c1, ","))
+ok("p51: `slot assign ` never offers the protected slot-0 section",
+  not has(c1, "config"), table.concat(c1, ","))
+local _, c2 = admin._complete_at("slot assign files ", 18)
+ok("p51: a type already on the line drops out of the candidates",
+  not has(c2, "files") and has(c2, "repos"), table.concat(c2, ","))
+
+-- (f) the interactive walk. Driven through wizard.feed(), which is
+-- exactly what the admin prompt buffer's <CR> callback calls while a
+-- wizard is active.
+local admin_buf = admin.get_or_create_buffer()
+local function transcript()
+  return table.concat(
+    vim.api.nvim_buf_get_lines(admin_buf, 0, -1, false), "\n")
+end
+
+admin.dispatch("slot assign buffers marks")
+ok("p51: staged a two-slot arrangement for the walk",
+  secs() == "config buffers marks", secs())
+admin.dispatch("slot assign")
+ok("p51: a bare `slot assign` starts the walk", wizard.is_active())
+local banner = transcript()
+ok("p51: the walk banner names the fixed slot 0",
+  banner:find("slot 0 'config' is fixed", 1, true) ~= nil)
+ok("p51: the banner lists the current arrangement",
+  banner:find("1:buffers", 1, true) ~= nil
+    and banner:find("2:marks", 1, true) ~= nil)
+ok("p51: the first question shows the slot's current occupant",
+  banner:find("slot 1 [now buffers", 1, true) ~= nil, banner)
+ok("p51: the first question lists what is still free",
+  banner:find("free: ", 1, true) ~= nil, banner)
+
+---Last transcript line matching `pat` — the questions repeat, so the
+---assertions below must read the most recent one, not the first.
+local function last_line(pat)
+  local found
+  for _, l in ipairs(vim.api.nvim_buf_get_lines(admin_buf, 0, -1, false)) do
+    if l:find(pat) then found = l end
+  end
+  return found or ""
+end
+
+-- A rejected entry re-asks the SAME slot instead of unwinding.
+wizard.feed("definitely-not-a-view")
+ok("p51: an unknown type keeps the walk on the same slot",
+  wizard.is_active() and transcript():find("unknown type", 1, true) ~= nil)
+wizard.feed("config")
+ok("p51: the slot-0 section is refused mid-walk",
+  wizard.is_active()
+    and transcript():find("protected slot-0 section", 1, true) ~= nil)
+wizard.feed("marks")
+-- The banner's `available:` list is a snapshot; each question has to
+-- re-state what is STILL free or the walk misreports its own choices.
+local q2 = last_line("slot 2 %[")
+-- Scope the check to the `free:` list — "marks" also appears in this
+-- line's `now marks` label, so a whole-line search would pass on the
+-- wrong substring and prove nothing.
+local free2 = q2:match("free: (.*)%]") or ""
+ok("p51: the next question drops the type just assigned",
+  free2 ~= "" and free2:find("marks", 1, true) == nil, q2)
+ok("p51: the next question still offers an unassigned type",
+  free2:find("buffers", 1, true) ~= nil, q2)
+wizard.feed("marks")
+ok("p51: a duplicate is refused mid-walk",
+  wizard.is_active()
+    and transcript():find("is already at slot 1", 1, true) ~= nil)
+wizard.feed("buffers")
+wizard.feed("")   -- ends the list; both sections re-listed → no drop
+ok("p51: an empty entry ends the walk", not wizard.is_active())
+ok("p51: a pure re-arrangement applies with no confirmation step",
+  secs() == "config marks buffers", secs())
+
+-- Ending early DROPS the slots you never reached, so that case asks.
+admin.dispatch("slot assign")
+wizard.feed("buffers")
+wizard.feed("")
+ok("p51: ending early raises a confirmation step", wizard.is_active())
+ok("p51: the confirmation names what would be dropped",
+  transcript():find("dropping: marks", 1, true) ~= nil)
+wizard.feed("n")
+ok("p51: declining leaves the arrangement untouched",
+  not wizard.is_active() and secs() == "config marks buffers", secs())
+admin.dispatch("slot assign")
+wizard.feed("buffers")
+wizard.feed("")
+wizard.feed("y")
+ok("p51: confirming applies the drop",
+  not wizard.is_active() and secs() == "config buffers", secs())
+
+-- Whitespace-only reads as empty, not as a section named "  ".
+admin.dispatch("slot assign")
+wizard.feed("   ")
+ok("p51: a whitespace-only entry ends the walk without assigning",
+  not wizard.is_active() and secs() == "config buffers", secs())
+
+-- <C-c> mid-walk changes nothing.
+admin.dispatch("slot assign")
+wizard.feed("marks")
+wizard.cancel()
+ok("p51: cancelling mid-walk leaves the arrangement untouched",
+  not wizard.is_active() and secs() == "config buffers", secs())
+
+-- Restore whatever the suite was running with.
+af.slot_assign(vim.list_slice(restore, 2, #restore))
+ok("p51: original arrangement restored",
+  secs() == table.concat(restore, " "), secs())
+end)
+
+
+-- ───── [52] permutation preserves survivor buffers, keymaps, winbar ─────
+-- The high-risk half of `slot assign`. `_rebuild_section_registry` was
+-- written for add/remove, where a survivor keeps its section NUMBER.
+-- A permutation is the first caller that keeps every section but moves
+-- it to a different number, and the only thing carrying a mounted
+-- buffer across is the `old_bufs_by_name` bridge (init.lua §"Carry
+-- survivor `_bufs` entries forward"): old number → name → new number.
+--
+-- [51] asserts the re-numbered `views.enabled()` METADATA, which is
+-- cheap to get right and proves nothing about that bridge — with the
+-- bridge disabled outright, [51] still passed 651/0. This section
+-- pins the observable contract instead (ADR-0033's `_bufs` / keymap /
+-- winbar surface, and the [[0008-auto-finder-keymap-audit]] runtime
+-- slot-mutation addendum): the same buffer object must survive under
+-- its NEW number, stay valid, keep its buffer-local bindings, and
+-- still be what the numeric keymap mounts.
+--
+-- Two synthetic views are registered through `cfg.view_modules` rather
+-- than reusing `files` / `repos`: they mount synchronously, so the
+-- assertions are about the registry and not about neo-tree timing.
+-- Reported by lector on PR #2.
+print("\n[52] slot assign — survivors keep their buffers across a permutation")
+section(function()
+local restore_sections = vim.deepcopy(af.state.config.sections)
+local restore_modules  = af.state.config.view_modules
+
+-- Two trivial synchronous views. Each caches its own bufnr, exactly
+-- like a real view, so a re-mount is observable as a DIFFERENT bufnr.
+local function make_view(label)
+  local V = {}
+  V.get_buffer = function()
+    if V._bufnr and vim.api.nvim_buf_is_valid(V._bufnr) then return V._bufnr end
+    local b = vim.api.nvim_create_buf(false, true)
+    vim.bo[b].bufhidden = "hide"
+    vim.api.nvim_buf_set_lines(b, 0, -1, false, { "synthetic view: " .. label })
+    V._bufnr = b
+    return b
+  end
+  V.on_close = function() V._bufnr = nil end
+  return V
+end
+package.loaded["af_p52_alpha"] = make_view("alpha")
+package.loaded["af_p52_beta"]  = make_view("beta")
+af.state.config.view_modules = {
+  p52alpha = "af_p52_alpha",
+  p52beta  = "af_p52_beta",
+}
+
+local types = af._available_section_types()
+local function known(t)
+  for _, v in ipairs(types) do if v == t then return true end end
+  return false
+end
+ok("p52: third-party views are discoverable as slot types",
+  known("p52alpha") and known("p52beta"), table.concat(types, ","))
+
+local err = af.slot_assign({ "p52alpha", "p52beta" })
+ok("p52: assigned the two synthetic views", err == nil, err)
+
+-- Mount both so the registry actually caches a bufnr per section.
+af.open(true)
+af.focus(1)
+af.focus(2)
+local reg = af._registry
+local buf_alpha, buf_beta = reg._bufs[1], reg._bufs[2]
+ok("p52: both survivors are mounted before the permutation",
+  buf_alpha and buf_beta and vim.api.nvim_buf_is_valid(buf_alpha)
+    and vim.api.nvim_buf_is_valid(buf_beta),
+  tostring(buf_alpha) .. "/" .. tostring(buf_beta))
+ok("p52: the two survivors are distinct buffers", buf_alpha ~= buf_beta,
+  tostring(buf_alpha) .. "/" .. tostring(buf_beta))
+-- Control for the swap assertion below: BEFORE the permutation the
+-- mapping runs the other way round. Without this, "_bufs[1]==buf_beta"
+-- after the swap could be read as an accident of ordering.
+ok("p52: control — before the swap, slot 1 holds alpha",
+  reg._bufs[1] == buf_alpha and reg._bufs[2] == buf_beta)
+
+-- ── the permutation ──
+err = af.slot_assign({ "p52beta", "p52alpha" })
+ok("p52: the swap is accepted", err == nil, err)
+ok("p52: section list is swapped",
+  table.concat(af.state.config.sections, " ") == "config p52beta p52alpha",
+  table.concat(af.state.config.sections, " "))
+
+-- THE assertion the disabled-bridge mutation probe defeats.
+ok("p52: alpha's buffer followed it from slot 1 to slot 2",
+  af._registry._bufs[2] == buf_alpha,
+  "want " .. tostring(buf_alpha) .. " got " .. tostring(af._registry._bufs[2]))
+ok("p52: beta's buffer followed it from slot 2 to slot 1",
+  af._registry._bufs[1] == buf_beta,
+  "want " .. tostring(buf_beta) .. " got " .. tostring(af._registry._bufs[1]))
+-- A survivor must be CARRIED, not closed and re-created: both the
+-- buffer object and its contents have to be the originals.
+ok("p52: survivor buffers were not deleted",
+  vim.api.nvim_buf_is_valid(buf_alpha) and vim.api.nvim_buf_is_valid(buf_beta))
+ok("p52: alpha's buffer kept its contents (not re-mounted)",
+  vim.api.nvim_buf_get_lines(buf_alpha, 0, 1, false)[1] == "synthetic view: alpha",
+  vim.inspect(vim.api.nvim_buf_get_lines(buf_alpha, 0, 1, false)))
+
+-- ── the numeric keymap routes to the RE-NUMBERED section ──
+-- Resolve the window from the panel object rather than the
+-- `af.state.panel_winid` mirror. The mirror is maintained by the
+-- panel's on_open/on_close callbacks, and by this point in the suite
+-- it can be stale from earlier sections' open/close churn; the
+-- registry's own `focus()` reads `self.panel.winid`, so that is the
+-- window whose buffer actually changes. (Verified in isolation that a
+-- permutation leaves both in agreement — the drift is accumulated
+-- suite state, not something `slot assign` causes.)
+af.focus(1)
+local panel_winid = (af._registry and af._registry.panel
+  and af._registry.panel.winid) or af.state.panel_winid
+ok("p52: the panel window is resolvable for the routing checks",
+  panel_winid ~= nil and vim.api.nvim_win_is_valid(panel_winid),
+  tostring(panel_winid))
+ok("p52: focusing slot 1 mounts beta's buffer after the swap",
+  panel_winid and vim.api.nvim_win_get_buf(panel_winid) == buf_beta,
+  tostring(panel_winid and vim.api.nvim_win_get_buf(panel_winid)))
+
+local maps = vim.api.nvim_buf_get_keymap(buf_beta, "n")
+local map_2, map_q
+for _, m in ipairs(maps) do
+  if m.lhs == "2" then map_2 = m end
+  if m.lhs == "q" then map_q = m end
+end
+ok("p52: buffer-local numeric mapping survives the permutation",
+  map_2 ~= nil and map_2.callback ~= nil)
+ok("p52: buffer-local `q` mapping survives the permutation",
+  map_q ~= nil and map_q.callback ~= nil)
+-- Press `2` for real: it must mount alpha, which now lives at slot 2.
+if map_2 and map_2.callback then
+  pcall(map_2.callback)
+  ok("p52: pressing `2` mounts alpha at its new slot",
+    vim.api.nvim_win_get_buf(panel_winid) == buf_alpha,
+    tostring(vim.api.nvim_win_get_buf(panel_winid)))
+else
+  ok("p52: pressing `2` mounts alpha at its new slot", false, "no `2` mapping")
+end
+
+-- ── winbar reflects the new order and stays clickable ──
+local winbar = vim.api.nvim_get_option_value("winbar", { win = panel_winid })
+ok("p52: winbar lists both survivors after the permutation",
+  winbar:find("p52beta", 1, true) ~= nil
+    and winbar:find("p52alpha", 1, true) ~= nil, winbar)
+ok("p52: winbar keeps its click router after the permutation",
+  winbar:find("auto%-core%.ui%.winbar") ~= nil, winbar)
+ok("p52: winbar orders beta before alpha (the new arrangement)",
+  winbar:find("p52beta", 1, true) < winbar:find("p52alpha", 1, true), winbar)
+
+-- Restore the suite's arrangement, then unregister the synthetic views.
+af.slot_assign(vim.list_slice(restore_sections, 2, #restore_sections))
+af.state.config.view_modules = restore_modules
+package.loaded["af_p52_alpha"] = nil
+package.loaded["af_p52_beta"]  = nil
+for _, b in ipairs({ buf_alpha, buf_beta }) do
+  if b and vim.api.nvim_buf_is_valid(b) then
+    pcall(vim.api.nvim_buf_delete, b, { force = true })
+  end
+end
+ok("p52: original arrangement restored",
+  table.concat(af.state.config.sections, " ")
+    == table.concat(restore_sections, " "),
+  table.concat(af.state.config.sections, " "))
+end)
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

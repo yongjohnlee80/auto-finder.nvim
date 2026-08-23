@@ -2,6 +2,69 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — `slot assign`: re-arrange the panel slots
+
+`slot add` / `slot remove` / `slot modify` could each edit the slot
+list, but none of them could **re-order** it. `slot modify N <type>`
+rejects a type that already lives in another slot — correct for a
+single-slot edit, but it makes a swap impossible: moving `repos` from
+slot 2 to slot 1 collides with itself. The only way to reach a
+different order was to remove sections and re-add them in sequence.
+
+`slot assign` replaces the whole list in one operation, so any
+**permutation** of the live sections is legal and only duplicates
+*within* the new list are rejected.
+
+- **Interactive walk** — a bare `slot assign` steps through slots
+  1..9 in the admin REPL. Each question is
+  `slot N [now <type> | free: …]`: the slot's current occupant, and
+  the types still unassigned *at that point in the walk* — the
+  banner's `available:` list is a snapshot and goes stale as soon as
+  slot 1 is answered. An empty `<CR>` ends the list; `<C-c>` cancels
+  with nothing changed. A rejected entry (unknown type, duplicate, or
+  the protected slot-0 section) re-asks the *same* slot rather than
+  unwinding the walk.
+- **One-line form** — `slot assign <t1> <t2> …` sets the whole
+  arrangement without prompting.
+- **Confirmation only where it is destructive.** Ending the walk
+  early drops every slot you did not reach, taking its buffer with
+  it, so that case lists what would go and asks first. A pure
+  re-arrangement applies straight through.
+- **All-or-nothing validation.** The registry is rebuilt only after
+  every entry passes, so a bad entry late in the list leaves the
+  current arrangement untouched instead of half-applying.
+- **Slot 0 stays fixed.** Whatever occupies it (`config` by default)
+  is resolved from the live list rather than hardcoded, and is
+  rejected as a tail entry.
+- Runs through `panel.wizard` — the same step runner the `dbase`
+  wizards use — so the walk stays in the REPL transcript and shares
+  its `<C-c>` cancel. `wizard` steps now accept a **function**
+  `prompt`, mirroring the `default` field's existing support; that is
+  what lets each question narrow its `free:` list against the values
+  collected so far.
+- Tab-completion for `slot assign` at every argument position, minus
+  the types already named on the line and the slot-0 section.
+
+**Docs fix:** the `help slot` topic claimed slot mutations were
+"SESSION-ONLY in v0.2.5 … persisting is a follow-up". That follow-up
+landed — `_rebuild_section_registry` has been writing the list through
+`state.set_sections_for(workspace_key, …)` since v0.2.5, so
+arrangements are per-workspace and survive a restart. The help text
+now says so, and smoke `[51]` pins it.
+
+**Coverage.** Smoke `[51]` covers the API, the one-line DSL,
+tab-completion and the walk. Smoke `[52]` covers the part that is
+actually risky: `_rebuild_section_registry` was written for
+add/remove, where a survivor keeps its section number, and a
+permutation is the first caller that keeps every section but moves it
+— the `old_bufs_by_name` bridge (old number → name → new number) is
+all that carries a mounted buffer across. `[52]` registers two
+synthetic synchronous views, mounts both, swaps them, and asserts the
+same buffer objects reappear under their new numbers with contents,
+buffer-local `0`-`9`/`q` bindings, numeric-keymap routing and the
+winbar order all intact. Disabling the bridge fails `[52]`; it did
+*not* fail `[51]`, which only checked the re-numbered metadata.
+
 ## [v0.3.5] — ADR-0059: `files:changed` no longer re-indexes the tree on every file event
 
 Closes the fourth and broadest feeder into the full-rescan sink, after
