@@ -11,131 +11,53 @@ where that path is read-only the mkdir fails with `E739`, no job is
 ever spawned, and ADR-0048's seven `p46` assertions cascade off the
 missing spawn — **147/7 instead of 154/0**.
 
-This is why two agents on the same machine, same commit and same
-Neovim reported different results for months: one had a writable home
-cache and one did not. An environment-dependent gate is worse than a
-red one, because "the suite is green" stops being a property of the
-code and nobody notices.
+Two agents on the same machine, same commit and same Neovim reported
+different results for months because of it: one had a writable home
+cache and one did not. An environment-dependent gate is worse than a red
+one, because "the suite is green" stops being a property of the code.
 
 - **`tests/_sandbox.lua` (new)** — one source of truth for headless XDG
-  isolation. Points `XDG_CONFIG_HOME`, `XDG_STATE_HOME` **and
-  `XDG_CACHE_HOME`** at a per-run directory, then verifies each one
-  exists, is writable, and does not resolve inside the real home,
-  erroring loudly if not. A silently-unisolated run is the failure mode
-  it exists to prevent, and it is invisible until some unrelated
-  assertion breaks.
-  - The call site locates the helper from the **caller's own path**
-    rather than a `plugin_root` local: several suites derive
-    `plugin_root` further down the file than they set XDG, so an
-    ordering dependency there would be a trap.
-  - **`XDG_DATA_HOME` is deliberately not redirected.** Installed
-    treesitter parsers and plugin data live under it; redirecting it
-    hides them and fails ADR-0048 for an unrelated reason. That
-    experiment has been run.
-- **All ten suites** now route through the helper. Four
-  (`smoke`, `smoke-automation`, `smoke-adr0044`, `smoke-adr0048`) used
-  fixed `/tmp/auto-finder-<name>-{config,state}` paths that two
-  concurrent runs would race through; roots are now unique per run.
-- **`tests/run-all.sh`** allocates one writable root per run via
-  `mktemp -d`, exports it as `AF_TEST_SANDBOX_ROOT` so every suite
-  nests under it, and removes it on `EXIT`/`INT`/`TERM` behind a guard
-  that only ever deletes a path matching the pattern it created.
-- **smoke `[53]`** pins hermeticity: each of config/state/cache
-  resolves outside the real home *and* is writable — a redirect
-  pointing somewhere unwritable would satisfy the first check and still
-  reproduce the original failure — plus `data` stays outside the
-  sandbox, and auto-run's `runs/` directory is creatable. Deleting the
-  cache redirect from the helper fails `[53]`, naming the real home
-  path.
+  isolation. Points config, state **and cache** at a per-run root, and
+  refuses to proceed unless each exists, is writable, and resolves
+  outside the real home.
+  - Roots are created with a single atomic `fs_mkdtemp`; validation of
+    any caller-supplied or system temp parent happens **before** the
+    first mutation, including before `tempname()`, which lazily creates
+    its own hierarchy.
+  - Standalone roots are created inside Neovim's process-private temp
+    tree so they are swept at exit rather than accumulating in `/tmp`.
+  - **`XDG_DATA_HOME` is deliberately not redirected** — installed
+    treesitter parsers and plugin data live under it, and hiding them
+    fails ADR-0048 for an unrelated reason.
+- **All ten suites** route through it; four previously used fixed
+  `/tmp/auto-finder-<name>-{config,state}` roots that concurrent runs
+  would race.
+- **`tests/run-all.sh`** allocates one writable root per run (fatal on
+  failure), exports it as `AF_TEST_SANDBOX_ROOT`, removes it on
+  `EXIT`/`INT`/`TERM`, and runs a preflight that fails the run if any
+  `tests/*.lua` entrypoint lacks an executable `_sandbox.lua` call or
+  hardcodes a fixed `/tmp` XDG root.
+- **`tests/sandbox-contract.sh` (new)** — every suite takes the
+  exported-root branch, so the standalone branch had no coverage and a
+  break in it left `run-all` green. The contract runs subprocesses with
+  `AF_TEST_SANDBOX_ROOT` unset and asserts the two properties only
+  observable after the process exits: the root is swept, and a refused
+  location has nothing created in it.
+- **smoke `[53]`** asserts config/state/cache each resolve inside the
+  run's exact sandbox root and outside the real home, *and* are
+  writable — a redirect pointing somewhere unwritable satisfies
+  containment and still reproduces the original failure.
 
-**Review round 1 (lector) — a data-loss bug in the first cut.** The
-helper pre-deleted `<AF_TEST_SANDBOX_ROOT>/<label>` *before* validating
-containment, and the containment check rejected only `$HOME/.`
-descendants. A crafted root under a non-hidden home child was therefore
-accepted and recursively deleted; lector reproduced destruction of a
-pre-existing file. The helper now canonicalises through
-`fs_realpath` before touching the disk, rejects the home directory and
-**every** descendant, requires the suite child not to already exist, and
-**never deletes a path it did not create**. Symlinked parents are caught
-too, since the check runs post-resolution.
+Verified against the original failure: with `XDG_CACHE_HOME` on a
+`chmod 555` directory, `main` gives 147/7 and this branch 154/0; full
+`run-all` is green with a read-only home cache. No `AF_KNOWN_ENV_FAILS`
+tolerance was added — this was an environment bug in the harness, not a
+failure to absorb.
 
-Also from that round: smoke's three per-case config dirs
-(store-dir/migrate/repos) moved off fixed `/tmp` paths onto the run's
-unique root; `[53]` was measuring `:h` of `stdpath("cache")` as the
-sandbox root, which is `<root>/cache` because Neovim appends `/nvim`, so
-a path under `<root>/data` passed the outside-sandbox assertion — it now
-compares against the helper's exact returned root with symlinks resolved
-on both sides; `run-all.sh` treats `mktemp` failure as fatal rather than
-silently degrading to per-suite fallback, splits EXIT from the signal
-traps so `^C` still reports death-by-signal, and gained a preflight that
-fails the run if any listed suite omits the helper or hardcodes a fixed
-`/tmp` XDG root.
-
-**Review round 2 (lector) — two more, both real.** The
-`tempname()`-derived suffix was **not unique**: nvim's tempname is
-`<process-private-dir>/<counter>` and the counter restarts at 0 in every
-fresh process, so `:t` was `"0"` for all of them and two same-label
-processes derived the identical `<parent>/<label>-0` — which the
-`fs_stat`-then-`mkdir` pair then accepted under a forced interleaving,
-being check-then-act. Both branches now use a single atomic
-`vim.uv.fs_mkdtemp(… -XXXXXX)` and its returned path; eight concurrent
-same-label processes get eight distinct roots. Separately, the preflight
-duplicated the suite manifest and omitted `bench-files-panel.lua` and
-`adr0060-gitignore-probe.lua`, so those two could drop the helper
-unnoticed; execution now runs off one `SUITES` manifest while preflight
-*discovers* every `tests/*.lua` entrypoint (excluding `_`-prefixed
-support modules), which binds suites this runner never executes.
-
-**Review round 3 (lector) — a regression the round-2 rewrite introduced,
-and a preflight that accepted prose.** Creating standalone roots directly
-under `os_tmpdir()` threw away a property the original code had for free:
-Neovim's `tempname()` lives in a process-private temp tree that Neovim
-sweeps at exit, so every standalone run now leaked a whole
-config/state/cache tree into `/tmp`. It also created *before* validating
-containment, leaving an orphan behind under a HOME-contained `TMPDIR`
-even though the rejection fired. Standalone now resolves and validates
-Neovim's managed temp dir first, then `fs_mkdtemp`s inside it — verified
-gone after exit, with no orphan on the rejection path. Separately, the
-preflight's free `_sandbox.lua` substring grep was satisfied by a
-*comment*: deleting a suite's real call while leaving section `[53]`'s
-prose kept the check green. It now matches an executable invocation
-anchored at start-of-line (which `--` cannot satisfy), the call sites are
-one canonical line, and the fixed-`/tmp` pattern covers both Lua quote
-styles. `fs_mkdtemp` failures also report luv's `err`/`code` instead of a
-bare `(nil)`.
-
-**Review round 4 (lector).** `tempname()` *lazily creates*
-`$TMPDIR/nvim.<user>/<rand>`, so calling it before the containment check
-still mutated the location being refused — a `$HOME/tmp/nvim.<user>`
-directory survived the rejection. The raw temp parent is now resolved and
-validated (and `HOME` required to resolve, so there is always a
-verifiable home to exclude) *before* the first `tempname()` call, with
-the managed-path check kept as defence in depth.
-
-**`tests/sandbox-contract.sh` (new)** — the structural guard that was
-missing. Every suite takes the *exported-root* branch, because the runner
-always exports `AF_TEST_SANDBOX_ROOT`; when a bad edit nested the
-standalone block inside the shared branch, that path broke completely and
-`run-all` stayed green for an entire review round with nothing checked in
-that would fail. The contract runs fresh Neovim subprocesses with the
-variable **unset** and asserts the two properties only observable from
-outside the process — the root is swept at exit, and a refused location
-has nothing created in it — plus that the shared branch still nests under
-its exported parent. It is a `.sh` for exactly that reason. Mutation-
-tested against both historical defects: re-nesting the standalone block
-fails it 3/9 (and now fails `run-all`, which previously reported OK), and
-reverting to a bare `os_tmpdir()` root fails the sweep assertion.
-
-Verified against the original failure: with `XDG_CACHE_HOME` pointed at
-a `chmod 555` directory, `main` gives 147/7 and this branch gives 154/0;
-full `run-all` is green with a read-only home cache. No
-`AF_KNOWN_ENV_FAILS` tolerance was added — this was an environment bug
-in the harness, not a failure to absorb.
-
-**Scope:** this closes the ADR-0048 cascade **only**. The
-`smoke_automation` SIGSEGV seen on some runtimes is a separate,
-still-open bug (headless geometry + a live diagnostics attach + the
-`:edit`), tracked on the 2026-06-13 `[41b]` task. Nothing here touches it.
+**Scope:** closes the ADR-0048 cascade **only**. The `smoke_automation`
+SIGSEGV on some runtimes is a separate, still-open bug (headless
+geometry + a live diagnostics attach + the `:edit`), tracked on the
+2026-06-13 `[41b]` task. Nothing here touches it.
 
 ## [Unreleased] — `slot assign`: re-arrange the panel slots
 

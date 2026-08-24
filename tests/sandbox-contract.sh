@@ -30,7 +30,20 @@ ok()   { pass=$((pass + 1)); echo "  PASS  $1"; }
 bad()  { fail=$((fail + 1)); echo "  FAIL  $1  ${2:-}"; }
 
 HELPER="$PWD/tests/_sandbox.lua"
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/auto-finder-contract-XXXXXX")"
+
+# Allocation must be fatal BEFORE the trap is installed or any child path
+# is derived. Under `set -u` without `errexit` a failed command
+# substitution leaves WORK empty and execution continues, at which point
+# "$WORK/standalone.txt" is `/standalone.txt` -- a root-level write. This
+# is the same unchecked-mktemp mechanism already fixed in run-all.sh;
+# this script advertises direct execution, so it cannot rely on the
+# runner's guard.
+if ! WORK="$(mktemp -d "${TMPDIR:-/tmp}/auto-finder-contract-XXXXXX")" \
+   || [ -z "$WORK" ] || [ ! -d "$WORK" ]; then
+  echo "sandbox-contract: FAILED — could not allocate a work dir under ${TMPDIR:-/tmp}" >&2
+  exit 1
+fi
+
 cleanup() {
   case "$WORK" in
     "${TMPDIR:-/tmp}"/auto-finder-contract-*) rm -rf "$WORK" ;;
@@ -42,7 +55,7 @@ trap cleanup EXIT
 # `env -u` matters: run-all exports the variable, so inheriting it here
 # would silently exercise the shared branch and prove nothing.
 probe="$WORK/standalone.txt"
-env -u AF_TEST_SANDBOX_ROOT nvim --headless -u NONE --cmd "
+env -u AF_TEST_SANDBOX_ROOT nvim --headless -u NONE -i NONE --cmd "
 lua
 local root = dofile('$HELPER')('contract')
 local f = io.open('$probe', 'w')
@@ -85,11 +98,15 @@ else
 fi
 
 # ── 2. rejection branch: a HOME-contained TMPDIR must create nothing ───
+# `-i NONE` on every subprocess above and below: the rejection path
+# errors BEFORE the helper redirects XDG, so without it Neovim writes
+# shada and nvim.log into the fake HOME. Cleanup would contain that, but
+# unrelated state has no business in a hermeticity contract.
 fake="$WORK/home"
 mkdir -p "$fake/tmp"
 rej="$WORK/reject.txt"
 env -u AF_TEST_SANDBOX_ROOT HOME="$fake" TMPDIR="$fake/tmp" \
-  nvim --headless -u NONE \
+  nvim --headless -u NONE -i NONE \
   --cmd "lua dofile('$HELPER')('contract-reject')" -c qa >"$rej" 2>&1
 
 grep -q "refusing to sandbox under the home directory" "$rej" \
@@ -104,7 +121,7 @@ leftovers="$(find "$fake/tmp" -mindepth 1 2>/dev/null | head -5)"
 # ── 3. shared branch still nests under the exported parent ─────────────
 shared_parent="$WORK/exported"
 mkdir -p "$shared_parent"
-shared_root="$(AF_TEST_SANDBOX_ROOT="$shared_parent" nvim --headless -u NONE \
+shared_root="$(AF_TEST_SANDBOX_ROOT="$shared_parent" nvim --headless -u NONE -i NONE \
   --cmd "lua io.write(dofile('$HELPER')('contract-shared'))" -c qa 2>/dev/null)"
 case "$shared_root" in
   "$shared_parent"/contract-shared-*)
