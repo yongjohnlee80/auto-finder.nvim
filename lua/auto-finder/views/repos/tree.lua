@@ -607,7 +607,41 @@ function M._submit_review(row, sha)
     draft.verdict = verdict
     vim.ui.input({ prompt = "summary (optional): " }, function(summary)
       draft.summary = summary
-      local res, reason = authoring.submit({ repo = row.repo, sha = sha })
+      -- UNANCHORED findings need a way IN, or review-json §6 is honoured only
+      -- by whatever a caller happens to inject. "this module has no tests",
+      -- "the ADR contradicts §3" — findings with no `(path, line)` — must not
+      -- be dropped to fit the schema, and inventing a line number to place them
+      -- is explicitly forbidden. So they are collected here, one at a time,
+      -- until the reviewer enters an empty line.
+      draft.unanchored = draft.unanchored or {}
+      local function ask_unanchored()
+        vim.ui.input({
+          prompt = ("unanchored finding %d (blank to finish): "):format(#draft.unanchored + 1),
+        }, function(body)
+          if body and vim.trim(body) ~= "" then
+            vim.ui.select(authoring.SEVERITIES, { prompt = "severity:" }, function(sev)
+              table.insert(draft.unanchored,
+                { severity = sev or "comment", body = vim.trim(body) })
+              ask_unanchored()
+            end)
+            return
+          end
+          M._finish_submit(row, sha)
+        end)
+      end
+      ask_unanchored()
+    end)
+  end)
+end
+
+---_finish_submit performs the write once the composer has everything.
+function M._finish_submit(row, sha)
+  local authoring = require("auto-finder.views.repos.authoring")
+  do
+      local res, reason = authoring.submit({
+        repo = row.repo, sha = sha,
+        cwd = row.worktree and row.worktree.path or nil,
+      })
       if not res then
         logger.notify("repos: " .. tostring(reason), { level = vim.log.levels.ERROR })
         return
@@ -620,8 +654,7 @@ function M._submit_review(row, sha)
       local dv_ok, dv2 = pcall(require, "auto-core.ui.diffview")
       if dv_ok then pcall(dv2.close, "resume") end
       vim.schedule(function() M.open_diff(row) end)
-    end)
-  end)
+  end
 end
 
 ---_info is `i`.

@@ -6,6 +6,12 @@
 -- The interim writer's safety argument is entirely about ORDER — the final
 -- Markdown name is claimed before any JSON exists, and the JSON is published
 -- last — so the failure paths are what this suite actually drives.
+-- XDG isolation FIRST, before anything can touch vim.fn.stdpath(). The runner's
+-- preflight enforces this for every suite in the manifest, and it caught this
+-- file for good reason: it writes a review store and a $KB_ROOT, so an
+-- unsandboxed run would reach into the real ones.
+dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h") .. "/_sandbox.lua")("adr0065p3")
+
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 vim.opt.runtimepath:prepend(root)
 package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.path
@@ -54,6 +60,20 @@ local _, why = A.markdown_path(repo, SHA, nil, 1)
 ok("an unsafe reviewer refuses rather than guessing a path", why ~= nil, tostring(why))
 
 io.stdout:write("\n[3] submit writes BOTH artifacts, JSON last\n")
+-- ORDER is the safety argument, so record it rather than infer it from the
+-- happy-path outcome: both artifacts existing says nothing about which was
+-- created first, and "Markdown first" is what makes every failure leave an
+-- orphan prose file rather than an unpaired projection.
+local order = {}
+local real_create, real_save = store.create_exclusive, review.save
+store.create_exclusive = function(path, body)
+  if tostring(path):find("%-review%.md$") then order[#order + 1] = "markdown" end
+  return real_create(path, body)
+end
+review.save = function(slug, doc, o)
+  order[#order + 1] = "json"
+  return real_save(slug, doc, o)
+end
 local d = A.draft(repo.slug, SHA)
 d.comments = { { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" } }
 d.unanchored = { { severity = "nit", body = "this module has no tests" } }
@@ -73,6 +93,16 @@ ok("*** and is absent from the JSON — nothing was invented to place it ***",
   not vim.inspect(doc.comments):find("no tests", 1, true))
 ok("the draft is cleared after a successful submit",
   #A.draft(repo.slug, SHA).comments == 0)
+ok("*** the Markdown was claimed BEFORE the JSON was published ***",
+  order[1] == "markdown" and order[2] == "json", vim.inspect(order))
+ok("and exactly one of each (no retry, no double write)", #order == 2, vim.inspect(order))
+ok("*** the Markdown carries KB_RULES R2 frontmatter ***",
+  md:find("^%-%-%-\ntype: review\n") ~= nil, md:sub(1, 80))
+ok("and the inline Tags/Abstract preview lines",
+  md:find("\n%*%*Tags:%*%* `type:review`") ~= nil
+  and md:find("\n%*%*Abstract:%*%* ") ~= nil, md:sub(1, 400))
+ok("the anchored finding appears in the prose with its path:line",
+  md:find("foo.lua:3", 1, true) ~= nil, md)
 
 io.stdout:write("\n[4] a taken Markdown name ADVANCES the revision\n")
 local d2 = A.draft(repo.slug, SHA)
@@ -97,6 +127,7 @@ local real_save = review.save
 review.save = function() return nil, "injected write failure" end
 local res3, reason3 = A.submit({ repo = repo, sha = SHA })
 review.save = real_save
+store.create_exclusive = real_create
 ok("*** submit reports failure rather than claiming success ***", res3 == nil, tostring(res3))
 ok("and names the kept Markdown so the prose is not thought lost",
   reason3 and reason3:find("is not lost", 1, true) ~= nil, tostring(reason3))
@@ -108,8 +139,34 @@ ok("*** no JSON was published for that revision ***", (function()
 end)(), vim.inspect(review.list_for(repo.slug, SHA)))
 ok("the draft is RETAINED after a failed submit, so the work survives",
   #A.draft(repo.slug, SHA).comments == 1)
+-- The orphan is the whole point of the ordering: assert it EXISTS and holds the
+-- reviewer's prose, not merely that a path was mentioned in an error string.
+local orphan = reason3 and reason3:match("(/[^%s]+%-review%.md)")
+ok("*** the orphan Markdown actually exists on disk ***",
+  orphan and vim.fn.filereadable(orphan) == 1, tostring(orphan))
+ok("*** and still contains the reviewer's finding ***",
+  orphan and table.concat(vim.fn.readfile(orphan), "\n"):find("third", 1, true) ~= nil,
+  tostring(orphan))
 
-io.stdout:write("\n[6] nothing to submit is refused, not written\n")
+io.stdout:write("\n[6] identity comes from the worktree under review, not nvim's cwd\n")
+do
+  -- Two repos with different configured identities. Running `git config` in
+  -- Neovim's cwd answered for whichever repo the editor sat in, so a review of
+  -- B was attributed to A.
+  local ra, rb = tmp .. "/repo_a", tmp .. "/repo_b"
+  for dir, who in pairs({ [ra] = "Alice A", [rb] = "Bob B" }) do
+    vim.fn.mkdir(dir, "p")
+    vim.fn.system({ "git", "-C", dir, "init", "-q" })
+    vim.fn.system({ "git", "-C", dir, "config", "user.name", who })
+  end
+  local da = select(1, A.reviewer(ra))
+  local db = select(1, A.reviewer(rb))
+  ok("*** each worktree reports its OWN configured reviewer ***",
+    da == "Alice A" and db == "Bob B", ("a=%s b=%s"):format(tostring(da), tostring(db)))
+  ok("and they genuinely differ (positive control)", da ~= db)
+end
+
+io.stdout:write("\n[7] nothing to submit is refused, not written\n")
 A.discard(repo.slug, SHA)
 local res4, reason4 = A.submit({ repo = repo, sha = SHA })
 ok("an empty draft refuses with a reason", res4 == nil and reason4 ~= nil, tostring(reason4))
