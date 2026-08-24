@@ -1512,7 +1512,19 @@ function M._rebuild_section_registry(new_sections, opts)
   -- continues to work — its closure captures the registry
   -- table by reference, and we never re-create that table.
   M._registry.sections = section_defs
-  M._registry._bufs    = new_bufs
+  -- Mutate `_bufs` IN PLACE rather than rebinding. `M.state.section_buffers`
+  -- is a LIVE ALIAS of this exact table (see the assignment at the end of
+  -- `setup()`), and the comment there promises "we mutate in place (never
+  -- re-assign) elsewhere so the alias never goes stale". Rebinding broke
+  -- that promise for every caller of this function -- `slot_add`,
+  -- `slot_remove`, `slot_modify`, `slot_assign` and the workspace reseed --
+  -- leaving `state.section_buffers` pointing at an orphaned table. The
+  -- repos-follow bufnr write and the per-section clear both target that
+  -- alias, so after any slot mutation they landed nowhere the registry
+  -- could see. Same in-place idiom as the panel `on_close` fanout above.
+  local bufs = M._registry._bufs
+  for k in pairs(bufs) do bufs[k] = nil end
+  for k, v in pairs(new_bufs) do bufs[k] = v end
 
   -- Resolve the section to focus after the mutation:
   --   1. opts.focus_after (caller-supplied),

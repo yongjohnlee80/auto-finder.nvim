@@ -6579,6 +6579,103 @@ ok("p53: auto-run's run directory is creatable under the sandboxed cache",
   vim.fn.isdirectory(run_root) == 1, run_root)
 end)
 
+
+-- ───── [54] state.section_buffers stays a LIVE alias of _registry._bufs ─────
+-- `setup()` publishes `M.state.section_buffers` as an alias of the
+-- registry's bufnr cache, and the comment there promises "we mutate in
+-- place (never re-assign) elsewhere so the alias never goes stale".
+-- `_rebuild_section_registry` broke that promise by rebinding
+-- `_registry._bufs` to a fresh table, so after ANY slot mutation the
+-- alias pointed at an orphan. Two production writers target the alias
+-- — the repos-follow bufnr update and the per-section clear — and both
+-- silently landed nowhere the registry could see.
+--
+-- Every `_rebuild_section_registry` caller is covered here, because the
+-- defect was in the shared function rather than in any one verb.
+--
+-- `rawequal` is the instrument: a deep-equality check would pass on two
+-- distinct tables holding the same entries, which is exactly the broken
+-- state. Identity is the property that matters.
+print("\n[54] state.section_buffers stays a live alias across slot mutations")
+section(function()
+local restore = vim.deepcopy(af.state.config.sections)
+local function aliased()
+  return rawequal(af.state.section_buffers, af._registry._bufs)
+end
+
+ok("p54: the alias holds before any mutation", aliased())
+
+-- Control: prove `aliased()` can observe a WRITE, not just table
+-- identity. Without this, a broken alias that happened to be the same
+-- empty table would look fine.
+af._registry._bufs[97] = 4242
+ok("p54: control — a registry write is visible through the alias",
+  af.state.section_buffers[97] == 4242,
+  tostring(af.state.section_buffers[97]))
+af._registry._bufs[97] = nil
+
+-- Each caller of _rebuild_section_registry, in turn.
+af.slot_add("buffers")
+ok("p54: alias survives slot_add", aliased())
+af.slot_modify(#af.state.config.sections - 1, "marks")
+ok("p54: alias survives slot_modify", aliased())
+af.slot_remove(#af.state.config.sections - 1)
+ok("p54: alias survives slot_remove", aliased())
+af.slot_assign({ "repos", "files" })
+ok("p54: alias survives slot_assign (permutation)", aliased())
+
+-- The fifth caller needs care. `_reseed_sections_for_workspace`
+-- EARLY-RETURNS when the persisted layout already equals the live one
+-- ("No-op if the target already matches what's loaded"). Calling it
+-- straight after slot_assign persisted that same layout means the
+-- reseed takes the fast path and never rebuilds — the assertion then
+-- passes without exercising the caller at all. Caught in review.
+--
+-- So: persist a DIFFERENT layout, and count rebuild calls to prove one
+-- actually fired. The counter is the positive control; without it this
+-- is indistinguishable from the no-op it used to be.
+local core_wt = require("auto-core")
+local real_root = core_wt.git.worktree.get_workspace_root
+core_wt.git.worktree.get_workspace_root = function() return "/tmp/af-p54-ws" end
+local rebuilds = 0
+local real_rebuild = af._rebuild_section_registry
+af._rebuild_section_registry = function(...)
+  rebuilds = rebuilds + 1
+  return real_rebuild(...)
+end
+require("auto-finder.state").set_sections_for(af._workspace_key(),
+  { "config", "marks" })          -- deliberately != the live list
+af._reseed_sections_for_workspace()
+af._rebuild_section_registry = real_rebuild
+core_wt.git.worktree.get_workspace_root = real_root
+
+ok("p54: control — the reseed really did rebuild",
+  rebuilds == 1, "rebuild calls = " .. rebuilds)
+ok("p54: the reseed applied the persisted layout",
+  table.concat(af.state.config.sections, " ") == "config marks",
+  table.concat(af.state.config.sections, " "))
+ok("p54: alias survives a workspace reseed", aliased())
+
+-- The property the production writers actually depend on: a write made
+-- through the registry after a mutation must be visible via the alias,
+-- and vice versa. Identity alone is necessary but not sufficient.
+af._registry._bufs[96] = 777
+ok("p54: post-mutation registry write is visible through the alias",
+  af.state.section_buffers[96] == 777, tostring(af.state.section_buffers[96]))
+af.state.section_buffers[95] = 888
+ok("p54: post-mutation alias write is visible through the registry",
+  af._registry._bufs[95] == 888, tostring(af._registry._bufs[95]))
+af._registry._bufs[96], af._registry._bufs[95] = nil, nil
+
+-- Survivor entries must still be carried across; the in-place rewrite
+-- must not have cost the name->number remap that [52] pins.
+af.slot_assign(vim.list_slice(restore, 2, #restore))
+ok("p54: original arrangement restored",
+  table.concat(af.state.config.sections, " ") == table.concat(restore, " "),
+  table.concat(af.state.config.sections, " "))
+ok("p54: alias still holds after restore", aliased())
+end)
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
