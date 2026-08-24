@@ -303,54 +303,13 @@ end
 --------------------------------------------------------------------------------
 -- Git commands
 --------------------------------------------------------------------------------
-
----@param state neotree.State
-M.git_add_file = function(state)
-  local node = assert(state.tree:get_node())
-  if node.type == "message" then
-    return
-  end
-  local path = node:get_id()
-  _run("stage", { path }, function() events.fire_event(events.GIT_EVENT) end)
-end
-
-M.git_unstage_file = function(state)
-  local node = assert(state.tree:get_node())
-  if node.type == "message" then
-    return
-  end
-  local path = node:get_id()
-  _run("unstage", { path }, function() events.fire_event(events.GIT_EVENT) end)
-end
-
-M.git_toggle_file_stage = function(state)
-  local node = assert(state.tree:get_node())
-  if node.type == "message" then
-    return
-  end
-  local path = node:get_id()
-  local status = git.find_existing_status_code(path)
-
-  if not status then
-    return
-  end
-
-  if type(status) == "table" then
-    status = status[1]
-  end
-
-  local worktree_status = status:sub(2, 2)
-  local verb = (worktree_status ~= ".") and "stage" or "unstage"
-  _run(verb, { path }, function() events.fire_event(events.GIT_EVENT) end)
-end
-
----@param state neotree.State
-M.git_add_all = function(state)
-  -- Was a BLOCKING vim.fn.system: `git add -A` over a large tree froze the
-  -- editor exactly as the push did before ADR-0040 Batch C. Async now, through
-  -- the same owner, for the same reason.
-  _run("stage_all", {}, function() events.fire_event(events.GIT_EVENT) end)
-end
+--
+-- The auto-core adapter is declared HERE, above every use. It previously sat
+-- further down the file, so the four staging commands closed over a `_run` that
+-- did not exist as a local yet and resolved the GLOBAL instead: every one of
+-- them died with "attempt to call global '_run' (a nil value)". The exported
+-- `M._run` was fine, which is exactly why a test that called `M._run` directly
+-- passed while the commands themselves were broken.
 
 ---ADR-0060: every git WRITE in this file goes through `auto-core.git.write`,
 ---the family's single owner for mutating git.
@@ -421,6 +380,57 @@ local function _run(verb, args, cb)
 end
 M._core_write = _core_write -- test hook
 M._run = _run               -- test hook
+
+
+
+---@param state neotree.State
+M.git_add_file = function(state)
+  local node = assert(state.tree:get_node())
+  if node.type == "message" then
+    return
+  end
+  local path = node:get_id()
+  _run("stage", { path }, function() events.fire_event(events.GIT_EVENT) end)
+end
+
+M.git_unstage_file = function(state)
+  local node = assert(state.tree:get_node())
+  if node.type == "message" then
+    return
+  end
+  local path = node:get_id()
+  _run("unstage", { path }, function() events.fire_event(events.GIT_EVENT) end)
+end
+
+M.git_toggle_file_stage = function(state)
+  local node = assert(state.tree:get_node())
+  if node.type == "message" then
+    return
+  end
+  local path = node:get_id()
+  local status = git.find_existing_status_code(path)
+
+  if not status then
+    return
+  end
+
+  if type(status) == "table" then
+    status = status[1]
+  end
+
+  local worktree_status = status:sub(2, 2)
+  local verb = (worktree_status ~= ".") and "stage" or "unstage"
+  _run(verb, { path }, function() events.fire_event(events.GIT_EVENT) end)
+end
+
+---@param state neotree.State
+M.git_add_all = function(state)
+  -- Was a BLOCKING vim.fn.system: `git add -A` over a large tree froze the
+  -- editor exactly as the push did before ADR-0040 Batch C. Async now, through
+  -- the same owner, for the same reason.
+  _run("stage_all", {}, function() events.fire_event(events.GIT_EVENT) end)
+end
+
 
 ---@param state neotree.State
 M.git_commit = function(state, and_push)

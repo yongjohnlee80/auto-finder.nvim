@@ -72,6 +72,10 @@ local function reset() notes = {} end
                          c = "git_commit", P = "git_push" }) do
     ok("[1] `" .. key .. "` is bound to " .. fn,
       src:find('set("' .. key .. '", function() M.' .. fn, 1, true) ~= nil)
+    -- A key the `?` overlay does not mention is a key nobody discovers. The
+    -- first version of this feature shipped all four undocumented.
+    ok("[1] `" .. key .. "` appears in the ? help overlay",
+      src:find('"  ' .. key .. '     ', 1, true) ~= nil)
   end
 end)()
 
@@ -227,6 +231,91 @@ end)()
   ok("[6] and it names what is missing",
     last():find("newer worktree.nvim", 1, true) ~= nil, last())
   package.loaded["worktree.repos"] = nil
+end)()
+
+-- ── [7] the MIGRATED neo-tree commands actually run ──────────────────
+--
+-- The blocker this exists for. The adapter was declared below its first use, so
+-- the four staging commands closed over a nil GLOBAL `_run` and every one died
+-- with "attempt to call global '_run'". `M._run` was exported and fine, which is
+-- precisely why a test that called `M._run` passed while the commands were dead.
+-- So: invoke the COMMANDS.
+;(function()
+  local cmds = require("auto-finder.neotree.sources.common.commands")
+  local node = { type = "file", name = "f.txt", get_id = function() return "f.txt" end }
+  local state = { tree = { get_node = function() return node end } }
+
+  for _, name in ipairs({ "git_add_file", "git_unstage_file", "git_add_all",
+                          "git_toggle_file_stage" }) do
+    ok("[7] " .. name .. " is callable without raising", (pcall(cmds[name], state)))
+  end
+
+  -- And the adapter must be declared BEFORE its first use, not merely exported.
+  -- Asserted on the source because that ordering is what broke, and a runtime
+  -- call can be made to pass by an unrelated early return.
+  local src = table.concat(vim.fn.readfile(plugin_root
+    .. "/lua/auto-finder/neotree/sources/common/commands.lua"), "\n")
+  local decl = src:find("local function _run", 1, true)
+  local first_use = nil
+  for pos in src:gmatch("()_run%(") do
+    local line_start = src:sub(1, pos):match("[^\n]*$")
+    if not line_start:match("^%s*%-%-") and not line_start:match("local function $")
+       and not line_start:match("M%._run") then
+      first_use = first_use or pos
+    end
+  end
+  ok("[7] the adapter is declared before its first use",
+    decl and first_use and decl < first_use,
+    string.format("decl=%s first_use=%s", tostring(decl), tostring(first_use)))
+end)()
+
+-- ── [8] the write topics REACH the view's topic ──────────────────────
+--
+-- The third blocker. auto-core's in-process write topics had no path to
+-- `auto-finder.core.repos:changed`, so the panel showed a stale UNCOMMITTED node
+-- after its own `s` / `c` / `f`. A bus probe read 0 deliveries for all four
+-- against 1 for the external-state control — the task's assumption that the
+-- refresh came free was simply wrong.
+;(function()
+  require("auto-finder.core").ensure_started()
+  local afe = require("auto-finder.core.events")
+  local core_events = require("auto-core.events")
+  local n = 0
+  afe.subscribe("auto-finder.core.repos:changed", function() n = n + 1 end)
+  ---delivered publishes one topic and reports how many repos:changed arrived.
+  ---
+  ---It SETTLES the bus first. Without that, a previous publish's handler landed
+  ---inside the next measurement window and the success-gate assertion read a
+  ---delivery it had not caused — a race that makes the gate look broken when it
+  ---is not, and would equally hide a real regression.
+  local function delivered(topic, payload)
+    vim.wait(150)
+    local before = n
+    core_events.publish(topic, payload)
+    vim.wait(400, function() return n > before end, 10)
+    vim.wait(100)
+    return n - before
+  end
+
+  for _, t in ipairs({
+    { "core.git.index:changed",    { cwd = "/x", ok = true } },
+    { "core.git.commit:completed", { cwd = "/x", ok = true } },
+    { "core.git.fetch:completed",  { label = "r", ok = true } },
+    { "core.git.push:completed",   { cwd = "/x", ok = true } },
+  }) do
+    ok("[8] " .. t[1] .. " reaches repos:changed", delivered(t[1], t[2]) == 1)
+  end
+
+  -- Success-gated: a refused write changed nothing, so invalidating for it would
+  -- spend a render redrawing the same tree.
+  ok("[8] a FAILED write does not invalidate",
+    delivered("core.git.index:changed", { cwd = "/x", ok = false }) == 0)
+
+  -- CONTROL: the external-state path must still work. If this reads 0 the probe
+  -- is blind and the four assertions above prove nothing.
+  ok("[8] CONTROL — external core.git.state:changed still arrives",
+    delivered("core.git.state:changed",
+      { repo_root = "/x", git_dir = "/x/.git", kind = "index" }) == 1)
 end)()
 
 logger.notify = orig_notify

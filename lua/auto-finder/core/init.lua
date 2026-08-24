@@ -310,6 +310,41 @@ function M.ensure_started(cfg)
     end)
   end
 
+    -- IN-PROCESS git writes (ADR-0060). These need their own translation: the
+    -- `auto-finder.core.git:changed` fold above carries `core.git.state:changed`,
+    -- which is the fs watcher reporting a mutation THIS process did not make.
+    -- A stage or commit driven from the panel is not that and must not
+    -- impersonate it, so auto-core publishes distinct topics and they are folded
+    -- here onto the same single topic the view already listens to (A1).
+    --
+    -- Without this the panel showed a stale UNCOMMITTED node and commit list
+    -- after its own `s` / `c` / `f`, and the only way to see the truth was to
+    -- collapse the worktree and expand it again. The task assumed this refresh
+    -- came for free from the existing git-state path; it does not, because that
+    -- path depends on a watcher this surface no longer runs. A bus probe read
+    -- 0 deliveries for all four write topics against 1 for the external control.
+    --
+    -- Gated on SUCCESS: a refused stage changed nothing, and invalidating for it
+    -- would spend a render to redraw the same tree.
+  for _, up_topic in ipairs({
+    "core.git.index:changed",
+    "core.git.commit:completed",
+    "core.git.fetch:completed",
+    "core.git.push:completed",
+  }) do
+    _sub("upstream_repos_write_" .. up_topic, up_topic, function(payload)
+      if type(payload) == "table" and payload.ok == false then return end
+      require("auto-finder.core.repos").invalidate()
+      require("auto-finder.core.events").publish(
+        "auto-finder.core.repos:changed", {
+          kind = up_topic,
+          -- auto-core's write topics name the directory `cwd`; fetch names a
+          -- repo. Either way the view only needs "something moved".
+          path = (type(payload) == "table" and (payload.cwd or payload.path)) or nil,
+        })
+    end)
+  end
+
   -- worktree:switched →
   --   - publish auto-finder.core.repos:changed { kind = 'worktree_switched' }
   --   - invoke init.lua's existing reseed handler (was at

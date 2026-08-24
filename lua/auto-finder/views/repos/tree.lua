@@ -615,6 +615,12 @@ local HELP = {
   "  i     info about the node          R  reload (all with no node)",
   "  ?     this help",
   "",
+  "  git actions:",
+  "  f     fetch this repository",
+  "  s     stage / unstage a file under UNCOMMITTED",
+  "  c     commit what is staged (prompts for a message)",
+  "  P     push — confirms first, and names the repo",
+  "",
   "  An UNWATCHED worktree lists no commits, on purpose: it costs no",
   "  git calls at all. Press w on the worktree you are working in.",
 }
