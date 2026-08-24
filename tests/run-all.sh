@@ -172,6 +172,8 @@ SUITES=(
   "v0267-loop|tests/v0267-loop-guard.lua"
   # ADR-0060 r1 — view-lifecycle latch.
   "r1-lifecycle|tests/adr0060-r1-view-lifecycle.lua"
+  # ADR-0065 P3 — review authoring: draft, identity slug, interim submit.
+  "adr0065-p3|tests/adr0065-p3-submit.lua"
 )
 
 # The XDG contract binds EVERY runnable entrypoint, not only the ones
@@ -219,7 +221,6 @@ fi
 for entry in "${SUITES[@]}"; do
   run_suite "${entry%%|*}" "${entry#*|}"
 done
-
 echo "──────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
   echo "run-all: OK (env-fail tolerance: $KNOWN_ENV_FAILS)"
