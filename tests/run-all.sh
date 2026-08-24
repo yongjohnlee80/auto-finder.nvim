@@ -195,6 +195,27 @@ if ! preflight_sandbox $(preflight_targets); then
   exit 1
 fi
 
+# ── STANDALONE-BRANCH CONTRACT ────────────────────────────────────
+# Every suite below takes the EXPORTED-ROOT branch of the helper,
+# because this runner always exports AF_TEST_SANDBOX_ROOT. A bad edit
+# once nested the standalone block inside the shared branch, breaking
+# that path completely -- and this gate stayed green for a whole review
+# round because nothing here ever exercised it.
+#
+# The contract runs fresh Neovim subprocesses with the variable UNSET,
+# and checks the two properties only observable from outside the
+# process: that the root is swept at exit, and that a refused location
+# has nothing created in it. It is a .sh (not a tests/*.lua suite)
+# precisely because those are post-exit observations.
+echo "── sandbox_contract ──────────────────────────"
+if contract_out="$(tests/sandbox-contract.sh 2>&1)"; then
+  printf '%s\n' "$contract_out" | tail -1 | sed 's/^/   sandbox_contract: /'
+else
+  printf '%s\n' "$contract_out" | grep -E "^  FAIL" | head -5
+  echo "   ✗ sandbox_contract: FAILED"
+  overall=1
+fi
+
 for entry in "${SUITES[@]}"; do
   run_suite "${entry%%|*}" "${entry#*|}"
 done

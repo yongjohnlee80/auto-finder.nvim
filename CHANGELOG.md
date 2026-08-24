@@ -104,6 +104,28 @@ one canonical line, and the fixed-`/tmp` pattern covers both Lua quote
 styles. `fs_mkdtemp` failures also report luv's `err`/`code` instead of a
 bare `(nil)`.
 
+**Review round 4 (lector).** `tempname()` *lazily creates*
+`$TMPDIR/nvim.<user>/<rand>`, so calling it before the containment check
+still mutated the location being refused — a `$HOME/tmp/nvim.<user>`
+directory survived the rejection. The raw temp parent is now resolved and
+validated (and `HOME` required to resolve, so there is always a
+verifiable home to exclude) *before* the first `tempname()` call, with
+the managed-path check kept as defence in depth.
+
+**`tests/sandbox-contract.sh` (new)** — the structural guard that was
+missing. Every suite takes the *exported-root* branch, because the runner
+always exports `AF_TEST_SANDBOX_ROOT`; when a bad edit nested the
+standalone block inside the shared branch, that path broke completely and
+`run-all` stayed green for an entire review round with nothing checked in
+that would fail. The contract runs fresh Neovim subprocesses with the
+variable **unset** and asserts the two properties only observable from
+outside the process — the root is swept at exit, and a refused location
+has nothing created in it — plus that the shared branch still nests under
+its exported parent. It is a `.sh` for exactly that reason. Mutation-
+tested against both historical defects: re-nesting the standalone block
+fails it 3/9 (and now fails `run-all`, which previously reported OK), and
+reverting to a bare `os_tmpdir()` root fails the sweep assertion.
+
 Verified against the original failure: with `XDG_CACHE_HOME` pointed at
 a `chmod 555` directory, `main` gives 147/7 and this branch gives 154/0;
 full `run-all` is green with a read-only home cache. No

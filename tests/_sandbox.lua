@@ -132,6 +132,28 @@ local function sandbox(label)
     --     config/state/cache tree on every standalone run; the
     --     original full-tempname path had this property for free and
     --     the round-2 rewrite threw it away.
+    -- Validate the RAW temp parent FIRST. `tempname()` lazily creates
+    -- `$TMPDIR/nvim.<user>/<rand>` as a side effect, so calling it
+    -- before the containment check mutates the very location we may be
+    -- about to refuse -- which left a `$HOME/tmp/nvim.<user>` directory
+    -- behind on the rejection path even though the rejection fired.
+    if vim.env.HOME and vim.env.HOME ~= "" and not home then
+      error(("tests/_sandbox: HOME is set but does not resolve (%s); "
+        .. "refusing to sandbox without a verifiable home to exclude")
+        :format(tostring(vim.env.HOME)))
+    end
+    local tmpdir = realpath(vim.uv.os_tmpdir() or "/tmp")
+    if not tmpdir then
+      error("tests/_sandbox: could not resolve the system temp directory")
+    end
+    if under_home(tmpdir) then
+      error(("tests/_sandbox: refusing to sandbox under the home directory: %s")
+        :format(tmpdir))
+    end
+
+    -- Only now is it safe to let tempname() create its hierarchy. The
+    -- managed-path check below is defence in depth: TMPDIR passed, so
+    -- this should never fire, but a symlinked nvim temp root would.
     local managed = realpath(vim.fn.fnamemodify(vim.fn.tempname(), ":h"))
     if not managed then
       error("tests/_sandbox: could not resolve Neovim's managed temp dir")
