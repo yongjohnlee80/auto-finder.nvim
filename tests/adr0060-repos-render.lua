@@ -111,10 +111,24 @@ local review = require("worktree.review")
 -- Identity is required (ADR-0060 r3 #3): a review must name its repository, and
 -- an empty `repo` serialises as `[]` rather than the declared object. Callers
 -- supply it; the schema does not bend around them.
-local rv = review.new({ commit = commit.sha, revision = 1, reviewer = "lector",
-                        owner = "render", name = "fixture" })
-rv.comments = { { path = "newfile.txt", line = 1, side = "RIGHT", severity = "nit", body = "x" } }
-review.save(repo.slug, rv)
+-- ADR-0067: every canonical JSON is a projection of a Markdown review, and the
+-- public writers refuse an unpaired one. The fixture therefore writes a REAL
+-- pair through `save_pair` rather than a bare JSON — which is also what the
+-- panel and the mailbox now do, so the fixture matches the artifact the reader
+-- will actually meet.
+--
+-- $KB_ROOT is isolated here because the pair's document lands under it; without
+-- that, this suite would write into the real knowledge base.
+vim.env.AUTO_AGENTS_KB_ROOT = vim.fn.tempname() .. "-render-kb"
+vim.fn.mkdir(vim.env.AUTO_AGENTS_KB_ROOT, "p")
+local rv = review.from_draft(
+  { slug = repo.slug, owner = "render", name = "fixture", reviewer_slug = "lector" },
+  commit.sha, "lector",
+  { comments = { { path = "newfile.txt", line = 1, side = "RIGHT",
+                   severity = "nit", body = "x" } } })
+local _rvres, _rverr = review.save_pair(repo.slug, rv, "# render fixture review",
+  { topic = "render" })
+assert(_rvres, "review fixture must write a pair: " .. tostring(_rverr))
 tree.invalidate("commit:" .. commit.sha)
 paint()
 ok("p4: a review JSON shows beside the commit's files",
