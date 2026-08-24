@@ -40,8 +40,11 @@ end
 
 ---dirty reports whether a draft holds anything worth keeping.
 ---
----ONE predicate, shared by `submit`, the close guard and the footer's
----visibility. Three separate inline checks is how the last defect happened:
+---ONE predicate, shared by `submit` and the close guard. (The footer's pending
+---COUNT comes from auto-core's `pending()` callback and is a different
+---question — how many anchored annotations are drawn — so it deliberately does
+---not route through here.) Three separate inline checks is how the last defect
+---happened:
 ---`submit` counted comments and summary but not UNANCHORED findings, so a
 ---review that consisted solely of "this module has no tests" — precisely the
 ---kind review-json §6 exists to protect — was refused with "nothing to submit",
