@@ -136,12 +136,56 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
     vim.fn.delete(state_tmp, "rf")
   end
 
-  -- 41a. install + uninstall round-trip.
-  diag.install()
-  diag.install()  -- idempotent — second call a no-op
-  ok("p41: install is idempotent (no crash)", true)
+  -- 41a. install / uninstall round-trip.
+  --
+  -- These were two `ok(..., true)` calls: assertions that cannot fail.
+  -- Worse, BOTH install() calls were no-ops -- `M.install()` opens with
+  -- `if _augroup then return end`, and `af.setup()` has already created
+  -- the group by the time this section runs -- so the pair exercised
+  -- nothing at all and would have passed with the idempotency guard
+  -- deleted outright. Measured: zero augroups were created across both
+  -- calls.
+  --
+  -- Note what does NOT discriminate here, both measured rather than
+  -- assumed:
+  --   * the augroup ID is UNCHANGED by a `clear = true` re-create;
+  --   * the autocmd count returns to the same value, because install()
+  --     re-registers exactly what the clear wiped.
+  -- The only observable that separates idempotent from not is whether a
+  -- second create happens at all, so count the API calls.
+  local GROUP = "auto-finder.todos.automation"
+  local function group_present()
+    return (pcall(vim.api.nvim_get_autocmds, { group = GROUP })) and true or false
+  end
+
+  -- Start from a known-absent state so the first install() below is a
+  -- REAL create rather than a short-circuit on setup()'s group.
   diag.uninstall()
-  ok("p41: uninstall returns cleanly", true)
+  ok("p41: uninstall removes the augroup", not group_present())
+
+  local creates = 0
+  local real_create = vim.api.nvim_create_augroup
+  vim.api.nvim_create_augroup = function(...)
+    creates = creates + 1
+    return real_create(...)
+  end
+  diag.install()
+  local after_first = creates
+  local present_after_first = group_present()
+  diag.install()                      -- must be a no-op
+  local after_second = creates
+  vim.api.nvim_create_augroup = real_create
+
+  ok("p41: install creates the augroup",
+    after_first == 1 and present_after_first,
+    "creates=" .. after_first .. " present=" .. tostring(present_after_first))
+  ok("p41: install is idempotent — a second call does not re-create it",
+    after_second == after_first,
+    "creates went " .. after_first .. " -> " .. after_second)
+
+  diag.uninstall()
+  ok("p41: uninstall returns cleanly and the group is gone",
+    not group_present())
   diag.install()
 
   -- 41b. Open a malformed automated file → buffer-attach emits a
