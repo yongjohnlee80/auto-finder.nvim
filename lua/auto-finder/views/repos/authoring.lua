@@ -121,17 +121,17 @@ local function _topic(repo, sha)
   return (M.slugify(name) or "review") .. "-" .. tostring(sha):sub(1, 7)
 end
 
----markdown_path builds the canonical primary-document path for a revision.
----@return string? path, string? reason
-function M.markdown_path(repo, sha, reviewer_slug, revision)
-  local kb = _kb_root()
-  if not kb then return nil, "cannot resolve $KB_ROOT — is auto-core loaded?" end
-  if not reviewer_slug then
-    return nil, "the reviewer name produced no safe path segment; set git config user.name"
-  end
-  local date = os.date("!%Y-%m-%d")
-  return ("%s/agents/%s/reviews/%s-%s-r%d-review.md")
-    :format(kb, reviewer_slug, date, _topic(repo, sha), revision)
+---topic is the human half of the document's filename.
+---
+---The PATH itself is no longer built here. ADR-0067 §2.2 gives the store
+---ownership of the canonical path, because a caller-supplied path validated
+---after writing is a preflight in name only — the first cut let a generator
+---commit a pair outside `$KB_ROOT` entirely. We supply a topic and a body; the
+---store decides where they land.
+---@return string
+function M.topic(repo, sha)
+  local name = (repo and (repo.label or repo.slug)) or "review"
+  return (M.slugify(name) or "review") .. "-" .. tostring(sha):sub(1, 7)
 end
 
 ---render_markdown produces the PRIMARY artifact.
@@ -253,16 +253,17 @@ function M.submit(opts)
   doc.reviewer_slug = rslug
   doc.comments = vim.deepcopy(d.comments or {})
 
-  -- The generator runs only once the revision is WON, which is what lets the
-  -- document be named for a revision that is already ours.
+  -- The generator runs only once the revision is WON, so the rendered document
+  -- can name it. It returns a BODY only — and it must not raise: an `error()`
+  -- here propagated out of the writer instead of returning a reason, and left
+  -- the draft in a state the caller could not report on. `save_pair` guards it
+  -- now, and this side simply has nothing left to throw.
   local res, err = review.save_pair(slug, doc, function(rev)
-    local md_path, mderr = M.markdown_path(repo, sha, rslug, rev)
-    if not md_path then error(mderr or "no markdown path") end
     return M.render_markdown({
       draft = d, repo_label = repo.label, sha = sha,
       reviewer = display, revision = rev,
-    }), md_path
-  end)
+    })
+  end, { topic = M.topic(repo, sha) })
 
   if not res then
     -- The orphan Markdown, when there is one, is PRESERVED by save_pair and

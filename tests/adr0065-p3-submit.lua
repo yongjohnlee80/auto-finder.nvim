@@ -49,14 +49,22 @@ ok("punctuation-only yields nil rather than an empty segment", A.slugify("///") 
   tostring(A.slugify("///")))
 ok("nil in, nil out", A.slugify(nil) == nil)
 
-io.stdout:write("\n[2] the markdown path lands under $KB_ROOT/agents/<slug>/reviews\n")
+io.stdout:write("\n[2] the STORE owns the document path, not this module\n")
 local SHA = string.rep("a", 40)
 local repo = { slug = "own__repo", label = "repo", owner = "own", name = "repo" }
-local mp = A.markdown_path(repo, SHA, "john-lee", 1)
-ok("*** it is under the reviewer's own directory ***",
+-- ADR-0067 §2.2: a caller-supplied path validated after writing is a preflight
+-- in name only. auto-finder supplies a topic and a body; `worktree.review`
+-- decides where they land, so there is no path for this side to get wrong.
+ok("this module no longer builds a document path", A.markdown_path == nil)
+local mp = review.canonical_document({
+  kb_root = vim.env.AUTO_AGENTS_KB_ROOT, reviewer_slug = "john-lee",
+  slug = repo.slug, topic = A.topic(repo, SHA), revision = 1 })
+ok("*** the store's path is under the reviewer's own directory ***",
   mp and mp:find(tmp .. "/kb/agents/john-lee/reviews/", 1, true) == 1, tostring(mp))
 ok("and carries the revision in the name", mp and mp:find("-r1-review.md", 1, true) ~= nil, tostring(mp))
-local _, why = A.markdown_path(repo, SHA, nil, 1)
+local _, why = review.canonical_document({
+  kb_root = vim.env.AUTO_AGENTS_KB_ROOT, reviewer_slug = nil,
+  slug = repo.slug, revision = 1 })
 ok("an unsafe reviewer refuses rather than guessing a path", why ~= nil, tostring(why))
 
 io.stdout:write("\n[3] submit writes BOTH artifacts, JSON last\n")
@@ -134,7 +142,9 @@ local d2 = A.draft(repo.slug, SHA)
 d2.comments = { { path = "foo.lua", line = 4, side = "RIGHT", severity = "nit", body = "second" } }
 -- Pre-create the name r2 would want, so the claim must move on.
 local _, rslug = A.reviewer()
-local taken = A.markdown_path(repo, SHA, rslug, 2)
+local taken = review.canonical_document({
+  kb_root = vim.env.AUTO_AGENTS_KB_ROOT, reviewer_slug = rslug,
+  slug = repo.slug, topic = A.topic(repo, SHA), revision = 2 })
 store.ensure_dir(vim.fn.fnamemodify(taken, ":h"))
 vim.fn.writefile({ "squatter" }, taken)
 local res2, reason2 = A.submit({ repo = repo, sha = SHA })
