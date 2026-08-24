@@ -628,6 +628,158 @@ local function _help()
   end
 end
 
+-- ─── git actions (ADR-0060) ───────────────────────────────────────
+--
+-- These bind keys to `worktree.repos` verbs and do nothing else. No git runs
+-- from this file: worktree.nvim owns git for this surface and auto-core owns
+-- the argv. The panel's only jobs are choosing which verb a row implies,
+-- confirming the outward-facing one, and turning a failure into a message.
+--
+-- Every handler follows the ADR-0060 r1 SF2 rule: a missing capability or a
+-- failed git call is a NOTIFICATION, never a raw keymap traceback.
+
+---_notify_result is the single reporting path for a git action.
+local function _notify_result(label, ok, err)
+  if ok then
+    logger.notify("repos: " .. label, { level = vim.log.levels.INFO })
+  else
+    logger.notify("repos: " .. label .. " failed — " .. tostring(err or "unknown"),
+      { level = vim.log.levels.ERROR })
+  end
+end
+
+---_verb resolves a backend verb, notifying rather than throwing when absent.
+local function _verb(name)
+  local backend = _repos()
+  local fn = backend and backend[name]
+  if type(fn) ~= "function" then
+    logger.notify("repos: this action needs a newer worktree.nvim (" .. name .. ")",
+      { level = vim.log.levels.WARN })
+    return nil
+  end
+  return fn
+end
+
+---git_fetch is `f` on a repo row.
+function M.git_fetch(row)
+  if not (row and row.repo) then
+    logger.notify("repos: put the cursor on a repository to fetch",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local fn = _verb("fetch"); if not fn then return end
+  local label = row.repo.label or "repo"
+  logger.notify("repos: fetching " .. label .. "...", { level = vim.log.levels.INFO })
+  local ok = pcall(fn, row.repo, function(done, err)
+    _notify_result("fetch " .. label, done, err)
+  end)
+  if not ok then _notify_result("fetch " .. label, false, "call failed") end
+end
+
+---git_stage_toggle is `s` on a file under UNCOMMITTED.
+---
+---The direction comes from git's own index column: porcelain `x` is the staged
+---side, so anything other than a space or `?` there means this path already has
+---something staged and `s` should take it back out. That is why the panel
+---renders BOTH columns — a file staged and then edited again reads `MM`, and a
+---single glyph could not tell you which way `s` will go.
+function M.git_stage_toggle(row)
+  if not (row and row.kind == "file" and row.file and row.worktree) then
+    logger.notify("repos: put the cursor on a changed file to stage it",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  if not (row.node and row.node.kind == "uncommitted") then
+    logger.notify("repos: only files under UNCOMMITTED can be staged",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local f = row.file
+  local x = type(f.x) == "string" and f.x or "?"
+  local staged = x ~= " " and x ~= "?" and x ~= ""
+  local fn = _verb(staged and "unstage" or "stage"); if not fn then return end
+  local path = f.path
+  if type(path) ~= "string" or path == "" then
+    logger.notify("repos: that row has no path to stage", { level = vim.log.levels.WARN })
+    return
+  end
+  local verb = staged and "unstage" or "stage"
+  local ok = pcall(fn, row.worktree, path, function(done, err)
+    _notify_result(verb .. " " .. path, done, err)
+  end)
+  if not ok then _notify_result(verb .. " " .. path, false, "call failed") end
+end
+
+---git_commit is `c`: prompt for a message, commit what is staged.
+---
+---It checks `has_staged` BEFORE prompting. Asking for a message and then
+---refusing is worse than saying up front that there is nothing to commit, and
+---the ordering is the one thing the panel controls.
+function M.git_commit(row)
+  local wt = row and (row.worktree or (row.repo and row.repo.sample_worktree))
+  if not wt then
+    logger.notify("repos: put the cursor on a worktree or one of its files to commit",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local backend = _repos()
+  if backend and type(backend.has_staged) == "function" then
+    local pok, staged = pcall(backend.has_staged, wt)
+    if pok and staged == false then
+      logger.notify("repos: nothing staged — press `s` on a file first",
+        { level = vim.log.levels.WARN })
+      return
+    end
+  end
+  local fn = _verb("commit"); if not fn then return end
+  vim.ui.input({ prompt = "Commit message: " }, function(msg)
+    if not msg or vim.trim(msg) == "" then
+      logger.notify("repos: commit cancelled", { level = vim.log.levels.INFO })
+      return
+    end
+    local ok = pcall(fn, wt, msg, function(done, err)
+      _notify_result("commit", done, err)
+    end)
+    if not ok then _notify_result("commit", false, "call failed") end
+  end)
+end
+
+---git_push is `P`: publish, but only after an explicit confirmation.
+---
+---`P` is one keypress from `p`, and a push is the only action on this panel
+---that leaves the machine. The confirmation NAMES the repository, because "are
+---you sure?" on a panel holding several repos does not say which one is about
+---to be published — and the point is that a mistyped key on the wrong row
+---cannot publish.
+function M.git_push(row)
+  if not (row and row.repo) then
+    logger.notify("repos: put the cursor on a repository to push",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local fn = _verb("push"); if not fn then return end
+  local label = row.repo.label or "this repo"
+  local prompt = "Push " .. label .. " to its remote?"
+  local function go(choice)
+    if choice ~= "yes" then
+      logger.notify("repos: push cancelled", { level = vim.log.levels.INFO })
+      return
+    end
+    logger.notify("repos: pushing " .. label .. "...", { level = vim.log.levels.INFO })
+    local ok = pcall(fn, row.repo, nil, function(done, err)
+      _notify_result("push " .. label, done, err)
+    end)
+    if not ok then _notify_result("push " .. label, false, "call failed") end
+  end
+  local okc, float = pcall(require, "auto-core.ui.float")
+  if okc and float and type(float.confirm) == "function" then
+    float.confirm(prompt, { on_choice = go })
+  else
+    -- No confirm primitive is NOT a licence to push unconfirmed.
+    vim.ui.select({ "yes", "no" }, { prompt = prompt }, go)
+  end
+end
+
 -- ─── keymaps + subscriptions ──────────────────────────────────
 
 local function _apply_keymaps(bufnr, panel_winid)
@@ -648,6 +800,14 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: info")
   set("R", function() _reload(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: reload")
+  set("f", function() M.git_fetch(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: fetch this repository")
+  set("s", function() M.git_stage_toggle(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: stage / unstage this file")
+  set("c", function() M.git_commit(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: commit what is staged")
+  set("P", function() M.git_push(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: push (confirms first)")
   set("?", _help, "auto-finder.repos: help")
 end
 

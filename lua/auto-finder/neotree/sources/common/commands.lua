@@ -311,8 +311,7 @@ M.git_add_file = function(state)
     return
   end
   local path = node:get_id()
-  utils.execute_command({ "git", "add", "--", path })
-  events.fire_event(events.GIT_EVENT)
+  _run("stage", { path }, function() events.fire_event(events.GIT_EVENT) end)
 end
 
 M.git_unstage_file = function(state)
@@ -321,8 +320,7 @@ M.git_unstage_file = function(state)
     return
   end
   local path = node:get_id()
-  utils.execute_command({ "git", "reset", "--", path })
-  events.fire_event(events.GIT_EVENT)
+  _run("unstage", { path }, function() events.fire_event(events.GIT_EVENT) end)
 end
 
 M.git_toggle_file_stage = function(state)
@@ -342,44 +340,87 @@ M.git_toggle_file_stage = function(state)
   end
 
   local worktree_status = status:sub(2, 2)
-  if worktree_status ~= "." then
-    utils.execute_command({ "git", "add", "--", path })
-  else
-    utils.execute_command({ "git", "reset", "--", path })
-  end
-  events.fire_event(events.GIT_EVENT)
+  local verb = (worktree_status ~= ".") and "stage" or "unstage"
+  _run(verb, { path }, function() events.fire_event(events.GIT_EVENT) end)
 end
 
 ---@param state neotree.State
 M.git_add_all = function(state)
-  local cmd = { "git", "add", "-A" }
-  vim.fn.system(cmd)
-  events.fire_event(events.GIT_EVENT)
+  -- Was a BLOCKING vim.fn.system: `git add -A` over a large tree froze the
+  -- editor exactly as the push did before ADR-0040 Batch C. Async now, through
+  -- the same owner, for the same reason.
+  _run("stage_all", {}, function() events.fire_event(events.GIT_EVENT) end)
 end
 
----ADR-0040 Batch C: run a git mutation OFF the UI thread. The
----commit/push/reset commands previously went through blocking
----`vim.fn.systemlist` — a network-bound `git push` froze the whole
----editor for its duration. `vim.system` runs the subprocess async;
----the callback is rescheduled onto the main loop so popups/events
----stay main-thread-safe. Test hook: `M._git_async_count`.
----@param cmd string[]
----@param cb fun(ok: boolean, lines: string[])
-local function git_async(cmd, cb)
-  M._git_async_count = (M._git_async_count or 0) + 1
-  vim.system(cmd, { text = true }, function(out)
-    vim.schedule(function()
-      local lines = {}
-      for _, chunk in ipairs({ out.stdout or "", out.stderr or "" }) do
-        for line in chunk:gmatch("[^\n]+") do
-          lines[#lines + 1] = line
-        end
-      end
-      cb(out.code == 0, lines)
-    end)
-  end)
+---ADR-0060: every git WRITE in this file goes through `auto-core.git.write`,
+---the family's single owner for mutating git.
+---
+---This file used to own that itself. ADR-0040 Batch C moved commit/push off the
+---UI thread here after a network-bound `git push` froze the editor — but the
+---staging paths stayed on blocking `vim.fn.system` / `utils.execute_command`,
+---so the hardening covered half the surface. Two owners meant two places to
+---harden and they had already drifted. auto-core carries it now: `GIT_EDITOR`
+---pinned so no write can spawn an editor, credential prompting off so a push
+---cannot hang, no read-only flag on a write, `restore --staged` with a
+---pre-first-commit fallback, and no `--hard` reachable at all.
+---@return table|nil
+local function _core_write()
+  local ok, w = pcall(require, "auto-core.git.write")
+  if ok and type(w) == "table" and type(w.stage) == "function" then return w end
+  return nil
 end
-M._git_async = git_async -- test hook
+
+---cwd stays the editor's, exactly as before: the previous `vim.fn.system` calls
+---inherited it implicitly. Preserved deliberately — changing which repo these
+---act on would be a behavioural change, not consolidation.
+---@return string
+local function _cwd()
+  return (vim.uv or vim.loop).cwd()
+end
+
+---_run adapts an auto-core verb to this file's `cb(ok, lines)` shape, so every
+---popup/alert call site below is untouched.
+---
+---`args` MUST carry its own length as `args.n` when it contains a nil — build it
+---with `_pack` below (NOT `table.pack` — LuaJIT/Lua 5.1 has no such function;
+---Lua 5.2 added it). A plain `{ msg, nil }` has length 1, so the callback would
+---slide up into the verb's `opts` slot and never fire: `commit(cwd, msg, opts,
+---on_done)` would receive it as `opts`. That is not hypothetical; it is what the
+---first version of this adapter did to `commit`, `push` and `reset_soft`, and
+---the callback silently never ran.
+---@param verb string
+---@param args table   -- build with _pack whenever an argument may be nil
+---@param cb fun(ok: boolean, lines: string[])
+---_pack is `table.pack` for LuaJIT, which does not have it. Carries the
+---argument count so a trailing nil survives into the call.
+---@return table
+local function _pack(...)
+  return { n = select("#", ...), ... }
+end
+M._pack = _pack -- test hook
+
+local function _run(verb, args, cb)
+  M._git_async_count = (M._git_async_count or 0) + 1
+  local w = _core_write()
+  if not w or type(w[verb]) ~= "function" then
+    vim.schedule(function()
+      cb(false, { "auto-core.git.write." .. verb .. " unavailable — update auto-core" })
+    end)
+    return
+  end
+  local n_args = args.n or #args
+  local argv = { _cwd() }
+  for i = 1, n_args do argv[i + 1] = args[i] end
+  local n = n_args + 2
+  argv[n] = function(ok, err)
+    local lines = {}
+    for line in tostring(err or ""):gmatch("[^\n]+") do lines[#lines + 1] = line end
+    cb(ok, lines)
+  end
+  w[verb](unpack(argv, 1, n))
+end
+M._core_write = _core_write -- test hook
+M._run = _run               -- test hook
 
 ---@param state neotree.State
 M.git_commit = function(state, and_push)
@@ -395,13 +436,13 @@ M.git_commit = function(state, and_push)
   }
 
   inputs.input("Commit message: ", "", function(msg)
-    git_async({ "git", "commit", "-m", msg }, function(commit_ok, result)
+    _run("commit", _pack(msg, nil), function(commit_ok, result)
       if not commit_ok or (#result > 0 and vim.startswith(result[1], "fatal:")) then
         popups.alert("ERROR: git commit", result)
         return
       end
       if and_push then
-        git_async({ "git", "push" }, function(_, result2)
+        _run("push", _pack(nil), function(_, result2)
           table.insert(result, "")
           for i = 1, #result2 do
             table.insert(result, result2[i])
@@ -424,7 +465,7 @@ end
 M.git_push = function(state)
   inputs.confirm("Are you sure you want to push your changes?", function(yes)
     if yes then
-      git_async({ "git", "push" }, function(_, result)
+      _run("push", _pack(nil), function(_, result)
         events.fire_event(events.GIT_EVENT)
         popups.alert("git push", result)
       end)
@@ -435,7 +476,7 @@ end
 M.git_undo_last_commit = function(state)
   inputs.confirm("Are you sure you want to undo the last commit? (keeps changes)", function(yes)
     if yes then
-      git_async({ "git", "reset", "--soft", "HEAD~1" }, function(reset_ok, result)
+      _run("reset_soft", _pack(nil), function(reset_ok, result)
         if not reset_ok then
           popups.alert("ERROR: git reset --soft HEAD~1", result)
           return
@@ -456,12 +497,16 @@ M.git_revert_file = function(state)
     return
   end
   local path = node:get_id()
-  local cmd = { "git", "checkout", "HEAD", "--", path }
   local msg = string.format("Are you sure you want to revert %s?", node.name)
   inputs.confirm(msg, function(yes)
     if yes then
-      vim.fn.system(cmd)
-      events.fire_event(events.GIT_EVENT)
+      -- The last blocking git write in this file. `restore --source=HEAD`
+      -- rather than `checkout HEAD --`: same effect, but it cannot switch
+      -- branches if a path is ever mistaken for a ref.
+      _run("restore_worktree", { path }, function(rok, lines)
+        if not rok then popups.alert("ERROR: git restore", lines) end
+        events.fire_event(events.GIT_EVENT)
+      end)
     end
   end)
 end

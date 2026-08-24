@@ -37,6 +37,10 @@ for _, p in ipairs({
   -- approach as auto-run's own smoke.
   LAZY .. "/nvim-dap",
   plugins_root .. "/auto-core.nvim/main",
+  -- Same-branch sibling LAST so it wins (prepend reverses order): a
+  -- cross-repo change lives in two worktrees at once, and probing only
+  -- `main` would exercise an auto-core without the new primitives.
+  plugins_root .. "/auto-core.nvim/" .. vim.fn.fnamemodify(plugin_root, ":t"),
   -- ADR-0048 Phase 3: auto-run sibling (soft dep of the tests/debug
   -- views). Same sibling-worktree resolution as auto-core above.
   plugins_root .. "/auto-run.nvim/main",
@@ -5730,30 +5734,79 @@ print("\n[44] ADR-0040 C+D — async git runner + marks per-render read cache")
 section(function()
   -- 44a. Batch C: the async git runner executes off the UI thread
   -- and delivers (ok, lines) on the main loop.
+  -- ADR-0060 consolidation: the local `git_async` this section used to test is
+  -- gone. Every git WRITE here now delegates to `auto-core.git.write`, the
+  -- family's single owner, so what is asserted is the ADAPTER — same contract
+  -- (off the UI thread, `(ok, lines)` on the main loop, counter, failure shape)
+  -- against the new seam. The old runner's own behaviour is covered by
+  -- auto-core's tests/git_write.lua, against a real repo.
   local nt_commands = require("auto-finder.neotree.sources.common.commands")
-  ok("44a: _git_async test hook exported",
-    type(nt_commands._git_async) == "function")
+  ok("44a: _run adapter exported", type(nt_commands._run) == "function")
+  ok("44a: and it resolves auto-core's write module",
+    type(nt_commands._core_write) == "function"
+      and type(nt_commands._core_write()) == "table",
+    "auto-core.git.write not reachable — is the rtp pointing at an auto-core "
+      .. "without it?")
+
+  -- A real repo, entered via cwd because that is what the adapter uses.
+  local p44 = vim.fn.tempname() .. "-p44"
+  vim.fn.mkdir(p44, "p")
+  for _, a in ipairs({ { "git", "init", "-q", "-b", "main" },
+                       { "git", "config", "user.email", "t@t" },
+                       { "git", "config", "user.name", "t" } }) do
+    vim.system(a, { cwd = p44, text = true }):wait()
+  end
+  vim.fn.writefile({ "x" }, p44 .. "/f.txt")
+  local prev_cwd = vim.fn.getcwd()
+  vim.cmd("lcd " .. vim.fn.fnameescape(p44))
+
   local async_before = nt_commands._git_async_count or 0
   local got_ok, got_lines = nil, nil
-  nt_commands._git_async({ "git", "--version" }, function(g_ok, g_lines)
+  nt_commands._run("stage", { "f.txt" }, function(g_ok, g_lines)
     got_ok, got_lines = g_ok, g_lines
   end)
-  vim.wait(4000, function() return got_ok ~= nil end, 10)
-  ok("44a: async git callback fired with success",
-    got_ok == true, "got_ok=" .. tostring(got_ok))
-  ok("44a: async git captured output lines",
-    type(got_lines) == "table" and #got_lines >= 1
-    and tostring(got_lines[1]):find("git version", 1, true) ~= nil,
-    vim.inspect(got_lines))
+  vim.wait(8000, function() return got_ok ~= nil end, 10)
+  ok("44a: the adapter's callback fired with success",
+    got_ok == true, "got_ok=" .. tostring(got_ok) .. " lines=" .. vim.inspect(got_lines))
+  ok("44a: lines is a table (empty on success is correct)",
+    type(got_lines) == "table", vim.inspect(got_lines))
   ok("44a: spawn counter incremented",
     (nt_commands._git_async_count or 0) == async_before + 1)
-  -- failure shape: bogus subcommand → ok=false, stderr captured
-  local fail_ok = nil
-  nt_commands._git_async({ "git", "definitely-not-a-verb-p44" }, function(g_ok)
-    fail_ok = g_ok
+  ok("44a: and the write really landed in the index",
+    require("auto-core.git.write").has_staged(p44) == true)
+
+  -- failure shape: a refused verb reports ok=false WITH a reason, and does not
+  -- raise — these are bound to keys, so a traceback is the wrong failure.
+  local fail_ok, fail_lines = nil, nil
+  nt_commands._run("commit", nt_commands._pack("   ", nil), function(g_ok, g_lines)
+    fail_ok, fail_lines = g_ok, g_lines
   end)
-  vim.wait(4000, function() return fail_ok ~= nil end, 10)
-  ok("44a: failing git command reports ok=false", fail_ok == false)
+  vim.wait(8000, function() return fail_ok ~= nil end, 10)
+  ok("44a: a refused write reports ok=false", fail_ok == false)
+  ok("44a: with git's or the guard's reason in lines",
+    type(fail_lines) == "table" and #fail_lines >= 1, vim.inspect(fail_lines))
+
+  -- An unknown verb must degrade, not throw: that is the version-skew path.
+  local skew_ok, skew_lines = nil, nil
+  nt_commands._run("no_such_verb_p44", {}, function(g_ok, g_lines)
+    skew_ok, skew_lines = g_ok, g_lines
+  end)
+  vim.wait(4000, function() return skew_ok ~= nil end, 10)
+  ok("44a: an unknown verb degrades to ok=false, not an error", skew_ok == false)
+  -- The arity trap: a plain table drops a trailing nil, which slid the callback
+  -- into commit's `opts` slot so it never fired. `_pack` carries `n` — and it is
+  -- a local helper because LuaJIT has no `table.pack` (my first fix used it and
+  -- aborted the whole section on a nil field).
+  local packed_ok = nil
+  nt_commands._run("commit", nt_commands._pack("", nil), function(g_ok) packed_ok = g_ok end)
+  vim.wait(6000, function() return packed_ok ~= nil end, 10)
+  ok("44a: a table.pack'd nil argument still delivers the callback",
+    packed_ok == false, "callback never fired -> the arity bug is back")
+  ok("44a: and says what is missing",
+    type(skew_lines) == "table" and tostring(skew_lines[1] or ""):find("unavailable", 1, true) ~= nil,
+    vim.inspect(skew_lines))
+
+  vim.cmd("lcd " .. vim.fn.fnameescape(prev_cwd))
 
   -- 44b. Batch D: marks _read_line serves repeat reads of the same
   -- file from the per-render cache (one open per file per render).

@@ -169,6 +169,7 @@ SUITES=(
   # this is the only suite covering the real pipeline.
   "adr0059-e2e|tests/adr0059-e2e.lua"
   "adr0060-repos|tests/adr0060-repos-render.lua"
+  "adr0060-git-actions|tests/adr0060-git-actions.lua"
   "v0267-loop|tests/v0267-loop-guard.lua"
   # ADR-0060 r1 — view-lifecycle latch.
   "r1-lifecycle|tests/adr0060-r1-view-lifecycle.lua"
