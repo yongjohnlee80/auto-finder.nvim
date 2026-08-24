@@ -2,6 +2,33 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — `state.section_buffers` stays a live alias across slot mutations
+
+`setup()` publishes `M.state.section_buffers` as a live alias of the
+section registry's bufnr cache, and the comment there promises *"we
+mutate in place (never re-assign) elsewhere so the alias never goes
+stale"*. `_rebuild_section_registry` broke that promise by rebinding
+`_registry._bufs` to a fresh table, so after **any** slot mutation the
+alias pointed at an orphan.
+
+Two production writers target the alias and silently landed nowhere the
+registry could see: the repos-follow bufnr update, and the per-section
+clear. The defect is in the shared rebuild function, so it affected
+`slot_add`, `slot_remove`, `slot_modify`, `slot_assign` **and** the
+workspace reseed equally — it predates `slot assign` and was found while
+reviewing it.
+
+- **`init.lua`** — `_bufs` is now mutated in place (clear its keys, copy
+  the new entries in) rather than rebound. This is the same idiom the
+  panel `on_close` fanout in the same file already used, for the same
+  stated reason.
+- **smoke `[54]`** covers every `_rebuild_section_registry` caller and
+  asserts identity with `rawequal` — a deep-equality check would pass on
+  two distinct tables holding the same entries, which is exactly the
+  broken state — plus that writes propagate in both directions after a
+  mutation, with a positive control proving the check can observe a
+  write at all. Restoring the rebind fails 8 assertions.
+
 ## [Unreleased] — tests: XDG sandbox closes an undeclared dependency on a writable `$HOME/.cache`
 
 The suites redirected `XDG_CONFIG_HOME` and `XDG_STATE_HOME` but left
