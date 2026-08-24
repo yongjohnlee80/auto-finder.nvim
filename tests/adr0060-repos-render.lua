@@ -8,7 +8,8 @@ for _, p in ipairs({ PR .. "/auto-core.nvim/main", PR .. "/worktree.nvim/main",
 end
 vim.o.columns, vim.o.lines = 200, 60
 local sb = vim.fn.tempname() .. "-p4"
-vim.env.XDG_STATE_HOME = sb .. "/state"
+dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
+  .. "/_sandbox.lua")("p4")
 
 local pass, fail = 0, 0
 local function ok(n, c, d)

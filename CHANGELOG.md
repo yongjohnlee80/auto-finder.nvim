@@ -2,6 +2,63 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — tests: XDG sandbox closes an undeclared dependency on a writable `$HOME/.cache`
+
+The suites redirected `XDG_CONFIG_HOME` and `XDG_STATE_HOME` but left
+`XDG_CACHE_HOME` inheriting the real `$HOME/.cache`. auto-run
+([ADR-0048]) writes each run under `stdpath("cache")`, so on a host
+where that path is read-only the mkdir fails with `E739`, no job is
+ever spawned, and ADR-0048's seven `p46` assertions cascade off the
+missing spawn — **147/7 instead of 154/0**.
+
+This is why two agents on the same machine, same commit and same
+Neovim reported different results for months: one had a writable home
+cache and one did not. An environment-dependent gate is worse than a
+red one, because "the suite is green" stops being a property of the
+code and nobody notices.
+
+- **`tests/_sandbox.lua` (new)** — one source of truth for headless XDG
+  isolation. Points `XDG_CONFIG_HOME`, `XDG_STATE_HOME` **and
+  `XDG_CACHE_HOME`** at a per-run directory, then verifies each one
+  exists, is writable, and does not resolve inside the real home,
+  erroring loudly if not. A silently-unisolated run is the failure mode
+  it exists to prevent, and it is invisible until some unrelated
+  assertion breaks.
+  - The call site locates the helper from the **caller's own path**
+    rather than a `plugin_root` local: several suites derive
+    `plugin_root` further down the file than they set XDG, so an
+    ordering dependency there would be a trap.
+  - **`XDG_DATA_HOME` is deliberately not redirected.** Installed
+    treesitter parsers and plugin data live under it; redirecting it
+    hides them and fails ADR-0048 for an unrelated reason. That
+    experiment has been run.
+- **All ten suites** now route through the helper. Four
+  (`smoke`, `smoke-automation`, `smoke-adr0044`, `smoke-adr0048`) used
+  fixed `/tmp/auto-finder-<name>-{config,state}` paths that two
+  concurrent runs would race through; roots are now unique per run.
+- **`tests/run-all.sh`** allocates one writable root per run via
+  `mktemp -d`, exports it as `AF_TEST_SANDBOX_ROOT` so every suite
+  nests under it, and removes it on `EXIT`/`INT`/`TERM` behind a guard
+  that only ever deletes a path matching the pattern it created.
+- **smoke `[53]`** pins hermeticity: each of config/state/cache
+  resolves outside the real home *and* is writable — a redirect
+  pointing somewhere unwritable would satisfy the first check and still
+  reproduce the original failure — plus `data` stays outside the
+  sandbox, and auto-run's `runs/` directory is creatable. Deleting the
+  cache redirect from the helper fails `[53]`, naming the real home
+  path.
+
+Verified against the original failure: with `XDG_CACHE_HOME` pointed at
+a `chmod 555` directory, `main` gives 147/7 and this branch gives 154/0;
+full `run-all` is green with a read-only home cache. No
+`AF_KNOWN_ENV_FAILS` tolerance was added — this was an environment bug
+in the harness, not a failure to absorb.
+
+**Scope:** this closes the ADR-0048 cascade **only**. The
+`smoke_automation` SIGSEGV seen on some runtimes is a separate,
+still-open bug (headless geometry + a live diagnostics attach + the
+`:edit`), tracked on the 2026-06-13 `[41b]` task. Nothing here touches it.
+
 ## [Unreleased] — `slot assign`: re-arrange the panel slots
 
 `slot add` / `slot remove` / `slot modify` could each edit the slot

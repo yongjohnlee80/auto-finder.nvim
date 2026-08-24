@@ -70,10 +70,8 @@ vim.o.hidden = true
 -- namespace persist (which writes under `<state>/auto-core/`) doesn't
 -- leak into the user's real state directory and corrupt their pin
 -- across sessions.
-vim.fn.delete("/tmp/auto-finder-smoke-config-default", "rf")
-vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-default"
-vim.fn.delete("/tmp/auto-finder-smoke-state-default", "rf")
-vim.env.XDG_STATE_HOME = "/tmp/auto-finder-smoke-state-default"
+dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
+  .. "/_sandbox.lua")("smoke")
 
 -- Vestigial since v0.4.0, kept as a belt-and-braces guard. It used to force
 -- the legacy plaintext storage path for the dbase REPL tests regardless of
@@ -6498,6 +6496,75 @@ ok("p52: original arrangement restored",
   table.concat(af.state.config.sections, " ")
     == table.concat(restore_sections, " "),
   table.concat(af.state.config.sections, " "))
+end)
+
+
+-- ───── [53] the suite is hermetic w.r.t. the user's real XDG dirs ─────
+-- The bug this pins: suites redirected XDG_CONFIG_HOME and
+-- XDG_STATE_HOME but left XDG_CACHE_HOME on the real `$HOME/.cache`.
+-- auto-run writes each run under `stdpath("cache")`, so on a host where
+-- that path is read-only the mkdir failed with E739, no job spawned,
+-- and ADR-0048's seven p46 assertions cascaded off the missing spawn —
+-- 147/7 instead of 154/0, for months, with two agents on the same
+-- machine and commit disagreeing about whether the suite was green.
+--
+-- An undeclared dependency on a writable home directory is invisible
+-- until it bites, so assert it directly rather than trusting that every
+-- future suite remembers to call tests/_sandbox.lua.
+--
+-- `stdpath()` is the right instrument here, not `vim.env`: it is what
+-- the production code actually calls, and it re-reads the environment
+-- on every invocation.
+print("\n[53] XDG isolation — no suite writes to the real home")
+section(function()
+local home = vim.env.HOME
+
+-- Control: prove the assertions below can distinguish isolated from
+-- not. If HOME is unset or stdpath ignored the env, every check would
+-- pass vacuously and this section would be decoration.
+ok("p53: HOME is set (control — the checks below are meaningful)",
+  type(home) == "string" and home ~= "", tostring(home))
+
+for _, probe in ipairs({
+  { kind = "config", var = "XDG_CONFIG_HOME" },
+  { kind = "data",   var = "XDG_DATA_HOME"   },
+  { kind = "state",  var = "XDG_STATE_HOME"  },
+  { kind = "cache",  var = "XDG_CACHE_HOME"  },
+}) do
+  local resolved = vim.fn.stdpath(probe.kind)
+  if type(resolved) == "table" then resolved = resolved[1] end
+  if probe.kind == "data" then
+    -- DATA is deliberately NOT redirected: installed treesitter parsers
+    -- and plugin data live under it, and hiding them fails ADR-0048 for
+    -- an unrelated reason. Asserted so nobody "completes the set".
+    -- Note the test is "outside the sandbox", not "env var unset" —
+    -- XDG_DATA_HOME is commonly set by the system already.
+    local sandbox_root = vim.fn.fnamemodify(vim.fn.stdpath("cache"), ":h")
+    ok("p53: stdpath('data') is intentionally NOT sandboxed",
+      type(resolved) == "string"
+        and not vim.startswith(resolved, sandbox_root .. "/"),
+      tostring(resolved) .. "  sandbox=" .. tostring(sandbox_root))
+  else
+    ok(("p53: stdpath('%s') is redirected away from the real home")
+      :format(probe.kind),
+      type(resolved) == "string" and resolved ~= ""
+        and not vim.startswith(resolved, home .. "/."),
+      tostring(resolved))
+    -- Writability is the property that actually broke. A redirect that
+    -- points somewhere unwritable would satisfy the check above and
+    -- still reproduce the original failure.
+    vim.fn.mkdir(resolved, "p")
+    ok(("p53: stdpath('%s') is writable"):format(probe.kind),
+      vim.fn.filewritable(resolved) == 2,
+      tostring(resolved) .. " filewritable=" .. vim.fn.filewritable(resolved))
+  end
+end
+
+-- The specific path whose read-only-ness caused the cascade.
+local run_root = vim.fn.stdpath("cache") .. "/auto-run/runs"
+vim.fn.mkdir(run_root, "p")
+ok("p53: auto-run's run directory is creatable under the sandboxed cache",
+  vim.fn.isdirectory(run_root) == 1, run_root)
 end)
 
 -- ───────────────────────── summary ────────────────────────

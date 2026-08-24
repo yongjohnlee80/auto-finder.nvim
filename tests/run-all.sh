@@ -35,6 +35,37 @@ cd "$(dirname "$0")/.."
 KNOWN_ENV_FAILS="${AF_KNOWN_ENV_FAILS:-0}"
 overall=0
 
+# ── XDG SANDBOX ───────────────────────────────────────────────────
+# One writable root per run, exported so every suite nests its
+# config/state/cache under it (tests/_sandbox.lua reads this var).
+#
+# Why: the suites used to redirect XDG_CONFIG_HOME and XDG_STATE_HOME
+# but leave XDG_CACHE_HOME on the real $HOME/.cache. auto-run writes
+# each run under stdpath("cache"), so on a host where that is
+# read-only the mkdir fails with E739, no job spawns, and ADR-0048's
+# seven p46 assertions cascade off it — 147/7 instead of 154/0. Two
+# agents on the same machine and commit disagreed for months over
+# exactly this. It is an undeclared environment dependency, not a
+# tolerable failure, so it is fixed here rather than absorbed into
+# AF_KNOWN_ENV_FAILS.
+#
+# XDG_DATA_HOME is deliberately NOT redirected: installed treesitter
+# parsers and plugin data live under it and redirecting it hides
+# them, which fails ADR-0048 for a different reason. That experiment
+# has been run; do not "complete the set".
+AF_TEST_SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-finder-testrun-XXXXXX")"
+export AF_TEST_SANDBOX_ROOT
+cleanup_sandbox() {
+  # Guard the rm: only ever remove a path we just created under the
+  # temp dir, never an empty or inherited value.
+  case "$AF_TEST_SANDBOX_ROOT" in
+    "${TMPDIR:-/tmp}"/auto-finder-testrun-*)
+      rm -rf "$AF_TEST_SANDBOX_ROOT" ;;
+  esac
+}
+trap cleanup_sandbox EXIT INT TERM
+echo "sandbox: $AF_TEST_SANDBOX_ROOT"
+
 run_suite() {
   local name="$1" file="$2"
   local out exit_code pass fail

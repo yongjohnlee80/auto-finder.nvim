@@ -58,10 +58,8 @@ vim.o.hidden = true
 
 -- Isolate from the user's real nvim state (and from the other smoke
 -- suites' isolation dirs, so they can't clobber each other).
-vim.fn.delete("/tmp/auto-finder-automation-config", "rf")
-vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-automation-config"
-vim.fn.delete("/tmp/auto-finder-automation-state", "rf")
-vim.env.XDG_STATE_HOME = "/tmp/auto-finder-automation-state"
+dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
+  .. "/_sandbox.lua")("automation")
 
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 
