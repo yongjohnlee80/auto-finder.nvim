@@ -64,15 +64,18 @@ io.stdout:write("\n[3] submit writes BOTH artifacts, JSON last\n")
 -- happy-path outcome: both artifacts existing says nothing about which was
 -- created first, and "Markdown first" is what makes every failure leave an
 -- orphan prose file rather than an unpaired projection.
+-- ADR-0067 A4: the write goes through `save_pair`, so BOTH artifacts are
+-- claimed with `store.create_exclusive` and the JSON no longer passes through
+-- `review.save`. Record at that one boundary and classify by filename.
 local order = {}
-local real_create, real_save = store.create_exclusive, review.save
+local real_create = store.create_exclusive
 store.create_exclusive = function(path, body)
-  if tostring(path):find("%-review%.md$") then order[#order + 1] = "markdown" end
+  local pth = tostring(path)
+  if pth:find("%-review%.md$") then order[#order + 1] = "markdown"
+  elseif pth:find("%.review%.json$") then order[#order + 1] = "json"
+  elseif pth:find("%.reserve$") then order[#order + 1] = "reserve"
+  elseif pth:find("%.tombstone$") then order[#order + 1] = "tombstone" end
   return real_create(path, body)
-end
-review.save = function(slug, doc, o)
-  order[#order + 1] = "json"
-  return real_save(slug, doc, o)
 end
 local d = A.draft(repo.slug, SHA)
 d.comments = { { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" } }
@@ -93,9 +96,24 @@ ok("*** and is absent from the JSON — nothing was invented to place it ***",
   not vim.inspect(doc.comments):find("no tests", 1, true))
 ok("the draft is cleared after a successful submit",
   #A.draft(repo.slug, SHA).comments == 0)
-ok("*** the Markdown was claimed BEFORE the JSON was published ***",
-  order[1] == "markdown" and order[2] == "json", vim.inspect(order))
-ok("and exactly one of each (no retry, no double write)", #order == 2, vim.inspect(order))
+do
+  local imd, ijson, ireserve
+  for i, ev in ipairs(order) do
+    if ev == "markdown" and not imd then imd = i end
+    if ev == "json" and not ijson then ijson = i end
+    if ev == "reserve" and not ireserve then ireserve = i end
+  end
+  ok("*** the revision is RESERVED before either artifact is written ***",
+    ireserve ~= nil and ireserve < (imd or math.huge), vim.inspect(order))
+  ok("*** the Markdown is claimed BEFORE the JSON is published ***",
+    imd ~= nil and ijson ~= nil and imd < ijson, vim.inspect(order))
+  ok("and each artifact is written exactly once (no retry, no double write)",
+    (function()
+      local n = { markdown = 0, json = 0 }
+      for _, ev in ipairs(order) do if n[ev] then n[ev] = n[ev] + 1 end end
+      return n.markdown == 1 and n.json == 1
+    end)(), vim.inspect(order))
+end
 ok("*** the Markdown carries KB_RULES R2 frontmatter ***",
   md:find("^%-%-%-\ntype: review\n") ~= nil, md:sub(1, 80))
 ok("and the inline Tags/Abstract preview lines",
@@ -103,6 +121,13 @@ ok("and the inline Tags/Abstract preview lines",
   and md:find("\n%*%*Abstract:%*%* ") ~= nil, md:sub(1, 400))
 ok("the anchored finding appears in the prose with its path:line",
   md:find("foo.lua:3", 1, true) ~= nil, md)
+-- What A4 actually buys. The interim wrote both artifacts but nothing linked
+-- them on disk beyond a matching revision; `save_pair` sets the cross-reference.
+ok("*** the JSON now cross-references its document (ADR-0067 A4) ***",
+  doc ~= nil and doc.document == res.md_path, vim.inspect(doc and doc.document))
+ok("and the reservation was released after the commit",
+  vim.fn.filereadable(review.reserve_path(repo.slug, SHA, res.revision)) == 0,
+  review.reserve_path(repo.slug, SHA, res.revision))
 
 io.stdout:write("\n[4] a taken Markdown name ADVANCES the revision\n")
 local d2 = A.draft(repo.slug, SHA)
@@ -123,10 +148,16 @@ ok("and the JSON it wrote matches the revision it claimed",
 io.stdout:write("\n[5] a JSON failure PRESERVES and reports the orphan Markdown\n")
 local d3 = A.draft(repo.slug, SHA)
 d3.comments = { { path = "foo.lua", line = 5, side = "RIGHT", severity = "nit", body = "third" } }
-local real_save = review.save
-review.save = function() return nil, "injected write failure" end
+-- Fail the CANONICAL JSON create specifically, which is the commit point.
+-- Stubbing `review.save` no longer reaches the writer (A4).
+local guard = store.create_exclusive
+store.create_exclusive = function(path, body)
+  if tostring(path):find("%.review%.json$") then
+    return false, "injected write failure"
+  end
+  return guard(path, body)
+end
 local res3, reason3 = A.submit({ repo = repo, sha = SHA })
-review.save = real_save
 store.create_exclusive = real_create
 ok("*** submit reports failure rather than claiming success ***", res3 == nil, tostring(res3))
 ok("and names the kept Markdown so the prose is not thought lost",

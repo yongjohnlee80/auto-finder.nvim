@@ -207,28 +207,27 @@ function M.render_markdown(opts)
   return table.concat(lines, "\n")
 end
 
----submit writes the pair: the final Markdown name is claimed FIRST, the JSON
----published LAST.
+---submit writes the pair through `worktree.review.save_pair`.
 ---
----The ordering is the whole safety argument (ADR-0065 §2.6):
+---ADR-0067 A4. This used to hand-roll the ordering — claim the final Markdown
+---name, then publish the JSON with the exclusive `review.save` — which was
+---correct for a single writer and documented as such. `save_pair` supersedes
+---it and closes the three limits that version shipped with, together:
 ---
----  * The Markdown is claimed at its FINAL name, in the home §6 established,
----    before any JSON exists — so there is no rename step that can fail and
----    strand a projection.
----  * `review.save` is used, NOT `save_next`. `save` is an exclusive create
----    that refuses an existing revision; `save_next` RE-SELECTS the revision on
----    collision, which would silently divorce the JSON from the Markdown
----    already claimed for N.
----  * The JSON is published last, so every failure leaves at most an orphan
----    Markdown — a primary document nobody has projected yet, which §6 permits
----    — and never a projection without its primary.
+---  * the `document` cross-reference now exists, so the pair is legible on disk
+---    rather than only by matching revisions;
+---  * a reservation and tombstone fence the revision, so concurrent writers
+---    cannot collide and a crashed one cannot have its number recycled;
+---  * the commit point is the canonical JSON, so no reader can ever observe a
+---    projection without its primary document.
+---
+---What did NOT change is the failure direction: a JSON that cannot be written
+---still leaves the reviewer's prose on disk, and the draft is still retained.
 ---@return table? result  { json_path, md_path, revision }
 ---@return string? reason
 function M.submit(opts)
   local okr, review = pcall(require, "worktree.review")
   if not okr then return nil, "worktree.review is unavailable" end
-  local oks, store = pcall(require, "worktree.store")
-  if not oks then return nil, "worktree.store is unavailable" end
 
   local repo, sha = opts.repo, opts.sha
   local slug = repo and repo.slug
@@ -244,43 +243,37 @@ function M.submit(opts)
     return nil, "the reviewer name produced no safe path segment; set git config user.name"
   end
 
-  local start = review.latest_revision(slug, sha) + 1
-  for rev = start, start + 24 do
-    local md_path, mderr = M.markdown_path(repo, sha, rslug, rev)
-    if not md_path then return nil, mderr end
+  local doc = review.new({
+    slug = slug, url = repo.url, owner = repo.owner, name = repo.name,
+    commit = sha, reviewer = display,
+    verdict = d.verdict, summary = d.summary,
+  })
+  -- Carried so a later `validate_pair` can check the document really sits in
+  -- THIS reviewer's directory rather than merely somewhere under the KB.
+  doc.reviewer_slug = rslug
+  doc.comments = vim.deepcopy(d.comments or {})
 
-    local body = M.render_markdown({
-      draft = d, repo_label = repo.label, sha = sha, reviewer = display, revision = rev,
-    })
-    if not store.ensure_dir(vim.fn.fnamemodify(md_path, ":h")) then
-      return nil, "could not create " .. vim.fn.fnamemodify(md_path, ":h")
-    end
-    -- Claim the FINAL name. A collision advances the revision so BOTH names
-    -- move together; it never reuses N with a different document.
-    local claimed, cerr = store.create_exclusive(md_path, body)
-    if cerr then return nil, cerr end
-    if claimed then
-      local doc = review.new({
-        slug = slug, url = repo.url, owner = repo.owner, name = repo.name,
-        commit = sha, reviewer = display,
-        verdict = d.verdict, summary = d.summary,
-      })
-      doc.revision = rev
-      doc.comments = vim.deepcopy(d.comments or {})
-      local jpath, jerr = review.save(slug, doc)
-      if not jpath then
-        -- The orphan Markdown is PRESERVED and reported, never quietly removed:
-        -- it is the reviewer's prose, and §6 tolerates a primary document that
-        -- has not been projected yet.
-        return nil, ("the review JSON could not be written (%s). Your Markdown review is "
-          .. "kept at %s — it is not lost."):format(tostring(jerr), md_path)
-      end
-      M.discard(slug, sha)
-      return { json_path = jpath, md_path = md_path, revision = rev }, nil
-    end
-    -- name taken: try the next revision
+  -- The generator runs only once the revision is WON, which is what lets the
+  -- document be named for a revision that is already ours.
+  local res, err = review.save_pair(slug, doc, function(rev)
+    local md_path, mderr = M.markdown_path(repo, sha, rslug, rev)
+    if not md_path then error(mderr or "no markdown path") end
+    return M.render_markdown({
+      draft = d, repo_label = repo.label, sha = sha,
+      reviewer = display, revision = rev,
+    }), md_path
+  end)
+
+  if not res then
+    -- The orphan Markdown, when there is one, is PRESERVED by save_pair and
+    -- named in its error: it is the reviewer's prose, and reporting a failure
+    -- while silently deleting their writing would be the worse outcome. The
+    -- draft is retained for the same reason.
+    return nil, tostring(err)
   end
-  return nil, "could not claim a revision after 25 attempts"
+
+  M.discard(slug, sha)
+  return { json_path = res.json_path, md_path = res.md_path, revision = res.revision }, nil
 end
 
 return M
