@@ -86,6 +86,24 @@ unnoticed; execution now runs off one `SUITES` manifest while preflight
 *discovers* every `tests/*.lua` entrypoint (excluding `_`-prefixed
 support modules), which binds suites this runner never executes.
 
+**Review round 3 (lector) — a regression the round-2 rewrite introduced,
+and a preflight that accepted prose.** Creating standalone roots directly
+under `os_tmpdir()` threw away a property the original code had for free:
+Neovim's `tempname()` lives in a process-private temp tree that Neovim
+sweeps at exit, so every standalone run now leaked a whole
+config/state/cache tree into `/tmp`. It also created *before* validating
+containment, leaving an orphan behind under a HOME-contained `TMPDIR`
+even though the rejection fired. Standalone now resolves and validates
+Neovim's managed temp dir first, then `fs_mkdtemp`s inside it — verified
+gone after exit, with no orphan on the rejection path. Separately, the
+preflight's free `_sandbox.lua` substring grep was satisfied by a
+*comment*: deleting a suite's real call while leaving section `[53]`'s
+prose kept the check green. It now matches an executable invocation
+anchored at start-of-line (which `--` cannot satisfy), the call sites are
+one canonical line, and the fixed-`/tmp` pattern covers both Lua quote
+styles. `fs_mkdtemp` failures also report luv's `err`/`code` instead of a
+bare `(nil)`.
+
 Verified against the original failure: with `XDG_CACHE_HOME` pointed at
 a `chmod 555` directory, `main` gives 147/7 and this branch gives 154/0;
 full `run-all` is green with a read-only home cache. No

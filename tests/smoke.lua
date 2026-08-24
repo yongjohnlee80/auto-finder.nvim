@@ -70,8 +70,7 @@ vim.o.hidden = true
 -- namespace persist (which writes under `<state>/auto-core/`) doesn't
 -- leak into the user's real state directory and corrupt their pin
 -- across sessions.
-local SANDBOX = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("smoke")
+local SANDBOX = dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("smoke")
 
 -- Vestigial since v0.4.0, kept as a belt-and-braces guard. It used to force
 -- the legacy plaintext storage path for the dbase REPL tests regardless of

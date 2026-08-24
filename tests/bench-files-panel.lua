@@ -60,8 +60,7 @@ local BENCH_BASE = os.getenv("BENCH_BASE")
 if BENCH_BASE then BENCH_BASE = vim.fn.fnamemodify(BENCH_BASE, ":p") end
 
 local sandbox = vim.fn.tempname() .. "-bench0060"
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("bench")
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("bench")
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 
 local function die(msg)

@@ -6,8 +6,7 @@ for _, p in ipairs({ AF, LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim",
 end
 vim.o.columns, vim.o.lines = 200, 60
 local sb = vim.fn.tempname() .. "-gi"
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("gi")
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("gi")
 local root = sb .. "/repo"; vim.fn.mkdir(root, "p")
 local function g(...) local a={"git","-C",root,"-c","user.email=t@t","-c","user.name=t"}
   for _,x in ipairs({...}) do a[#a+1]=x end return vim.system(a,{}):wait().code end

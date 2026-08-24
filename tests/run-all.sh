@@ -89,11 +89,17 @@ echo "sandbox: $AF_TEST_SANDBOX_ROOT"
 preflight_sandbox() {
   local bad=0 f
   for f in "$@"; do
-    if ! grep -q '_sandbox\.lua' "$f"; then
-      echo "run-all: FAILED — $f does not use tests/_sandbox.lua" >&2
+    # Match an EXECUTABLE invocation, not the mere presence of the
+    # string: a free `_sandbox.lua` grep is satisfied by a comment, so
+    # deleting a suite's real call while leaving prose about it behind
+    # kept the check green. The pattern is anchored at start-of-line
+    # with an optional `local X =`, which a `--` comment cannot satisfy.
+    if ! grep -qE '^[[:space:]]*(local[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=[[:space:]]*)?dofile\(.*_sandbox\.lua.*\)\(' "$f"; then
+      echo "run-all: FAILED — $f has no executable tests/_sandbox.lua call" >&2
       bad=1
     fi
-    if grep -qE 'vim\.env\.XDG_(CONFIG|STATE|CACHE)_HOME[[:space:]]*=[[:space:]]*"/tmp' "$f"; then
+    # Both Lua quote styles; the original only caught double quotes.
+    if grep -qE "vim\.env\.XDG_(CONFIG|STATE|CACHE|DATA)_HOME[[:space:]]*=[[:space:]]*[\"']/tmp" "$f"; then
       echo "run-all: FAILED — $f hardcodes a fixed /tmp XDG root" >&2
       bad=1
     fi

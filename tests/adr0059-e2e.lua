@@ -44,8 +44,7 @@ end
 vim.o.columns, vim.o.lines = 200, 60
 vim.o.swapfile, vim.o.hidden = false, true
 local sandbox = vim.fn.tempname() .. "-adr0059"
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("adr0059")
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("adr0059")
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 
 -- ── the tree under test ──────────────────────────────────────────

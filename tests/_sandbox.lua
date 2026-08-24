@@ -63,10 +63,17 @@ local function sandbox(label)
   ---exclusively ours: an `fs_stat` probe followed by a separate `mkdir`
   ---is check-then-act and races between processes.
   local function mkdtemp(template)
-    local ok, created = pcall(vim.uv.fs_mkdtemp, template)
-    if not ok or type(created) ~= "string" or created == "" then
-      error(("tests/_sandbox: could not create sandbox root from %s (%s)")
+    -- Synchronous luv calls return `nil, err, code` on failure, so bind
+    -- all three: capturing only the first discards the reason and every
+    -- ordinary failure reports a bare "(nil)".
+    local ok, created, err, code = pcall(vim.uv.fs_mkdtemp, template)
+    if not ok then
+      error(("tests/_sandbox: fs_mkdtemp(%s) raised: %s")
         :format(template, tostring(created)))
+    end
+    if type(created) ~= "string" or created == "" then
+      error(("tests/_sandbox: could not create sandbox root from %s: %s (%s)")
+        :format(template, tostring(err), tostring(code)))
     end
     return created
   end
@@ -76,6 +83,9 @@ local function sandbox(label)
   ---just dotfile children. An earlier version tested only
   ---`$HOME/.`-prefixed paths, which let `$HOME/anything` through.
   local function under_home(p)
+    if type(p) ~= "string" or p == "" then
+      error("tests/_sandbox: under_home() got a non-path; refusing to guess")
+    end
     if not home then return false end
     return p == home or vim.startswith(p, home .. "/")
   end
@@ -109,10 +119,28 @@ local function sandbox(label)
     -- Under a forced interleaving both passed the old fs_stat probe.
     root = mkdtemp(parent .. "/" .. label .. "-XXXXXX")
   else
-    -- Standalone run: same atomic primitive, rooted in the system temp
-    -- dir rather than a caller-supplied one.
-    local tmp = vim.uv.os_tmpdir() or "/tmp"
-    root = mkdtemp(tmp .. "/auto-finder-" .. label .. "-XXXXXX")
+    -- Standalone run. Two properties matter and the first cut had
+    -- neither:
+    --
+    --  1. VALIDATE BEFORE MUTATING. Creating first and checking
+    --     containment afterwards left an orphan directory behind under
+    --     a HOME-contained TMPDIR -- the rejection fired, but only
+    --     after the mkdir.
+    --  2. Create inside Neovim's PROCESS-PRIVATE temp directory (the
+    --     dirname of `tempname()`), which Neovim sweeps on exit.
+    --     Creating directly under `os_tmpdir()` leaked a whole
+    --     config/state/cache tree on every standalone run; the
+    --     original full-tempname path had this property for free and
+    --     the round-2 rewrite threw it away.
+    local managed = realpath(vim.fn.fnamemodify(vim.fn.tempname(), ":h"))
+    if not managed then
+      error("tests/_sandbox: could not resolve Neovim's managed temp dir")
+    end
+    if under_home(managed) then
+      error(("tests/_sandbox: refusing to sandbox under the home directory: %s")
+        :format(managed))
+    end
+    root = mkdtemp(managed .. "/" .. label .. "-XXXXXX")
   end
 
 

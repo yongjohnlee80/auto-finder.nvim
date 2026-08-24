@@ -49,8 +49,7 @@ vim.o.hidden = true
 
 -- Isolate from the user's real nvim state and from the other smoke
 -- suites' isolation dirs.
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("adr0044")
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("adr0044")
 
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 

@@ -65,8 +65,7 @@ vim.o.hidden = true
 -- runs under `stdpath("cache")`, and this suite's p46 section spawns
 -- real jobs — see tests/_sandbox.lua for why leaving it on the real
 -- home cost 147/7 on read-only hosts.
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("adr0048")
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("adr0048")
 
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 

@@ -43,8 +43,7 @@ for _, p in ipairs({
 end
 vim.o.swapfile = false
 local sandbox = vim.fn.tempname() .. "-r1life"
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
-  .. "/_sandbox.lua")("r1life")
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("r1life")
 
 local pass, fail = 0, 0
 ---Writes with an explicit newline and flush rather than `print`.
