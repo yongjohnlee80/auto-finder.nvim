@@ -38,6 +38,23 @@ function M.draft(slug, sha)
   return M._drafts[k]
 end
 
+---dirty reports whether a draft holds anything worth keeping.
+---
+---ONE predicate, shared by `submit`, the close guard and the footer's
+---visibility. Three separate inline checks is how the last defect happened:
+---`submit` counted comments and summary but not UNANCHORED findings, so a
+---review that consisted solely of "this module has no tests" — precisely the
+---kind review-json §6 exists to protect — was refused with "nothing to submit",
+---and the close guard let the same draft go without a prompt.
+---@param d table
+---@return boolean
+function M.dirty(d)
+  if type(d) ~= "table" then return false end
+  return #(d.comments or {}) > 0
+    or #(d.unanchored or {}) > 0
+    or (type(d.summary) == "string" and vim.trim(d.summary) ~= "")
+end
+
 ---discard drops a draft outright.
 function M.discard(slug, sha) M._drafts[_key(slug, sha)] = nil end
 
@@ -215,8 +232,8 @@ function M.submit(opts)
   if not (slug and sha) then return nil, "no repo/commit to attach a review to" end
 
   local d = M.draft(slug, sha)
-  if #(d.comments or {}) == 0 and not (d.summary and d.summary ~= "") then
-    return nil, "nothing to submit — add a comment or a summary first"
+  if not M.dirty(d) then
+    return nil, "nothing to submit — add a comment, a summary or an unanchored finding first"
   end
 
   local display, rslug = M.reviewer(opts.cwd)
