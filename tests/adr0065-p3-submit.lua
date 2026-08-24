@@ -166,7 +166,147 @@ do
   ok("and they genuinely differ (positive control)", da ~= db)
 end
 
-io.stdout:write("\n[7] nothing to submit is refused, not written\n")
+io.stdout:write("\n[7] a draft is DIRTY on any of its three contents\n")
+do
+  -- One predicate drives submit, the close guard and the footer. Three separate
+  -- inline checks is how the last defect happened: `submit` counted comments
+  -- and summary but not unanchored findings, so a review consisting solely of
+  -- "this module has no tests" — exactly what review-json §6 protects — was
+  -- refused as "nothing to submit", and the close guard let it go unprompted.
+  ok("an empty draft is not dirty", A.dirty({ comments = {}, unanchored = {} }) == false)
+  ok("a comment makes it dirty", A.dirty({ comments = { {} } }) == true)
+  ok("*** an UNANCHORED finding alone makes it dirty ***",
+    A.dirty({ comments = {}, unanchored = { { body = "no tests" } } }) == true)
+  ok("a summary alone makes it dirty",
+    A.dirty({ comments = {}, summary = "looks fine" }) == true)
+  ok("whitespace is not a summary", A.dirty({ comments = {}, summary = "   " }) == false)
+
+  -- And the functional half: an unanchored-only review must actually WRITE.
+  A.discard(repo.slug, SHA)
+  local du = A.draft(repo.slug, SHA)
+  du.unanchored = { { severity = "nit", body = "this module has no tests" } }
+  local resu, whyu = A.submit({ repo = repo, sha = SHA })
+  ok("*** an unanchored-only review submits rather than being refused ***",
+    resu ~= nil, tostring(whyu))
+  if resu then
+    local mdu = table.concat(vim.fn.readfile(resu.md_path), "\n")
+    ok("its finding is in the Markdown", mdu:find("no tests", 1, true) ~= nil)
+    local du2 = review.load(repo.slug, SHA, resu.revision)
+    ok("and the JSON carries zero comments, inventing nothing",
+      du2 ~= nil and #du2.comments == 0, vim.inspect(du2 and du2.comments))
+  end
+end
+
+io.stdout:write("\n[8] the draft survives every close path, and repaints\n")
+do
+  -- Criterion 8. The draft is the CONSUMER's precisely so the float's
+  -- unvetoable teardowns cost windows rather than work; asserting it at the
+  -- auto-core level only would leave that claim untested where it matters.
+  local dv = require("auto-core.ui.diffview")
+  local gitdiff = require("auto-core.git.diff")
+  local PATCH = "diff --git a/foo.lua b/foo.lua\n--- a/foo.lua\n+++ b/foo.lua\n"
+    .. "@@ -1,3 +1,3 @@\n a\n-b\n+c\n d\n"
+  local files = gitdiff.parse(PATCH)
+  vim.o.columns, vim.o.lines = 200, 50
+  A.discard(repo.slug, SHA)
+  local dr = A.draft(repo.slug, SHA)
+  dr.comments = { { path = "foo.lua", line = 2, side = "RIGHT", severity = "nit", body = "kept" } }
+
+  local function open()
+    dv.open({ files = files, annotate = {
+      on_add = function(a) table.insert(dr.comments, a) end,
+      on_remove = function() end,
+      pending = function() return dr.comments end,
+    } })
+  end
+
+  local closers = {
+    ["q"] = function(st, b)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+        if m.lhs == "q" and m.callback then m.callback() end
+      end
+    end,
+    ["<Esc>"] = function(st, b)
+      for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+        if m.lhs == "<Esc>" and m.callback then m.callback() end
+      end
+    end,
+    ["pane-lost"] = function(st) pcall(vim.api.nvim_win_close, st.float:winid("preview"), true) end,
+    ["dispose"] = function(st) st.float:dispose() end,
+  }
+  for name, how in pairs(closers) do
+    open()
+    local st = dv._state_for_tests()
+    how(st, st.float:bufnr("preview"))
+    vim.wait(50, function() return not dv.is_open() end)
+    ok(("*** the draft survives %s ***"):format(name),
+      #dr.comments == 1 and dr.comments[1].body == "kept",
+      ("%d comment(s)"):format(#dr.comments))
+  end
+  -- ...and reopening REPAINTS it, which is what makes survival useful.
+  open()
+  local painted = dv._pending_for(files[1])
+  ok("*** and reopening repaints it through pending() ***",
+    #painted == 1 and painted[1].author == "pending", vim.inspect(painted))
+  dv.close()
+end
+
+io.stdout:write("\n[9] a submitted review reloads through the REAL annotation path\n")
+do
+  -- Criterion 12. Calling `review.load` directly proves the file is readable;
+  -- it does NOT prove the panel can find it. The real path is
+  -- `open_diff` -> backend.reviews -> review.load -> review.by_path -> the
+  -- annotations table handed to the diff view, and only that covers the merge
+  -- and grouping the reader actually depends on. `worktree.repos` is stubbed
+  -- because a real backend needs a real repo; everything downstream is real.
+  local tree = require("auto-finder.views.repos.tree")
+  local dv = require("auto-core.ui.diffview")
+  local PATCH = "diff --git a/foo.lua b/foo.lua\n--- a/foo.lua\n+++ b/foo.lua\n"
+    .. "@@ -1,4 +1,4 @@\n a\n b\n-c\n+d\n"
+
+  A.discard(repo.slug, SHA)
+  local dz = A.draft(repo.slug, SHA)
+  dz.comments = { { path = "foo.lua", line = 4, side = "RIGHT",
+                    severity = "must-fix", body = "reloaded finding" } }
+  local wrote = select(1, A.submit({ repo = repo, sha = SHA }))
+  ok("a review exists to reload (positive control)", wrote ~= nil)
+
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    diff = function() return require("auto-core.git.diff").parse(PATCH) end,
+    reviews = function(_, sha) return review.list_for(repo.slug, sha) end,
+  }
+  vim.o.columns, vim.o.lines = 200, 50
+  local row = {
+    repo = repo,
+    worktree = { path = tmp },
+    node = { kind = "commit", sha = SHA, short = SHA:sub(1, 7), commit = { subject = "s" } },
+  }
+  tree.open_diff(row)
+  local st = dv._state_for_tests()
+  ok("*** open_diff opened the view ***", st ~= nil and dv.is_open())
+  local anns = st and st.annotations or {}
+  ok("*** the written review came back through backend.reviews -> by_path ***",
+    anns["foo.lua"] ~= nil, vim.inspect(vim.tbl_keys(anns)))
+  local found, authored = false, false
+  for _, c in ipairs(anns["foo.lua"] or {}) do
+    if c.body == "reloaded finding" then found = true; authored = c.author ~= nil end
+  end
+  ok("with the body the reviewer just wrote", found, vim.inspect(anns["foo.lua"]))
+  ok("and the reviewer attributed from its document", authored)
+  -- open_diff merges EVERY revision for the commit, newest last. Earlier
+  -- sections wrote several reviews at this sha, so the reload proves the merge
+  -- as well as the read — which a single-review fixture would not have.
+  ok("*** and comments from EARLIER revisions are merged in, not replaced ***",
+    #anns["foo.lua"] > 1, ("%d merged"):format(#(anns["foo.lua"] or {})))
+  ok("the store really holds several revisions for this commit (positive control)",
+    #review.list_for(repo.slug, SHA) > 1,
+    ("%d revisions"):format(#review.list_for(repo.slug, SHA)))
+  dv.close()
+  package.loaded["worktree.repos"] = nil
+end
+
+io.stdout:write("\n[10] nothing to submit is refused, not written\n")
 A.discard(repo.slug, SHA)
 local res4, reason4 = A.submit({ repo = repo, sha = SHA })
 ok("an empty draft refuses with a reason", res4 == nil and reason4 ~= nil, tostring(reason4))

@@ -535,14 +535,19 @@ function M.open_diff(row)
       end,
       pending = function() return draft.comments end,
       before_close = function(reason)
-        if reason ~= "key" or #draft.comments == 0 then return "close" end
+        -- The SAME predicate `submit` uses. A summary-only or unanchored-only
+        -- draft is real work, and checking `#comments` here let it close
+        -- without a prompt while `submit` separately refused to write it.
+        if reason ~= "key" or not authoring.dirty(draft) then return "close" end
         -- The prompt is ASYNCHRONOUS and this hook is not, so cancel NOW and
         -- finish through the non-prompting "resume" reason. A hook that
         -- prompted on "key" would prompt again on the finishing call and never
         -- close (ADR-0065 §2.3).
         vim.schedule(function()
           vim.ui.select({ "submit", "discard", "cancel" }, {
-            prompt = ("%d unsent comment(s):"):format(#draft.comments),
+            prompt = ("unsent review (%d anchored, %d unanchored%s):"):format(
+              #(draft.comments or {}), #(draft.unanchored or {}),
+              (draft.summary and vim.trim(draft.summary) ~= "") and ", summary" or ""),
           }, function(choice)
             if choice == "submit" then
               M._submit_review(row, sha)
