@@ -53,18 +53,53 @@ overall=0
 # parsers and plugin data live under it and redirecting it hides
 # them, which fails ADR-0048 for a different reason. That experiment
 # has been run; do not "complete the set".
-AF_TEST_SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-finder-testrun-XXXXXX")"
+# mktemp failure must be fatal. Without the explicit check, `set -u`
+# alone leaves an empty value, the export silently degrades every suite
+# to its own standalone fallback root, and the aggregate cleanup below
+# then has nothing to remove -- a silent loss of the property this
+# block exists to guarantee.
+if ! AF_TEST_SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-finder-testrun-XXXXXX")" \
+   || [ -z "$AF_TEST_SANDBOX_ROOT" ] || [ ! -d "$AF_TEST_SANDBOX_ROOT" ]; then
+  echo "run-all: FAILED — could not create a sandbox root under ${TMPDIR:-/tmp}" >&2
+  exit 1
+fi
 export AF_TEST_SANDBOX_ROOT
+
 cleanup_sandbox() {
-  # Guard the rm: only ever remove a path we just created under the
-  # temp dir, never an empty or inherited value.
+  # Guard the rm: only ever remove a path matching the pattern we
+  # created ourselves, never an empty or inherited value.
   case "$AF_TEST_SANDBOX_ROOT" in
     "${TMPDIR:-/tmp}"/auto-finder-testrun-*)
       rm -rf "$AF_TEST_SANDBOX_ROOT" ;;
   esac
 }
-trap cleanup_sandbox EXIT INT TERM
+# EXIT runs on normal termination; the signal traps clean up and then
+# re-exit so the shell reports death-by-signal rather than success.
+# Sharing one trap across EXIT and the signals would either skip
+# cleanup on ^C or mask the signal in the exit status.
+trap cleanup_sandbox EXIT
+trap 'cleanup_sandbox; trap - INT;  kill -INT  $$' INT
+trap 'cleanup_sandbox; trap - TERM; kill -TERM $$' TERM
 echo "sandbox: $AF_TEST_SANDBOX_ROOT"
+
+# PREFLIGHT: every suite this runner executes must route its XDG roots
+# through tests/_sandbox.lua. A new suite that hand-assigns vim.env.XDG_*
+# silently reintroduces the writable-$HOME dependency, and nothing else
+# here would notice.
+preflight_sandbox() {
+  local bad=0 f
+  for f in "$@"; do
+    if ! grep -q '_sandbox\.lua' "$f"; then
+      echo "run-all: FAILED — $f does not use tests/_sandbox.lua" >&2
+      bad=1
+    fi
+    if grep -qE 'vim\.env\.XDG_(CONFIG|STATE|CACHE)_HOME[[:space:]]*=[[:space:]]*"/tmp' "$f"; then
+      echo "run-all: FAILED — $f hardcodes a fixed /tmp XDG root" >&2
+      bad=1
+    fi
+  done
+  return $bad
+}
 
 run_suite() {
   local name="$1" file="$2"
@@ -102,6 +137,15 @@ run_suite() {
     overall=1
   fi
 }
+
+SUITES="tests/smoke.lua tests/smoke-automation.lua tests/smoke-adr0044.lua
+tests/smoke-adr0048.lua tests/adr0059-e2e.lua tests/adr0060-repos-render.lua
+tests/v0267-loop-guard.lua tests/adr0060-r1-view-lifecycle.lua"
+# shellcheck disable=SC2086
+if ! preflight_sandbox $SUITES; then
+  echo "run-all: FAILED (preflight)"
+  exit 1
+fi
 
 run_suite "smoke"           tests/smoke.lua
 # [41]/[42] (ADR-0035 automation) — extracted from smoke.lua; the

@@ -47,25 +47,74 @@
 local function sandbox(label)
   label = tostring(label or "suite"):gsub("[^%w%-_]", "-")
 
+  ---Absolute, symlink-resolved form of an EXISTING path. Returns nil
+  ---when it does not exist. Canonicalising matters before any
+  ---containment check: `/tmp/x/../../home/you` and a symlinked parent
+  ---both defeat a naive string prefix test.
+  local function realpath(p)
+    if type(p) ~= "string" or p == "" then return nil end
+    local ok, resolved = pcall(vim.uv.fs_realpath, vim.fn.fnamemodify(p, ":p"))
+    if ok and type(resolved) == "string" then return resolved end
+    return nil
+  end
+
+  local home = realpath(vim.env.HOME)
+  ---Reject the home directory itself and EVERY descendant of it — not
+  ---just dotfile children. An earlier version tested only
+  ---`$HOME/.`-prefixed paths, which let `$HOME/anything` through.
+  local function under_home(p)
+    if not home then return false end
+    return p == home or vim.startswith(p, home .. "/")
+  end
+
   local root
   local shared = vim.env.AF_TEST_SANDBOX_ROOT
   if type(shared) == "string" and shared ~= "" then
-    -- run-all.sh owns the parent and deletes it on exit.
-    root = shared .. "/" .. label
+    -- run-all.sh owns the parent and deletes it on exit. It is caller
+    -- input, so it is validated BEFORE anything here mutates the disk.
+    local parent = realpath(shared)
+    if not parent then
+      error(("tests/_sandbox: AF_TEST_SANDBOX_ROOT does not exist: %s")
+        :format(shared))
+    end
+    if vim.fn.isdirectory(parent) ~= 1 then
+      error(("tests/_sandbox: AF_TEST_SANDBOX_ROOT is not a directory: %s")
+        :format(parent))
+    end
+    if under_home(parent) then
+      error(("tests/_sandbox: refusing to sandbox under the home directory: %s")
+        :format(parent))
+    end
+    -- Exclusively create a child that did not previously exist. The
+    -- suffix keeps repeat runs against the same exported root from
+    -- colliding, and means this helper NEVER removes a path it did not
+    -- create. (It used to `delete(root, "rf")` up front, on a path
+    -- derived from caller input and before any validation — that
+    -- destroyed a pre-existing file under a crafted root.)
+    local uniq = vim.fn.fnamemodify(vim.fn.tempname(), ":t")
+    root = parent .. "/" .. label .. "-" .. uniq
   else
-    -- Standalone run: unique per invocation, so a concurrent run of the
-    -- same suite cannot collide with us.
-    root = vim.fn.tempname() .. "-" .. label
+    -- Standalone run: tempname() is unique and does not yet exist.
+    root = vim.fn.fnamemodify(vim.fn.tempname() .. "-" .. label, ":p")
   end
 
-  -- Fresh every time. A leftover root from a previous run at the same
-  -- path would carry state the suite believes it does not have.
-  vim.fn.delete(root, "rf")
+  if vim.uv.fs_stat(root) then
+    error(("tests/_sandbox: refusing to reuse an existing path: %s"):format(root))
+  end
+  if vim.fn.mkdir(root, "p") ~= 1 then
+    error(("tests/_sandbox: could not create sandbox root: %s"):format(root))
+  end
+
+  local canonical = realpath(root) or root
+  if under_home(canonical) then
+    error(("tests/_sandbox: sandbox root resolves under the home directory: %s")
+      :format(canonical))
+  end
 
   local dirs = {
-    XDG_CONFIG_HOME = root .. "/config",
-    XDG_STATE_HOME  = root .. "/state",
-    XDG_CACHE_HOME  = root .. "/cache",
+    XDG_CONFIG_HOME = canonical .. "/config",
+    XDG_STATE_HOME  = canonical .. "/state",
+    XDG_CACHE_HOME  = canonical .. "/cache",
   }
   for var, dir in pairs(dirs) do
     vim.fn.mkdir(dir, "p")
@@ -75,7 +124,6 @@ local function sandbox(label)
   -- Fail loudly rather than let a suite run against the real home.
   -- A silently-unisolated run is the failure mode this helper exists to
   -- prevent, and it is invisible until some unrelated assertion breaks.
-  local home = vim.env.HOME
   for var, dir in pairs(dirs) do
     if vim.fn.isdirectory(dir) ~= 1 then
       error(("tests/_sandbox: %s could not be created at %s"):format(var, dir))
@@ -83,13 +131,13 @@ local function sandbox(label)
     if vim.fn.filewritable(dir) ~= 2 then
       error(("tests/_sandbox: %s is not writable at %s"):format(var, dir))
     end
-    if home and home ~= "" and vim.startswith(dir, home .. "/.") then
+    if under_home(realpath(dir) or dir) then
       error(("tests/_sandbox: %s resolves inside the real home (%s)")
         :format(var, dir))
     end
   end
 
-  return root
+  return canonical
 end
 
 return sandbox

@@ -48,6 +48,29 @@ code and nobody notices.
   cache redirect from the helper fails `[53]`, naming the real home
   path.
 
+**Review round 1 (lector) — a data-loss bug in the first cut.** The
+helper pre-deleted `<AF_TEST_SANDBOX_ROOT>/<label>` *before* validating
+containment, and the containment check rejected only `$HOME/.`
+descendants. A crafted root under a non-hidden home child was therefore
+accepted and recursively deleted; lector reproduced destruction of a
+pre-existing file. The helper now canonicalises through
+`fs_realpath` before touching the disk, rejects the home directory and
+**every** descendant, requires the suite child not to already exist, and
+**never deletes a path it did not create**. Symlinked parents are caught
+too, since the check runs post-resolution.
+
+Also from that round: smoke's three per-case config dirs
+(store-dir/migrate/repos) moved off fixed `/tmp` paths onto the run's
+unique root; `[53]` was measuring `:h` of `stdpath("cache")` as the
+sandbox root, which is `<root>/cache` because Neovim appends `/nvim`, so
+a path under `<root>/data` passed the outside-sandbox assertion — it now
+compares against the helper's exact returned root with symlinks resolved
+on both sides; `run-all.sh` treats `mktemp` failure as fatal rather than
+silently degrading to per-suite fallback, splits EXIT from the signal
+traps so `^C` still reports death-by-signal, and gained a preflight that
+fails the run if any listed suite omits the helper or hardcodes a fixed
+`/tmp` XDG root.
+
 Verified against the original failure: with `XDG_CACHE_HOME` pointed at
 a `chmod 555` directory, `main` gives 147/7 and this branch gives 154/0;
 full `run-all` is green with a read-only home cache. No

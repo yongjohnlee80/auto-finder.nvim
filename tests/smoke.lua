@@ -70,7 +70,7 @@ vim.o.hidden = true
 -- namespace persist (which writes under `<state>/auto-core/`) doesn't
 -- leak into the user's real state directory and corrupt their pin
 -- across sessions.
-dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
+local SANDBOX = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
   .. "/_sandbox.lua")("smoke")
 
 -- Vestigial since v0.4.0, kept as a belt-and-braces guard. It used to force
@@ -441,7 +441,10 @@ print("\n[10b] store persistence (panel pin survives restart)")
 -- Use a temp config dir so we don't trash the user's real
 -- ~/.config/nvim/.auto-finder. stdpath('config') is read once per
 -- session, so override env before the store reads it.
-local tmp_config = "/tmp/auto-finder-smoke-config"
+-- Under the run's unique sandbox, not a fixed /tmp path: a shared root
+-- that every concurrent smoke run recursively deletes is the same class
+-- of bug this suite's XDG isolation exists to prevent.
+local tmp_config = SANDBOX .. "/case-store-dir"
 vim.fn.delete(tmp_config, "rf")
 vim.env.XDG_CONFIG_HOME = tmp_config
 -- stdpath caches; force-clear by re-reading.
@@ -496,7 +499,7 @@ do
   local cfg = af.state.config
 
   -- Isolated config dir so we control the legacy file byte-for-byte.
-  local tmp_c = "/tmp/auto-finder-smoke-migrate"
+  local tmp_c = SANDBOX .. "/case-migrate"
   vim.fn.delete(tmp_c, "rf")
   vim.env.XDG_CONFIG_HOME = tmp_c
   vim.fn.mkdir(store._dir(), "p")
@@ -600,8 +603,9 @@ print("\n[11] repos section (worktree.nvim facade)")
 -- Re-setup with the repos section enabled. Idempotent — re-applies opts
 -- and rebuilds the section registry. Use a temp config dir so any
 -- per-config persistence is isolated from the user's real one.
-vim.fn.delete("/tmp/auto-finder-smoke-config-repos", "rf")
-vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-smoke-config-repos"
+local repos_config = SANDBOX .. "/case-repos"
+vim.fn.delete(repos_config, "rf")
+vim.env.XDG_CONFIG_HOME = repos_config
 af.setup({
   width = { default = 38, min = 25, max = 100 },
   default_section = 1,
@@ -6517,50 +6521,59 @@ end)
 -- on every invocation.
 print("\n[53] XDG isolation — no suite writes to the real home")
 section(function()
-local home = vim.env.HOME
+-- Compare against the helper's EXACT returned root, and resolve
+-- symlinks on both sides. Two false negatives were caught here in
+-- review: deriving the root as `:h` of stdpath("cache") yields
+-- `<root>/cache` (Neovim appends `/nvim`), so a path under
+-- `<root>/data` passed the outside-sandbox test; and testing only a
+-- `$HOME/.` prefix let `$HOME/tmp` through as "outside the home".
+local function real(p)
+  if type(p) ~= "string" or p == "" then return nil end
+  local ok, r = pcall(vim.uv.fs_realpath, vim.fn.fnamemodify(p, ":p"))
+  return (ok and type(r) == "string") and r or vim.fn.fnamemodify(p, ":p")
+end
+local home = real(vim.env.HOME)
+local root = real(SANDBOX)
 
--- Control: prove the assertions below can distinguish isolated from
--- not. If HOME is unset or stdpath ignored the env, every check would
--- pass vacuously and this section would be decoration.
-ok("p53: HOME is set (control — the checks below are meaningful)",
-  type(home) == "string" and home ~= "", tostring(home))
-
-for _, probe in ipairs({
-  { kind = "config", var = "XDG_CONFIG_HOME" },
-  { kind = "data",   var = "XDG_DATA_HOME"   },
-  { kind = "state",  var = "XDG_STATE_HOME"  },
-  { kind = "cache",  var = "XDG_CACHE_HOME"  },
-}) do
-  local resolved = vim.fn.stdpath(probe.kind)
-  if type(resolved) == "table" then resolved = resolved[1] end
-  if probe.kind == "data" then
-    -- DATA is deliberately NOT redirected: installed treesitter parsers
-    -- and plugin data live under it, and hiding them fails ADR-0048 for
-    -- an unrelated reason. Asserted so nobody "completes the set".
-    -- Note the test is "outside the sandbox", not "env var unset" —
-    -- XDG_DATA_HOME is commonly set by the system already.
-    local sandbox_root = vim.fn.fnamemodify(vim.fn.stdpath("cache"), ":h")
-    ok("p53: stdpath('data') is intentionally NOT sandboxed",
-      type(resolved) == "string"
-        and not vim.startswith(resolved, sandbox_root .. "/"),
-      tostring(resolved) .. "  sandbox=" .. tostring(sandbox_root))
-  else
-    ok(("p53: stdpath('%s') is redirected away from the real home")
-      :format(probe.kind),
-      type(resolved) == "string" and resolved ~= ""
-        and not vim.startswith(resolved, home .. "/."),
-      tostring(resolved))
-    -- Writability is the property that actually broke. A redirect that
-    -- points somewhere unwritable would satisfy the check above and
-    -- still reproduce the original failure.
-    vim.fn.mkdir(resolved, "p")
-    ok(("p53: stdpath('%s') is writable"):format(probe.kind),
-      vim.fn.filewritable(resolved) == 2,
-      tostring(resolved) .. " filewritable=" .. vim.fn.filewritable(resolved))
-  end
+local function under(p, base)
+  if not p or not base then return false end
+  return p == base or vim.startswith(p, base .. "/")
 end
 
--- The specific path whose read-only-ness caused the cascade.
+-- Controls: without these the containment assertions could pass
+-- vacuously on an unset HOME or an unresolvable root.
+ok("p53: control — HOME resolves", type(home) == "string" and home ~= "", tostring(home))
+ok("p53: control — the sandbox root resolves",
+  type(root) == "string" and root ~= "" and vim.fn.isdirectory(root) == 1, tostring(root))
+ok("p53: control — the sandbox is not itself inside HOME",
+  not under(root, home), tostring(root))
+
+for _, kind in ipairs({ "config", "state", "cache" }) do
+  local resolved = vim.fn.stdpath(kind)
+  if type(resolved) == "table" then resolved = resolved[1] end
+  vim.fn.mkdir(resolved, "p")
+  local rp = real(resolved)
+  ok(("p53: stdpath('%s') is inside the run's sandbox"):format(kind),
+    under(rp, root), tostring(rp) .. "  root=" .. tostring(root))
+  ok(("p53: stdpath('%s') is outside the real home"):format(kind),
+    not under(rp, home), tostring(rp) .. "  home=" .. tostring(home))
+  -- Writability is the property that actually broke: a redirect
+  -- pointing somewhere unwritable satisfies both checks above and
+  -- still reproduces the original E739 cascade.
+  ok(("p53: stdpath('%s') is writable"):format(kind),
+    vim.fn.filewritable(resolved) == 2,
+    tostring(resolved) .. " filewritable=" .. vim.fn.filewritable(resolved))
+end
+
+-- DATA is deliberately NOT redirected: installed treesitter parsers and
+-- plugin data live under it, and hiding them fails ADR-0048 for an
+-- unrelated reason. Asserted so nobody "completes the set".
+local data = vim.fn.stdpath("data")
+if type(data) == "table" then data = data[1] end
+ok("p53: stdpath('data') is intentionally NOT sandboxed",
+  not under(real(data), root), tostring(data) .. "  root=" .. tostring(root))
+
+-- The exact path whose read-only-ness caused the 147/7 cascade.
 local run_root = vim.fn.stdpath("cache") .. "/auto-run/runs"
 vim.fn.mkdir(run_root, "p")
 ok("p53: auto-run's run directory is creatable under the sandboxed cache",
