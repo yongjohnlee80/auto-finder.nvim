@@ -508,9 +508,62 @@ function M.open_diff(row)
       { level = vim.log.levels.ERROR })
     return
   end
+  -- ADR-0065: authoring. The draft is OURS, not the float's — which is what
+  -- makes an unvetoable close (`<Esc>`, a lost pane, dispose) cost windows
+  -- rather than work.
+  local authoring = require("auto-finder.views.repos.authoring")
+  local annotate, keymaps
+  if uncommitted then
+    -- The schema needs a 40-hex commit and a working tree has none, so the
+    -- capability is PRESENT-but-disabled: `c` explains rather than doing
+    -- nothing, and `x`/`s` stay unbound so nothing implies a draft exists.
+    annotate = {
+      disabled_reason = "UNCOMMITTED has no commit to anchor a review to — commit or stash first",
+    }
+  else
+    local draft = authoring.draft(row.repo.slug, sha)
+    annotate = {
+      on_add = function(a) table.insert(draft.comments, a) end,
+      on_remove = function(a)
+        for i = #draft.comments, 1, -1 do
+          local c = draft.comments[i]
+          if c.path == a.path and c.line == a.line and (c.side or "RIGHT") == (a.side or "RIGHT") then
+            table.remove(draft.comments, i)
+            break
+          end
+        end
+      end,
+      pending = function() return draft.comments end,
+      before_close = function(reason)
+        if reason ~= "key" or #draft.comments == 0 then return "close" end
+        -- The prompt is ASYNCHRONOUS and this hook is not, so cancel NOW and
+        -- finish through the non-prompting "resume" reason. A hook that
+        -- prompted on "key" would prompt again on the finishing call and never
+        -- close (ADR-0065 §2.3).
+        vim.schedule(function()
+          vim.ui.select({ "submit", "discard", "cancel" }, {
+            prompt = ("%d unsent comment(s):"):format(#draft.comments),
+          }, function(choice)
+            if choice == "submit" then
+              M._submit_review(row, sha)
+            elseif choice == "discard" then
+              authoring.discard(row.repo.slug, sha)
+              pcall(function() dv.close("resume") end)
+            end
+          end)
+        end)
+        return "cancel"
+      end,
+    }
+    keymaps = { { key = "s", desc = "submit review",
+                  fn = function() M._submit_review(row, sha) end } }
+  end
+
   local handle, err = dv.open({
     files = files,
     annotations = annotations,
+    annotate = annotate,
+    keymaps = keymaps,
     title = " " .. tostring(row.node.short) .. "  "
       .. tostring((row.node.commit or {}).subject or "") .. " ",
   })
@@ -533,6 +586,42 @@ function M.open_diff(row)
       .. "this diff — " .. table.concat(names, ", "),
       { level = vim.log.levels.WARN })
   end
+end
+
+---_submit_review collects the verdict and summary, then writes the pair.
+---
+---Asks for the parts auto-core deliberately does not know about — a verdict is
+---a review concept and a diff has no reviewer — and hands the rest to
+---`authoring.submit`.
+function M._submit_review(row, sha)
+  local authoring = require("auto-finder.views.repos.authoring")
+  local okr, review = pcall(require, "worktree.review")
+  if not okr then
+    logger.notify("repos: worktree.review is unavailable", { level = vim.log.levels.ERROR })
+    return
+  end
+  local draft = authoring.draft(row.repo.slug, sha)
+  local verdicts = { "comment", "approved", "change_requested" }
+  vim.ui.select(verdicts, { prompt = "verdict:" }, function(verdict)
+    if not verdict then return end
+    draft.verdict = verdict
+    vim.ui.input({ prompt = "summary (optional): " }, function(summary)
+      draft.summary = summary
+      local res, reason = authoring.submit({ repo = row.repo, sha = sha })
+      if not res then
+        logger.notify("repos: " .. tostring(reason), { level = vim.log.levels.ERROR })
+        return
+      end
+      logger.notify(("repos: wrote review r%d — %s + %s")
+        :format(res.revision, vim.fn.fnamemodify(res.md_path, ":t"),
+                vim.fn.fnamemodify(res.json_path, ":t")))
+      -- Reopen so the freshly-written review renders from DISK: the round trip
+      -- is the confirmation, not the notification.
+      local dv_ok, dv2 = pcall(require, "auto-core.ui.diffview")
+      if dv_ok then pcall(dv2.close, "resume") end
+      vim.schedule(function() M.open_diff(row) end)
+    end)
+  end)
 end
 
 ---_info is `i`.
