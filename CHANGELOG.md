@@ -2,6 +2,63 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — tests: XDG sandbox closes an undeclared dependency on a writable `$HOME/.cache`
+
+The suites redirected `XDG_CONFIG_HOME` and `XDG_STATE_HOME` but left
+`XDG_CACHE_HOME` inheriting the real `$HOME/.cache`. auto-run
+([ADR-0048]) writes each run under `stdpath("cache")`, so on a host
+where that path is read-only the mkdir fails with `E739`, no job is
+ever spawned, and ADR-0048's seven `p46` assertions cascade off the
+missing spawn — **147/7 instead of 154/0**.
+
+Two agents on the same machine, same commit and same Neovim reported
+different results for months because of it: one had a writable home
+cache and one did not. An environment-dependent gate is worse than a red
+one, because "the suite is green" stops being a property of the code.
+
+- **`tests/_sandbox.lua` (new)** — one source of truth for headless XDG
+  isolation. Points config, state **and cache** at a per-run root, and
+  refuses to proceed unless each exists, is writable, and resolves
+  outside the real home.
+  - Roots are created with a single atomic `fs_mkdtemp`; validation of
+    any caller-supplied or system temp parent happens **before** the
+    first mutation, including before `tempname()`, which lazily creates
+    its own hierarchy.
+  - Standalone roots are created inside Neovim's process-private temp
+    tree so they are swept at exit rather than accumulating in `/tmp`.
+  - **`XDG_DATA_HOME` is deliberately not redirected** — installed
+    treesitter parsers and plugin data live under it, and hiding them
+    fails ADR-0048 for an unrelated reason.
+- **All ten suites** route through it; four previously used fixed
+  `/tmp/auto-finder-<name>-{config,state}` roots that concurrent runs
+  would race.
+- **`tests/run-all.sh`** allocates one writable root per run (fatal on
+  failure), exports it as `AF_TEST_SANDBOX_ROOT`, removes it on
+  `EXIT`/`INT`/`TERM`, and runs a preflight that fails the run if any
+  `tests/*.lua` entrypoint lacks an executable `_sandbox.lua` call or
+  hardcodes a fixed `/tmp` XDG root.
+- **`tests/sandbox-contract.sh` (new)** — every suite takes the
+  exported-root branch, so the standalone branch had no coverage and a
+  break in it left `run-all` green. The contract runs subprocesses with
+  `AF_TEST_SANDBOX_ROOT` unset and asserts the two properties only
+  observable after the process exits: the root is swept, and a refused
+  location has nothing created in it.
+- **smoke `[53]`** asserts config/state/cache each resolve inside the
+  run's exact sandbox root and outside the real home, *and* are
+  writable — a redirect pointing somewhere unwritable satisfies
+  containment and still reproduces the original failure.
+
+Verified against the original failure: with `XDG_CACHE_HOME` on a
+`chmod 555` directory, `main` gives 147/7 and this branch 154/0; full
+`run-all` is green with a read-only home cache. No `AF_KNOWN_ENV_FAILS`
+tolerance was added — this was an environment bug in the harness, not a
+failure to absorb.
+
+**Scope:** closes the ADR-0048 cascade **only**. The `smoke_automation`
+SIGSEGV on some runtimes is a separate, still-open bug (headless
+geometry + a live diagnostics attach + the `:edit`), tracked on the
+2026-06-13 `[41b]` task. Nothing here touches it.
+
 ## [Unreleased] — `slot assign`: re-arrange the panel slots
 
 `slot add` / `slot remove` / `slot modify` could each edit the slot

@@ -49,10 +49,7 @@ vim.o.hidden = true
 
 -- Isolate from the user's real nvim state and from the other smoke
 -- suites' isolation dirs.
-vim.fn.delete("/tmp/auto-finder-adr0044-config", "rf")
-vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-adr0044-config"
-vim.fn.delete("/tmp/auto-finder-adr0044-state", "rf")
-vim.env.XDG_STATE_HOME = "/tmp/auto-finder-adr0044-state"
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("adr0044")
 
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 

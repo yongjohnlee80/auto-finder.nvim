@@ -60,12 +60,12 @@ vim.o.lines = 60
 vim.o.swapfile = false
 vim.o.hidden = true
 
--- Isolate from the user's real nvim state (and from tests/smoke.lua's
--- own isolation dirs, so the two suites can't clobber each other).
-vim.fn.delete("/tmp/auto-finder-adr0048-config", "rf")
-vim.env.XDG_CONFIG_HOME = "/tmp/auto-finder-adr0048-config"
-vim.fn.delete("/tmp/auto-finder-adr0048-state", "rf")
-vim.env.XDG_STATE_HOME = "/tmp/auto-finder-adr0048-state"
+-- Isolate from the user's real nvim state (and from every other
+-- suite's). CACHE matters as much as CONFIG/STATE here: auto-run writes
+-- runs under `stdpath("cache")`, and this suite's p46 section spawns
+-- real jobs — see tests/_sandbox.lua for why leaving it on the real
+-- home cost 147/7 on read-only hosts.
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("adr0048")
 
 vim.env.AUTO_FINDER_DBASE_DISABLE_CRYPTO = "1"
 

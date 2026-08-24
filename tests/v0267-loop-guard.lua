@@ -30,8 +30,7 @@ for _, p in ipairs({ plugin_root, LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim",
 end
 vim.o.swapfile = false
 local sandbox = vim.fn.tempname() .. "-v0267"
-vim.env.XDG_CONFIG_HOME = sandbox .. "/cfg"
-vim.env.XDG_STATE_HOME  = sandbox .. "/state"
+dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("v0267")
 
 local pass_count, fail_count = 0, 0
 local function ok(name, cond, detail)
