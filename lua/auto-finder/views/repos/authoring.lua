@@ -21,6 +21,10 @@
 
 local M = {}
 
+---SEVERITIES mirrors auto-core's normative order, so the unanchored composer
+---offers the same ladder the anchored one does.
+M.SEVERITIES = { "must-fix", "should-fix", "nit", "question" }
+
 -- Drafts, keyed by `<slug>@<sha>`. One per commit under review.
 M._drafts = {}
 
@@ -54,11 +58,28 @@ function M.slugify(name)
 end
 
 ---reviewer resolves the DISPLAY name and the PATH slug — two different things.
+---
+---`cwd` is REQUIRED to be meaningful: `git config user.name` is per-repository,
+---so running it in Neovim's cwd answers for whatever repo the editor happens to
+---sit in, not the one being reviewed. With two repos open that silently
+---attributed a review of repo B to repo A's configured identity. `git -C`
+---pins it to the worktree under review.
+---@param cwd string?  the worktree being reviewed
 ---@return string? display, string? slug
-function M.reviewer()
+function M.reviewer(cwd)
   local display
-  local ok, out = pcall(vim.fn.systemlist, { "git", "config", "user.name" })
-  if ok and type(out) == "table" and out[1] and out[1] ~= "" then display = out[1] end
+  local cmd = { "git" }
+  if type(cwd) == "string" and cwd ~= "" then
+    cmd[#cmd + 1] = "-C"
+    cmd[#cmd + 1] = cwd
+  end
+  cmd[#cmd + 1] = "config"
+  cmd[#cmd + 1] = "user.name"
+  local ok, out = pcall(vim.fn.systemlist, cmd)
+  if ok and vim.v.shell_error == 0 and type(out) == "table"
+    and out[1] and out[1] ~= "" then
+    display = out[1]
+  end
   display = display or vim.env.USER
   return display, M.slugify(display)
 end
@@ -101,8 +122,31 @@ end
 ---@return string
 function M.render_markdown(opts)
   local d = opts.draft
+  local date = os.date("!%Y-%m-%d")
+  local n_anchored, n_unanchored = #(d.comments or {}), #(d.unanchored or {})
+  -- KB_RULES R2: every new doc under `agents/<name>/` carries BOTH YAML
+  -- frontmatter (for tools — kb.frontmatter, obsidian, the cost analyzer) and
+  -- the inline Tags/Abstract preview lines (for LLMs skimming before load).
+  -- They are not redundant and both are required.
   local lines = {
+    "---",
+    "type: review",
+    ("created: %s"):format(date),
+    ("updated: %s"):format(date),
+    "status: open",
+    ("tags: [review, %s, diff-review, %s]"):format(
+      M.slugify(opts.repo_label or "repo") or "repo", d.verdict or "comment"),
+    "---",
+    "",
     ("# Review — %s @ %s"):format(opts.repo_label or "repo", tostring(opts.sha):sub(1, 7)),
+    "",
+    ("**Tags:** `type:review` `status:open` `owner:%s` `repo:%s` `area:diff-review`")
+      :format(M.slugify(opts.reviewer or "") or "unknown",
+              M.slugify(opts.repo_label or "repo") or "repo"),
+    "",
+    ("**Abstract:** %s review of `%s` at r%d — %d anchored finding(s), %d unanchored.")
+      :format(d.verdict or "comment", tostring(opts.sha):sub(1, 7), opts.revision,
+              n_anchored, n_unanchored),
     "",
     ("- **Reviewer:** %s"):format(opts.reviewer or "(unknown)"),
     ("- **Commit:** `%s`"):format(tostring(opts.sha)),
@@ -175,7 +219,7 @@ function M.submit(opts)
     return nil, "nothing to submit — add a comment or a summary first"
   end
 
-  local display, rslug = M.reviewer()
+  local display, rslug = M.reviewer(opts.cwd)
   if not rslug then
     return nil, "the reviewer name produced no safe path segment; set git config user.name"
   end
