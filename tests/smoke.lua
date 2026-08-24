@@ -6623,7 +6623,37 @@ af.slot_remove(#af.state.config.sections - 1)
 ok("p54: alias survives slot_remove", aliased())
 af.slot_assign({ "repos", "files" })
 ok("p54: alias survives slot_assign (permutation)", aliased())
+
+-- The fifth caller needs care. `_reseed_sections_for_workspace`
+-- EARLY-RETURNS when the persisted layout already equals the live one
+-- ("No-op if the target already matches what's loaded"). Calling it
+-- straight after slot_assign persisted that same layout means the
+-- reseed takes the fast path and never rebuilds — the assertion then
+-- passes without exercising the caller at all. Caught in review.
+--
+-- So: persist a DIFFERENT layout, and count rebuild calls to prove one
+-- actually fired. The counter is the positive control; without it this
+-- is indistinguishable from the no-op it used to be.
+local core_wt = require("auto-core")
+local real_root = core_wt.git.worktree.get_workspace_root
+core_wt.git.worktree.get_workspace_root = function() return "/tmp/af-p54-ws" end
+local rebuilds = 0
+local real_rebuild = af._rebuild_section_registry
+af._rebuild_section_registry = function(...)
+  rebuilds = rebuilds + 1
+  return real_rebuild(...)
+end
+require("auto-finder.state").set_sections_for(af._workspace_key(),
+  { "config", "marks" })          -- deliberately != the live list
 af._reseed_sections_for_workspace()
+af._rebuild_section_registry = real_rebuild
+core_wt.git.worktree.get_workspace_root = real_root
+
+ok("p54: control — the reseed really did rebuild",
+  rebuilds == 1, "rebuild calls = " .. rebuilds)
+ok("p54: the reseed applied the persisted layout",
+  table.concat(af.state.config.sections, " ") == "config marks",
+  table.concat(af.state.config.sections, " "))
 ok("p54: alias survives a workspace reseed", aliased())
 
 -- The property the production writers actually depend on: a write made
