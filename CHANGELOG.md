@@ -71,6 +71,21 @@ traps so `^C` still reports death-by-signal, and gained a preflight that
 fails the run if any listed suite omits the helper or hardcodes a fixed
 `/tmp` XDG root.
 
+**Review round 2 (lector) — two more, both real.** The
+`tempname()`-derived suffix was **not unique**: nvim's tempname is
+`<process-private-dir>/<counter>` and the counter restarts at 0 in every
+fresh process, so `:t` was `"0"` for all of them and two same-label
+processes derived the identical `<parent>/<label>-0` — which the
+`fs_stat`-then-`mkdir` pair then accepted under a forced interleaving,
+being check-then-act. Both branches now use a single atomic
+`vim.uv.fs_mkdtemp(… -XXXXXX)` and its returned path; eight concurrent
+same-label processes get eight distinct roots. Separately, the preflight
+duplicated the suite manifest and omitted `bench-files-panel.lua` and
+`adr0060-gitignore-probe.lua`, so those two could drop the helper
+unnoticed; execution now runs off one `SUITES` manifest while preflight
+*discovers* every `tests/*.lua` entrypoint (excluding `_`-prefixed
+support modules), which binds suites this runner never executes.
+
 Verified against the original failure: with `XDG_CACHE_HOME` pointed at
 a `chmod 555` directory, `main` gives 147/7 and this branch gives 154/0;
 full `run-all` is green with a read-only home cache. No

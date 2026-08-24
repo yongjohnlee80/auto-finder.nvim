@@ -58,6 +58,19 @@ local function sandbox(label)
     return nil
   end
 
+  ---Create a directory atomically from a `XXXXXX` template. One syscall
+  ---picks the name AND creates it, which is what makes the result
+  ---exclusively ours: an `fs_stat` probe followed by a separate `mkdir`
+  ---is check-then-act and races between processes.
+  local function mkdtemp(template)
+    local ok, created = pcall(vim.uv.fs_mkdtemp, template)
+    if not ok or type(created) ~= "string" or created == "" then
+      error(("tests/_sandbox: could not create sandbox root from %s (%s)")
+        :format(template, tostring(created)))
+    end
+    return created
+  end
+
   local home = realpath(vim.env.HOME)
   ---Reject the home directory itself and EVERY descendant of it — not
   ---just dotfile children. An earlier version tested only
@@ -85,25 +98,23 @@ local function sandbox(label)
       error(("tests/_sandbox: refusing to sandbox under the home directory: %s")
         :format(parent))
     end
-    -- Exclusively create a child that did not previously exist. The
-    -- suffix keeps repeat runs against the same exported root from
-    -- colliding, and means this helper NEVER removes a path it did not
-    -- create. (It used to `delete(root, "rf")` up front, on a path
-    -- derived from caller input and before any validation — that
-    -- destroyed a pre-existing file under a crafted root.)
-    local uniq = vim.fn.fnamemodify(vim.fn.tempname(), ":t")
-    root = parent .. "/" .. label .. "-" .. uniq
+    -- ATOMIC exclusive create. `fs_mkdtemp` picks the name AND creates
+    -- it in one syscall, so there is no check-then-act window and no
+    -- way to land on a directory we did not create.
+    --
+    -- A `tempname()`-derived suffix is NOT unique: nvim's tempname is
+    -- `<process-private-dir>/<counter>` and the counter restarts at 0
+    -- in every fresh process, so `:t` was "0" for all of them and two
+    -- same-label processes derived the identical `<parent>/<label>-0`.
+    -- Under a forced interleaving both passed the old fs_stat probe.
+    root = mkdtemp(parent .. "/" .. label .. "-XXXXXX")
   else
-    -- Standalone run: tempname() is unique and does not yet exist.
-    root = vim.fn.fnamemodify(vim.fn.tempname() .. "-" .. label, ":p")
+    -- Standalone run: same atomic primitive, rooted in the system temp
+    -- dir rather than a caller-supplied one.
+    local tmp = vim.uv.os_tmpdir() or "/tmp"
+    root = mkdtemp(tmp .. "/auto-finder-" .. label .. "-XXXXXX")
   end
 
-  if vim.uv.fs_stat(root) then
-    error(("tests/_sandbox: refusing to reuse an existing path: %s"):format(root))
-  end
-  if vim.fn.mkdir(root, "p") ~= 1 then
-    error(("tests/_sandbox: could not create sandbox root: %s"):format(root))
-  end
 
   local canonical = realpath(root) or root
   if under_home(canonical) then

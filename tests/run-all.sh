@@ -138,35 +138,60 @@ run_suite() {
   fi
 }
 
-SUITES="tests/smoke.lua tests/smoke-automation.lua tests/smoke-adr0044.lua
-tests/smoke-adr0048.lua tests/adr0059-e2e.lua tests/adr0060-repos-render.lua
-tests/v0267-loop-guard.lua tests/adr0060-r1-view-lifecycle.lua"
-# shellcheck disable=SC2086
-if ! preflight_sandbox $SUITES; then
+# ── SUITE MANIFEST ────────────────────────────────────────────────
+# ONE list drives both execution and the XDG preflight. They used to be
+# two lists, which is a silent-bypass waiting to happen: adding a
+# run_suite call without updating the preflight string meant the new
+# suite was executed but never checked.
+#
+# Format: "<display-name>|<path>". Keep the per-suite rationale next to
+# its entry so the reasons for the extractions stay discoverable.
+SUITES=(
+  "smoke|tests/smoke.lua"
+  # [41]/[42] (ADR-0035 automation) — extracted from smoke.lua; the
+  # malformed-template :edit crashes only with smoke.lua's accumulated
+  # state, so a fresh process runs them safely.
+  "smoke_automation|tests/smoke-automation.lua"
+  # [45] (ADR-0044 worktree:switched) — extracted from smoke.lua; needs
+  # a freshly-materialised panel window, which only happens early.
+  "smoke_adr0044|tests/smoke-adr0044.lua"
+  # [46]/[47]/[48] (ADR-0048 Phase 3, views.tests/debug/env) — canonical
+  # home for these panel-materialisation sections.
+  "adr0048|tests/smoke-adr0048.lua"
+  # ADR-0059 end-to-end: real fs.watch -> translator -> mounted panel,
+  # counting actual root scans. The smoke [50] pins stub the tree, so
+  # this is the only suite covering the real pipeline.
+  "adr0059-e2e|tests/adr0059-e2e.lua"
+  "adr0060-repos|tests/adr0060-repos-render.lua"
+  "v0267-loop|tests/v0267-loop-guard.lua"
+  # ADR-0060 r1 — view-lifecycle latch.
+  "r1-lifecycle|tests/adr0060-r1-view-lifecycle.lua"
+)
+
+# The XDG contract binds EVERY runnable entrypoint, not only the ones
+# this runner executes: bench-files-panel.lua and
+# adr0060-gitignore-probe.lua are run by hand and would reintroduce the
+# writable-$HOME dependency just as effectively. So preflight discovers
+# tests/*.lua rather than reading the manifest, and excludes only
+# underscore-prefixed support modules (_sandbox.lua itself).
+preflight_targets() {
+  local f
+  for f in tests/*.lua; do
+    case "$(basename "$f")" in
+      _*) continue ;;      # support module, not an entrypoint
+    esac
+    printf '%s\n' "$f"
+  done
+}
+
+if ! preflight_sandbox $(preflight_targets); then
   echo "run-all: FAILED (preflight)"
   exit 1
 fi
 
-run_suite "smoke"           tests/smoke.lua
-# [41]/[42] (ADR-0035 automation) — extracted from smoke.lua; the
-# malformed-template :edit crashes only with smoke.lua's accumulated
-# state, so a fresh process runs them safely.
-run_suite "smoke_automation" tests/smoke-automation.lua
-# [45] (ADR-0044 worktree:switched) — extracted from smoke.lua; needs a
-# freshly-materialised panel window, which only happens early in a run.
-run_suite "smoke_adr0044"   tests/smoke-adr0044.lua
-# [46]/[47]/[48] (ADR-0048 Phase 3, views.tests/debug/env) — canonical
-# home for these panel-materialisation sections (see the file header).
-run_suite "adr0048"         tests/smoke-adr0048.lua
-# ADR-0059 end-to-end: real fs.watch -> translator -> mounted panel,
-# counting actual root scans. The smoke [50] pins stub the tree, so
-# this is the only suite covering the real pipeline.
-run_suite "adr0059-e2e"    tests/adr0059-e2e.lua
-run_suite "adr0060-repos" tests/adr0060-repos-render.lua
-run_suite "v0267-loop"    tests/v0267-loop-guard.lua
-# ADR-0060 r1 — view-lifecycle latch (added on main@474a871; merged
-# onto the 2-arg + summary-sentinel run_suite here).
-run_suite "r1-lifecycle"  tests/adr0060-r1-view-lifecycle.lua
+for entry in "${SUITES[@]}"; do
+  run_suite "${entry%%|*}" "${entry#*|}"
+done
 
 echo "──────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
