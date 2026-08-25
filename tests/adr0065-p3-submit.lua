@@ -16,11 +16,26 @@ local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 vim.opt.runtimepath:prepend(root)
 package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.path
 -- worktree + auto-core are siblings in the same bare-repo family.
+--
+-- Resolved by the family convention (`adr0060-git-actions.lua`): `main` first,
+-- then the SAME-BRANCH sibling, and only directories that exist. The original
+-- list named `review-authoring` on both siblings — the in-flight branch this
+-- feature was written on. That is a name with an expiry date: once the work
+-- merged, `worktree.nvim` kept no such worktree, `require("worktree.store")`
+-- threw at load, and the suite died before its first assertion. The runner
+-- reported it as truncated, which is exactly right and exactly why the summary
+-- sentinel exists — but a harness that pins a branch name will break again on
+-- the next branch, so this resolves by shape instead.
 local sib = vim.fn.fnamemodify(root, ":h:h")
-for _, r in ipairs({ sib .. "/worktree.nvim/review-authoring",
-                     sib .. "/auto-core.nvim/review-authoring" }) do
-  vim.opt.runtimepath:append(r)
-  package.path = r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua;" .. package.path
+local branch_dir = vim.fn.fnamemodify(root, ":t")
+for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
+  for _, wt in ipairs({ "main", branch_dir }) do
+    local r = sib .. "/" .. plugin .. "/" .. wt
+    if vim.fn.isdirectory(r) == 1 then
+      vim.opt.runtimepath:append(r)
+      package.path = r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua;" .. package.path
+    end
+  end
 end
 
 local pass, fail = 0, 0
