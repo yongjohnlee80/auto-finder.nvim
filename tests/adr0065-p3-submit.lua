@@ -380,11 +380,77 @@ ok("*** and the s collision is called out ***",
   help:find("stage", 1, true) ~= nil and help:lower():find("same key", 1, true) ~= nil)
 ok("UNCOMMITTED's disabled authoring is explained",
   help:find("UNCOMMITTED", 1, true) ~= nil)
+ok("*** o is documented as opening the file ***",
+  help:find("open this file", 1, true) ~= nil)
+ok("*** pane navigation (C-l/C-h) is documented ***",
+  help:find("<C-l>", 1, true) ~= nil and help:find("cycle panes", 1, true) ~= nil)
 
 io.stdout:write("\n[11] nothing to submit is refused, not written\n")
 A.discard(repo.slug, SHA)
 local res4, reason4 = A.submit({ repo = repo, sha = SHA })
 ok("an empty draft refuses with a reason", res4 == nil and reason4 ~= nil, tostring(reason4))
+
+io.stdout:write("\n[12] o opens the file's working-tree version into the editor\n")
+do
+  -- Requirement 7: from the diff view, `o` opens the current file for full
+  -- examination. The file the view SHOWS may be a historical revision; what
+  -- the reader wants to examine is the working-tree copy, so this resolves the
+  -- path against the worktree, not the commit.
+  local tree = require("auto-finder.views.repos.tree")
+  local dv = require("auto-core.ui.diffview")
+  local PATCH = "diff --git a/opened.lua b/opened.lua\n--- a/opened.lua\n"
+    .. "+++ b/opened.lua\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    diff = function() return require("auto-core.git.diff").parse(PATCH) end,
+    reviews = function() return {} end,
+  }
+  -- A real worktree with the file present on disk.
+  local wt = vim.fn.tempname()
+  vim.fn.mkdir(wt, "p")
+  local abs = wt .. "/opened.lua"
+  vim.fn.writefile({ "a", "c" }, abs)
+
+  vim.o.columns, vim.o.lines = 200, 50
+  local row = {
+    repo = repo, worktree = { path = wt },
+    node = { kind = "commit", sha = SHA, short = SHA:sub(1, 7), commit = { subject = "s" } },
+  }
+  tree.open_diff(row)
+  ok("open_diff opened the view (positive control)", dv.is_open())
+
+  -- The current file is what auto-core hands the consumer key; drive `o`.
+  ok("current_file() is the seam the o key reads",
+    dv.current_file() ~= nil and dv.current_file().path == "opened.lua",
+    dv.current_file() and dv.current_file().path)
+  local st = dv._state_for_tests()
+  local fired = false
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(st.float:bufnr("middle"), "n")) do
+    if m.lhs == "o" and m.callback then fired = true; m.callback(); break end
+  end
+  ok("*** o IS bound on the diff view ***", fired)
+  ok("*** o closed the diff view so the editor is visible ***", not dv.is_open())
+  ok("*** and opened the working-tree file into a buffer ***",
+    vim.fn.bufnr(abs) ~= -1, abs)
+  ok("*** which is the current buffer, ready to examine ***",
+    vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":p") == vim.fn.fnamemodify(abs, ":p"),
+    vim.api.nvim_buf_get_name(0))
+
+  -- A path not present in the worktree must warn, not open nothing silently.
+  package.loaded["worktree.repos"].diff = function()
+    return require("auto-core.git.diff").parse(
+      "diff --git a/ghost.lua b/ghost.lua\n--- a/ghost.lua\n+++ b/ghost.lua\n@@ -1 +1 @@\n-x\n+y\n")
+  end
+  tree.open_diff(row)
+  local st2 = dv._state_for_tests()
+  local opened_before = vim.fn.bufnr(wt .. "/ghost.lua")
+  for _, m in ipairs(vim.api.nvim_buf_get_keymap(st2.float:bufnr("middle"), "n")) do
+    if m.lhs == "o" and m.callback then m.callback(); break end
+  end
+  ok("a file absent from the worktree is not opened", vim.fn.bufnr(wt .. "/ghost.lua") == opened_before)
+  pcall(dv.close)
+  vim.fn.delete(wt, "rf")
+end
 
 vim.fn.delete(tmp, "rf")
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))

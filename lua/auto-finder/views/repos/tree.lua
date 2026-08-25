@@ -564,6 +564,38 @@ function M.open_diff(row)
                   fn = function() M._submit_review(row, sha) end } }
   end
 
+  -- `o` opens the current file for full examination (requirement 7). Bound for
+  -- both a commit and UNCOMMITTED — the difference is only which draft state
+  -- exists, not whether a file can be opened. The file the view SHOWS may be a
+  -- historical revision; what the reader wants to read is the working-tree copy,
+  -- so the path resolves against the worktree, not the commit. The current file
+  -- arrives from auto-core (it fires at press time, and the shown file changes
+  -- under j/k, so an open-time capture would be stale). Closing with "resume"
+  -- is deliberate: it skips the unsent-review prompt because pressing `o` is an
+  -- explicit navigation, and the draft is owned by `authoring` — it survives the
+  -- close and repaints on reopen.
+  keymaps = keymaps or {}
+  table.insert(keymaps, {
+    key = "o", desc = "open this file",
+    fn = function(f)
+      local rel = f and (f.new_path or f.path or f.old_path)
+      if not rel or rel == "" then
+        logger.notify("repos: no file to open", { level = vim.log.levels.WARN })
+        return
+      end
+      local base = (row.worktree and row.worktree.path)
+        or (row.repo and (row.repo.path or row.repo.common_dir)) or ""
+      local abs = base ~= "" and (base .. "/" .. rel) or rel
+      if vim.fn.filereadable(abs) ~= 1 then
+        logger.notify("repos: " .. rel .. " is not present in this worktree",
+          { level = vim.log.levels.WARN })
+        return
+      end
+      pcall(function() dv.close("resume") end)
+      _open_path(abs)
+    end,
+  })
+
   local handle, err = dv.open({
     files = files,
     annotations = annotations,
@@ -756,7 +788,8 @@ M.HELP = {
   "  c     annotate the line — in visual mode, the selection",
   "  x     drop a pending annotation on this line",
   "  s     submit — writes the review JSON and its paired Markdown",
-  "  <Tab> cycle panes                  q  close",
+  "  o     open this file's working-tree copy for full examination",
+  "  <Tab>/<S-Tab> or <C-l>/<C-h>  cycle panes        q  close",
   "",
   "  Same key, two meanings: in the PANEL s stages a file and c commits;",
   "  in the DIFF VIEW s submits a review and c annotates a line.",
