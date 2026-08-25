@@ -362,7 +362,26 @@ do
   package.loaded["worktree.repos"] = nil
 end
 
-io.stdout:write("\n[10] nothing to submit is refused, not written\n")
+io.stdout:write("\n[10] the panel help documents the diff view it opens\n")
+-- The `?` overlay listed the panel's own keys and stopped there, so an entire
+-- surface -- the one that writes reviews -- was undocumented. `s` is the sharp
+-- case: in the PANEL it stages a file, in the DIFF VIEW it submits a review.
+-- Same key, two meanings, and nothing on screen said so.
+local tree = require("auto-finder.views.repos.tree")
+ok("the help text is reachable for assertion", type(tree.HELP) == "table")
+local help = table.concat(tree.HELP or {}, "\n")
+ok("*** the diff view has a section of its own ***",
+  help:lower():find("diff view", 1, true) ~= nil)
+ok("*** c is documented as annotate ***", help:find("annotate", 1, true) ~= nil)
+ok("*** x is documented as dropping a pending annotation ***",
+  help:find("pending annotation", 1, true) ~= nil)
+ok("*** s is documented as submit ***", help:find("submit", 1, true) ~= nil)
+ok("*** and the s collision is called out ***",
+  help:find("stage", 1, true) ~= nil and help:lower():find("same key", 1, true) ~= nil)
+ok("UNCOMMITTED's disabled authoring is explained",
+  help:find("UNCOMMITTED", 1, true) ~= nil)
+
+io.stdout:write("\n[11] nothing to submit is refused, not written\n")
 A.discard(repo.slug, SHA)
 local res4, reason4 = A.submit({ repo = repo, sha = SHA })
 ok("an empty draft refuses with a reason", res4 == nil and reason4 ~= nil, tostring(reason4))
