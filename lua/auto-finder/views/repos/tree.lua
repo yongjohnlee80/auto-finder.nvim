@@ -730,7 +730,10 @@ local function _reload(row)
   _rerender()
 end
 
-local HELP = {
+---HELP is `?`. Exported so the suite can assert it still documents the surfaces
+---this view opens — an overlay that silently falls behind its own keymaps is
+---worse than none, because it reads as complete.
+M.HELP = {
   "auto-finder repos — worktree explorer",
   "",
   "  repo → worktree → UNCOMMITTED / commits → files · reviews",
@@ -748,9 +751,23 @@ local HELP = {
   "  c     commit what is staged (prompts for a message)",
   "  P     push — confirms first, and names the repo",
   "",
+  "",
+  "  in the diff view (o), on the a/ or b/ pane:",
+  "  c     annotate the line — in visual mode, the selection",
+  "  x     drop a pending annotation on this line",
+  "  s     submit — writes the review JSON and its paired Markdown",
+  "  <Tab> cycle panes                  q  close",
+  "",
+  "  Same key, two meanings: in the PANEL s stages a file and c commits;",
+  "  in the DIFF VIEW s submits a review and c annotates a line.",
+  "",
+  "  On UNCOMMITTED only c is bound in the diff view, and it explains",
+  "  itself: a review anchors to a commit sha, and a working tree has none.",
+  "",
   "  An UNWATCHED worktree lists no commits, on purpose: it costs no",
   "  git calls at all. Press w on the worktree you are working in.",
 }
+local HELP = M.HELP
 
 local function _help()
   local ok, float = pcall(require, "auto-core.ui.float")
