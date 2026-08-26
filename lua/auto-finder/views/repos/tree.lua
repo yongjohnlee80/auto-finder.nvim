@@ -419,7 +419,7 @@ end
 ---Annotations come from the review JSONs already attached to the commit, so a
 ---review written by an agent shows up next to the code without any extra step
 ---— requirement 8's "see agent's or my review feedback right on the panel".
-function M.open_diff(row)
+function M.open_diff(row, opts)
   local backend = _repos()
   if not (backend and row and row.repo) then return end
   local node = row.node
@@ -601,6 +601,14 @@ function M.open_diff(row)
     annotations = annotations,
     annotate = annotate,
     keymaps = keymaps,
+    -- Reopen where a prior session left off (requirement 6). nil on a first
+    -- open; set only when `resume_diff` re-enters here.
+    initial = opts and opts.initial or nil,
+    -- Remember this diff and the reader's last position so the <C-g> modal can
+    -- recall it. The position is auto-core's (it owns the panes); the row is
+    -- ours (it names the repo, worktree and commit to reopen). Captured on
+    -- EVERY close, so "resume" always means the diff you last looked at.
+    on_close = function(pos) M._resume = { row = row, pos = pos } end,
     title = " " .. tostring(row.node.short) .. "  "
       .. tostring((row.node.commit or {}).subject or "") .. " ",
   })
@@ -1049,6 +1057,27 @@ function M.on_focus(panel_winid, bufnr)
   _apply_keymaps(bufnr, panel_winid)
   _ensure_subscriptions()
   _render(bufnr)
+end
+
+---can_resume reports whether a diff has been opened this session and can be
+---reopened where it was left. The <C-g> modal probes this to decide whether to
+---offer the entry at all.
+---@return boolean
+function M.can_resume()
+  return M._resume ~= nil
+end
+
+---resume_diff reopens the last diff at the reader's last position. This is what
+---makes leaving the diff to check a file (the `o` key) safe: the way back is one
+---gesture, from anywhere, through the navigation modal.
+function M.resume_diff()
+  local r = M._resume
+  if not r or not r.row then
+    logger.notify("repos: no diff to resume — open one with o first",
+      { level = vim.log.levels.INFO })
+    return
+  end
+  M.open_diff(r.row, { initial = r.pos })
 end
 
 function M.on_close()
