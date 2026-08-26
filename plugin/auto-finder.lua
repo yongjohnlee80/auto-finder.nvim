@@ -43,3 +43,12 @@ end, {
   desc = "Clear the user-pinned panel width (revert to percentage default)",
 })
 
+vim.api.nvim_create_user_command("AutoFinderResumeDiff", function()
+  -- The navigation modal's "resume diff review" destination. Reopens the last
+  -- commit diff at the reader's last file and line — the way back after leaving
+  -- the diff to check a file.
+  require("auto-finder.views.repos.tree").resume_diff()
+end, {
+  desc = "Reopen the last repos diff view at its last position",
+})
+

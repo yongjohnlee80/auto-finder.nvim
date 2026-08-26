@@ -453,5 +453,56 @@ do
 end
 
 vim.fn.delete(tmp, "rf")
+io.stdout:write("\n[13] the diff view is resumable at its last position\n")
+do
+  -- Requirement 6: navigate away (o opens a file), then recall the diff where
+  -- you left it -- reachable from the <C-g> modal via :AutoFinderResumeDiff.
+  local tree = require("auto-finder.views.repos.tree")
+  local dv = require("auto-core.ui.diffview")
+  local PATCH = "diff --git a/resume.lua b/resume.lua\n--- a/resume.lua\n"
+    .. "+++ b/resume.lua\n@@ -1,3 +1,3 @@\n x\n-y\n+Y\n z\n"
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    diff = function() return require("auto-core.git.diff").parse(PATCH) end,
+    reviews = function() return {} end,
+  }
+  local wt = vim.fn.tempname(); vim.fn.mkdir(wt, "p")
+  vim.o.columns, vim.o.lines = 200, 50
+  local row = {
+    repo = repo, worktree = { path = wt },
+    node = { kind = "commit", sha = SHA, short = SHA:sub(1, 7), commit = { subject = "s" } },
+  }
+
+  ok("resume_diff is a public function", type(tree.resume_diff) == "function")
+  ok("can_resume is a public function", type(tree.can_resume) == "function")
+
+  tree.open_diff(row)
+  local st = dv._state_for_tests()
+  local prev = st.float:winid("preview")
+  vim.api.nvim_set_current_win(prev)
+  vim.api.nvim_win_set_cursor(prev, { 2, 0 })
+  vim.api.nvim_exec_autocmds("CursorMoved", { buffer = st.float:bufnr("preview") })
+  dv.close()
+
+  ok("*** after a diff closes, it is resumable ***", tree.can_resume() == true)
+  tree.resume_diff()
+  ok("*** resume_diff reopened the diff ***", dv.is_open())
+  ok("*** on the same file ***",
+    dv.current_file() ~= nil and dv.current_file().path == "resume.lua",
+    dv.current_file() and dv.current_file().path)
+  local pw = dv._state_for_tests().float:winid("preview")
+  ok("*** at the remembered line ***", vim.api.nvim_win_get_cursor(pw)[1] == 2,
+    tostring(vim.api.nvim_win_get_cursor(pw)[1]))
+  dv.close()
+
+  -- The command surface the <C-g> modal dispatches.
+  -- `-u NONE` does not source plugin/, so source the real command file: this
+  -- asserts the actual registration the modal dispatches, not a stand-in.
+  vim.cmd("source " .. root .. "/plugin/auto-finder.lua")
+  ok("*** :AutoFinderResumeDiff is registered ***",
+    vim.fn.exists(":AutoFinderResumeDiff") == 2)
+  vim.fn.delete(wt, "rf")
+end
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)
