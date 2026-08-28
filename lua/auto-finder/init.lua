@@ -1427,7 +1427,11 @@ end
 ---the previously-active section was removed, focus falls back to
 ---`cfg.default_section` (config slot if available).
 ---@param new_sections string[]
----@param opts { focus_after: integer|nil }?
+---@param opts { focus_after: integer|nil, no_force_open: boolean|nil }?
+---  `no_force_open`: when the panel is CLOSED, update the active section
+---  without opening the panel (used by the workspace reseed so a fresh
+---  no-arg launch doesn't pop the finder over the dashboard). When the
+---  panel is already open, focus happens regardless.
 function M._rebuild_section_registry(new_sections, opts)
   opts = opts or {}
   local cfg = M.state and M.state.config
@@ -1543,8 +1547,24 @@ function M._rebuild_section_registry(new_sections, opts)
 
   -- Focus drives the panel's winbar refresh too. Idempotent
   -- when target == registry.active.
-  if M._registry.focus then
+  --
+  -- BUT `focus` OPENS a closed panel: auto-core's Registry:focus calls
+  -- panel:open() when the panel winid is invalid. When the workspace
+  -- reseed runs this path at startup (it passes opts.no_force_open),
+  -- the panel must NOT be forced open — a fresh `nvim` (no args) would
+  -- otherwise pop the finder over the dashboard and shove the splash
+  -- off-center (see smoke [20b]). So focus only when the panel is
+  -- already open, OR when the caller did not opt out of opening (slot
+  -- mutations pass no opts and keep their always-focus behavior). When
+  -- we skip the focus, record the active section directly so the next
+  -- explicit open still lands on `target`.
+  local panel_open = M.state.panel_winid ~= nil
+    and vim.api.nvim_win_is_valid(M.state.panel_winid)
+  if M._registry.focus and (panel_open or not opts.no_force_open) then
     pcall(function() M._registry:focus(target) end)
+  else
+    M._registry.active = target
+    M.state.section = target
   end
 
   -- Defensive winbar refresh in case `focus` short-circuited
@@ -1614,13 +1634,24 @@ function M._reseed_sections_for_workspace()
       -- stale value if the record is bad.
       if per_ws_section ~= nil and M._registry
           and per_ws_section ~= M._registry.active then
-        pcall(function() M.focus(per_ws_section) end)
+        -- Same rule as the rebuild path below: `M.focus` opens a closed
+        -- panel (host.ensure_open), so at startup with the panel closed
+        -- we must only record the target, never force the panel open.
+        local panel_open = M.state.panel_winid ~= nil
+          and vim.api.nvim_win_is_valid(M.state.panel_winid)
+        if panel_open then
+          pcall(function() M.focus(per_ws_section) end)
+        else
+          -- M.state.section is already per_ws_section (set above); just
+          -- align the registry so the next open focuses the right slot.
+          M._registry.active = per_ws_section
+        end
       end
       return
     end
   end
 
-  M._rebuild_section_registry(target)
+  M._rebuild_section_registry(target, { no_force_open = true })
 end
 
 ---Drop the repos section's cached bufnr (firing its `on_close` so
