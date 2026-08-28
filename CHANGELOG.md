@@ -2,6 +2,20 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.8] — 2026-08-28 — automation smoke no longer corrupts headless geometry
+
+- `smoke-automation.lua` no longer copies the main smoke suite's unused
+  synthetic `columns=200` / `lines=60` writes. On Neovim 0.12.2, either
+  option independently corrupts headless grid/allocator state later exercised
+  by section 41b; the natural 80x24 run completes **36/0** on the runtime that
+  previously exited 139 after seven assertions.
+- A prelude assertion pins preservation of caller-provided geometry. Restoring
+  the `lines=60` mutation fails that assertion before the same signal-11
+  boundary, so the fix remains observable even on runtimes that tolerate the
+  Neovim core defect.
+- The complete aggregate now reaches every terminal summary and passes with
+  zero environment-failure tolerance.
+
 ## [v0.4.7] — 2026-08-28 — hardened Git reads, deterministic smoke timing, diagnostics lifecycle hygiene
 
 - **ADR-0069 Git reads** — the bundled neo-tree fork now consumes

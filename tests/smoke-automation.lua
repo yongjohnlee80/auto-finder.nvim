@@ -15,9 +15,13 @@
 -- `2026-06-13-bug-auto-finder-smoke-suite-silently-truncates-at-41b-…`.
 -- The abort truncated smoke.lua's whole tail ([42], [45]–[50])
 -- SILENTLY. Extracting [41]/[42] into their own fresh-nvim process
--- (low accumulated state → no crash) lets smoke.lua run to its
--- summary AND keeps this coverage live. Same pattern, and same
--- prelude-duplication, as tests/smoke-adr0048.lua.
+-- lets smoke.lua run to its summary AND keeps this coverage live.
+-- This runner also deliberately keeps nvim's natural headless
+-- geometry: copying smoke.lua's synthetic columns/lines writes here
+-- independently corrupts nvim 0.12.2's grid/allocator state before
+-- the fixture edit, while every assertion passes at natural geometry.
+-- Same process-isolation pattern, and same prelude duplication apart
+-- from geometry, as tests/smoke-adr0048.lua.
 --
 -- Keep the section bodies in sync with tests/smoke.lua's canonical
 -- copies — this file re-executes them, it does not fork them.
@@ -51,8 +55,11 @@ end
 -- Auto-finder ships its own forked neo-tree at lua/auto-finder/neotree.
 -- Upstream `neo-tree.nvim` is intentionally NOT on the runtimepath.
 
-vim.o.columns = 200
-vim.o.lines = 60
+local initial_columns, initial_lines = vim.o.columns, vim.o.lines
+-- Do not assign `columns` or `lines` in this runner. Neither section
+-- has a geometry-dependent assertion, and either synthetic option is
+-- sufficient to trigger the tracked headless grid/allocator crash on
+-- nvim 0.12.2 when section [41] later opens its diagnostic fixture.
 vim.o.swapfile = false
 vim.o.hidden = true
 
@@ -87,6 +94,10 @@ require("auto-finder.neotree").setup({
 -- the panel through `af`, so the suite needs auto-finder configured
 -- before the sections run.
 print("\n[1] setup()")
+ok("prelude preserves caller headless geometry",
+  vim.o.columns == initial_columns and vim.o.lines == initial_lines,
+  string.format("started %dx%d, now %dx%d",
+    initial_columns, initial_lines, vim.o.columns, vim.o.lines))
 local af = require("auto-finder")
 local setup_ok, err = pcall(af.setup, {
   side = "left",

@@ -5999,8 +5999,10 @@ end)
 -- (SIGABRT on Linux; the macOS [41b] SEGFAULT is the same crash class,
 -- KB todo 2026-06-13-bug-auto-finder-smoke-suite-silently-truncates-at-41b-…).
 -- The abort silently truncated this suite's entire tail ([45]–[50]).
--- Moving [41]/[42] into their own fresh-nvim process removes the crash
--- from smoke.lua's hot path and keeps the coverage live. See
+-- Moving [41]/[42] into their own process removes the accumulated-state
+-- crash from smoke.lua's hot path. That runner also preserves natural
+-- headless geometry because copied synthetic columns/lines independently
+-- provoke the same core defect on nvim 0.12.2. See
 -- tests/smoke-automation.lua (wired into run-all.sh as "smoke_automation").
 -- ═══════════════════════════════════════════════════════════════════
 

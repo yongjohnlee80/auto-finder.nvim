@@ -24,10 +24,12 @@
 # on the headless `:edit` of the malformed automated-template fixture
 # with the suite's accumulated attach state (KB todo
 # 2026-06-13-bug-auto-finder-smoke-suite-silently-truncates-at-41b-…).
-# Those [41]/[42] sections were extracted to tests/smoke-automation.lua
-# (fresh process, low state → no crash), and the panel-materialisation
-# sections [45]/[46]/[47] to smoke-adr0044.lua / smoke-adr0048.lua, so
-# smoke.lua now runs to its summary cleanly. See
+# Those [41]/[42] sections were extracted to tests/smoke-automation.lua,
+# where process isolation plus preservation of nvim's natural headless
+# geometry keeps the coverage live without provoking the same core defect.
+# The panel-materialisation sections [45]/[46]/[47] moved to
+# smoke-adr0044.lua / smoke-adr0048.lua, so smoke.lua now runs to its
+# summary cleanly. See
 # tests/auto-finder-coverage.md for the full suite→surface inventory.
 set -u
 cd "$(dirname "$0")/.."
@@ -155,8 +157,9 @@ run_suite() {
 SUITES=(
   "smoke|tests/smoke.lua"
   # [41]/[42] (ADR-0035 automation) — extracted from smoke.lua; the
-  # malformed-template :edit crashes only with smoke.lua's accumulated
-  # state, so a fresh process runs them safely.
+  # malformed-template :edit crashes with smoke.lua's accumulated state.
+  # The isolated runner also preserves natural headless geometry because
+  # synthetic columns/lines independently provoke the core defect.
   "smoke_automation|tests/smoke-automation.lua"
   # [45] (ADR-0044 worktree:switched) — extracted from smoke.lua; needs
   # a freshly-materialised panel window, which only happens early.

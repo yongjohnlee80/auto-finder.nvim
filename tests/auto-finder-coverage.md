@@ -34,7 +34,7 @@ Last verified: **2026-08-23**, `tests/run-all.sh` → **OK**, 9 suites,
 | suite | file | assertions | defends | status |
 |---|---|---:|---|---|
 | smoke | `smoke.lua` | 672 | the whole panel/section/view/state surface — setup, width/pin, winfixbuf, section switching, store+namespace migration, buffers/repos/marks slots, live-refresh wiring, log wrapper, follow-mode, ADR-0026 core refactor (phases 1-9), views.todos + automation panel rendering, ADR-0040 restore/async-git, ADR-0059 files:changed classification, views._config_section, views.dbase.tree, dbase slot delegation | live |
-| smoke_automation | `smoke-automation.lua` | 29 | ADR-0035 [41] automation diagnostics (malformed-cron/execute diagnostics, bash-disabled indicator) + [42] `s`-modal scaffold on `automated` promotion | live (isolated — see below) |
+| smoke_automation | `smoke-automation.lua` | 36 | ADR-0035 [41] automation diagnostics (malformed-cron/execute diagnostics, lifecycle guards, bash-disabled indicator) + [42] `s`-modal scaffold on `automated` promotion | live (isolated, natural headless geometry — see below) |
 | smoke_adr0044 | `smoke-adr0044.lua` | 6 | ADR-0044 [45] `worktree:switched` re-anchors the panel tree to the new cwd WITHOUT displacing a non-panel editor split | live (isolated) |
 | adr0048 | `smoke-adr0048.lua` | 146 | ADR-0048 Phase 3 [46] views.tests (auto-run discovery consumer), [47] views.debug (entry points/sessions/breakpoints + secret masking), [48] r5 Env section | live (isolated — canonical home for [46]/[47]) |
 | adr0059-e2e | `adr0059-e2e.lua` | 5 | ADR-0059 real `fs.watch` → translator → mounted panel, counting actual root scans (the only suite over the REAL pipeline; smoke [50] stubs the tree) | live |
@@ -97,8 +97,8 @@ and non-monotonic in source order; they are labels, not an ordering.)
 
 | section | file (before → after) | was | disposition | evidence |
 |---|---|---|---|---|
-| `[41]` automation diagnostics | smoke.lua → `smoke-automation.lua` | dark (SIGABRT truncation source) | **EXTRACT** — the malformed-template `vim.cmd("edit")` trips neovim-core `grid_line_flush` (grid.c:595) SIGABRT only with smoke.lua's accumulated attach state; a fresh process runs it clean | 29/0 in the new suite; isolated repro of the edit survives |
-| `[42]` `s`-modal scaffold | smoke.lua → `smoke-automation.lua` | dark (behind [41]) | **EXTRACT** (+ scaffolding fix: `:vsplit` inherited winfixbuf from the panel current-win; cleared it) | 29/0 |
+| `[41]` automation diagnostics | smoke.lua → `smoke-automation.lua` | dark (SIGABRT truncation source) | **EXTRACT** — the malformed-template `vim.cmd("edit")` trips neovim-core `grid_line_flush` (grid.c:595) with smoke.lua's accumulated state; the isolated runner must also preserve natural headless geometry because either copied synthetic option corrupts Neovim 0.12.2 | 36/0 in the isolated suite; geometry-preservation assertion is mutation-verified |
+| `[42]` `s`-modal scaffold | smoke.lua → `smoke-automation.lua` | dark (behind [41]) | **EXTRACT** (+ scaffolding fix: `:vsplit` inherited winfixbuf from the panel current-win; cleared it) | 36/0 |
 | `[45]` worktree:switched | smoke.lua → `smoke-adr0044.lua` | 5 env-fails (panel not materialised) | **ISOLATE** — passes 6/0 in a fresh process | 6/0 in the new suite |
 | `[46]` views.tests | smoke.lua (removed) → `smoke-adr0048.lua` | 2 fails + p46 nil-buffer ABORT (the headline truncation) | **CONSOLIDATE** — duplicate of the passing adr0048 copy; smoke.lua copy removed, adr0048 is now canonical | adr0048 146/0 |
 | `[47]` views.debug | smoke.lua (removed) → `smoke-adr0048.lua` | passed in smoke but a sync-hazard duplicate | **CONSOLIDATE** with [46] | adr0048 146/0 |
