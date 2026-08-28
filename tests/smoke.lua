@@ -1842,6 +1842,76 @@ end
 _af._rebuild_section_registry(_orig_live)
 end)
 
+-- ───────────────────────── 20b. reseed must NOT force-open a closed panel ────────────────────────
+--
+-- Regression: on a fresh `nvim` (no args) the AutoVim splash rendered
+-- off-center because the auto-finder panel popped open OVER the
+-- dashboard. Root cause: the startup workspace reseed
+-- (_reseed_sections_for_workspace → _rebuild_section_registry → focus,
+-- and the same-list early-return's M.focus) drives the panel through
+-- `focus`, and BOTH focus paths OPEN a closed panel (auto-core
+-- Registry:focus calls panel:open() when winid is invalid; M.focus
+-- calls host.ensure_open). So this pure bookkeeping force-opened the
+-- finder at startup. The reseed must update section state WITHOUT
+-- opening a closed panel — a directory launch (`nvim .`) still opens
+-- it via the separate hijack one-shot, which this does not touch.
+print("\n[20b] reseed must not force-open a closed panel")
+section(function()
+local _af = require("auto-finder")
+local _state_mod = require("auto-finder.state")
+local _core = require("auto-core")
+
+_core.git.worktree.set_workspace_root(vim.fn.getcwd())
+local _wskey = _af._workspace_key()
+ok("workspace key resolves for reseed-open probe",
+   type(_wskey) == "string" and #_wskey > 0)
+if not _wskey then return end
+
+local function panel_open()
+  return _af.state.panel_winid ~= nil
+    and vim.api.nvim_win_is_valid(_af.state.panel_winid)
+end
+
+-- The probe only means something if the panel starts CLOSED, mirroring
+-- a fresh no-arg launch. A prior section may have left it open.
+_af.close()
+ok("panel starts closed", not panel_open())
+
+local _orig_persisted = _state_mod.get_sections_for(_wskey)
+local _orig_live = vim.list_extend({}, _af.state.config.sections)
+
+-- (a) SLOT LIST DIFFERS → the _rebuild_section_registry focus path.
+local _target = { "config", "files", "repos", "buffers" }
+_state_mod.set_sections_for(_wskey, _target)
+_af.state.config.sections = vim.deepcopy(
+  require("auto-finder.config").defaults.sections)
+_af._reseed_sections_for_workspace()
+ok("(a) cfg.sections reseeded to the persisted list",
+   vim.deep_equal(_af.state.config.sections, _target))
+ok("(a) panel STILL closed after a slot-list-changing reseed",
+   not panel_open())
+
+-- (b) SLOT LIST IDENTICAL but last_section differs → the early-return
+-- branch that used to call M.focus(per_ws_section).
+_state_mod.set_last_section_for(_wskey, 2) -- repos
+_af.state.section = 0
+if _af._registry then _af._registry.active = 0 end
+_af._reseed_sections_for_workspace()
+ok("(b) state.section adopts the per-workspace last_section",
+   _af.state.section == 2)
+ok("(b) panel STILL closed after a same-list reseed", not panel_open())
+
+-- Restore so later sections see the live default composition.
+if _orig_persisted then
+  _state_mod.set_sections_for(_wskey, _orig_persisted)
+else
+  _state_mod.set_sections_for(_wskey, nil)
+end
+pcall(_state_mod.set_last_section_for, _wskey, nil)
+_af._rebuild_section_registry(_orig_live)
+_af.close()
+end)
+
 -- ───────────────────────── 21. v0.2.11 — active-section gate + renderer winfixbuf-safe ────────────────────────
 --
 -- Two regression tests for v0.2.11:
