@@ -1,9 +1,6 @@
-local git = require("auto-finder.neotree.git")
-local utils = require("auto-finder.neotree.utils")
 local fs_watch = require("auto-finder.neotree.sources.filesystem.lib.fs_watch")
 local events = require("auto-finder.neotree.events")
 local log = require("auto-finder.neotree.log")
-local uv = vim.uv or vim.loop
 local M = {}
 
 ---@param worktree_root string?
@@ -27,15 +24,6 @@ M.watch = function(worktree_root, git_dir)
       log.error("git_event_callback: ", err)
       return
     end
-    utils.debounce("git_folder_exists " .. git_dir, function()
-      local git_folder_stat = uv.fs_stat(git_dir)
-      if git_folder_stat and git_folder_stat.type == "directory" then
-        return
-      end
-
-      git.find_worktree_info(git_dir)
-    end, 5000, utils.debounce_strategy.CALL_LAST_ONLY)
-
     vim.schedule(function()
       events.fire_event(events.GIT_EVENT)
     end)

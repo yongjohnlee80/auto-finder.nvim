@@ -31,8 +31,10 @@ local NS = vim.api.nvim_create_namespace("auto-finder.todos.automation")
 -- `shared.debounce.coalesce` so re-attach replaces the prior pair
 -- cleanly. Also tracks the buffer's autocmd id for symmetric
 -- detach during `uninstall()`.
-local _buffer_state = {}     -- bufnr → { trigger, cancel, autocmd_ids }
-local _augroup = nil
+local _buffer_state = {}     -- bufnr → { trigger, cancel, autocmd_ids, gen }
+local _augroup = nil         -- BufReadPost/BufNewFile/BufEnter → M.attach
+local _buf_augroup = nil     -- buffer-local BufWritePost/TextChanged*/BufWipeout
+local _attach_gen = 0        -- per-attachment generation; bumps on every attach
 
 -- ─── helpers ──────────────────────────────────────────────────────
 
@@ -202,14 +204,42 @@ function M.attach(bufnr)
     _validate(bufnr)
   end, 200)
 
-  -- One-shot synchronous validation on attach so the user sees
-  -- diagnostics immediately, not only after the next keystroke.
-  _validate(bufnr)
+  -- Bump the per-attachment generation so a scheduled callback from
+  -- a PRIOR attachment (or after uninstall) can detect it is stale
+  -- and bail. This closes the lifecycle defect where uninstall
+  -- before the scheduled tick leaves the callback armed: it fires,
+  -- re-creates diagnostics, but _buffer_state[bufnr] is nil →
+  -- attached_buffers reports 0 while a diagnostic is visible.
+  _attach_gen = _attach_gen + 1
+  local my_gen = _attach_gen
+
+  -- Schedule the initial validation so it runs on the next event-loop
+  -- tick, NOT synchronously inside BufReadPost dispatch. This is a
+  -- defensive candidate isolation measure for the headless crash
+  -- (KB todo 2026-06-13-…): synchronous nvim_buf_get_lines on a
+  -- buffer mid-BufReadPost was identified as a candidate trigger,
+  -- and deferring it costs nothing perceptible to a human. NOTE:
+  -- this alone does NOT resolve the crash on all runtimes (the codex
+  -- sandbox still exits 139); it is retained as defensive hygiene
+  -- alongside the separate augroup below. One event-loop turn is
+  -- imperceptible; the debounce's TextChanged autocmds (wired below,
+  -- still synchronous) catch any edit before the scheduled validate
+  -- lands.
+  --
+  -- The generation guard ensures the callback is a no-op if the
+  -- attachment was replaced (re-attach bumped the gen) or torn down
+  -- (uninstall cleared _buffer_state) before the tick landed.
+  vim.schedule(function()
+    local st = _buffer_state[bufnr]
+    if st and st.gen == my_gen then
+      _validate(bufnr)
+    end
+  end)
 
   local ids = {}
   local function add_autocmd(events)
     ids[#ids + 1] = vim.api.nvim_create_autocmd(events, {
-      group   = _augroup,
+      group   = _buf_augroup,
       buffer  = bufnr,
       desc    = "auto-finder.todos.automation: revalidate diagnostics",
       callback = function() trigger() end,
@@ -222,7 +252,7 @@ function M.attach(bufnr)
   -- Cleanup on BufWipeout: cancel the debouncer + clear diagnostics
   -- so we don't leak a stamp into a future buf at the same id.
   ids[#ids + 1] = vim.api.nvim_create_autocmd("BufWipeout", {
-    group  = _augroup,
+    group  = _buf_augroup,
     buffer = bufnr,
     callback = function()
       pcall(cancel)
@@ -235,6 +265,7 @@ function M.attach(bufnr)
     trigger      = trigger,
     cancel       = cancel,
     autocmd_ids  = ids,
+    gen          = my_gen,
   }
 end
 
@@ -246,6 +277,17 @@ function M.install()
   if _augroup then return end
   _augroup = vim.api.nvim_create_augroup(
     "auto-finder.todos.automation", { clear = true })
+  -- Separate group for buffer-local autocmds created by M.attach.
+  -- Same-group mutation during BufReadPost dispatch was identified
+  -- as a candidate trigger for the headless SEGFAULT / realloc()
+  -- abort (KB todo 2026-06-13-…, candidate b) — creating autocmds
+  -- in _augroup while it is dispatching mutates the array nvim is
+  -- iterating. This is a defensive candidate isolation measure, not
+  -- an established crash mechanism: the separated-group build still
+  -- exits 139 on the codex runtime. A second group has its own
+  -- array, so M.attach can safely add to it mid-dispatch regardless.
+  _buf_augroup = vim.api.nvim_create_augroup(
+    "auto-finder.todos.automation.buf", { clear = true })
 
   vim.api.nvim_create_autocmd({ "BufReadPost", "BufNewFile", "BufEnter" }, {
     group = _augroup,
@@ -265,6 +307,10 @@ function M.uninstall()
   if _augroup then
     pcall(vim.api.nvim_del_augroup_by_id, _augroup)
     _augroup = nil
+  end
+  if _buf_augroup then
+    pcall(vim.api.nvim_del_augroup_by_id, _buf_augroup)
+    _buf_augroup = nil
   end
   for bufnr, state in pairs(_buffer_state) do
     if type(state.cancel) == "function" then pcall(state.cancel) end

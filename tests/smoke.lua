@@ -3040,8 +3040,16 @@ if files_idx then
   end)
   up.events.publish("core.file:modified",
     { path = vim.fn.getcwd() .. "/phase3-metrics-probe.txt" })
-  -- 100ms (core debounce) + 150ms (neotree debounce) + slack.
-  vim.wait(500, function() return paint_seen ~= nil end)
+  -- Flush the 100ms core translator debounce synchronously so the
+  -- `auto-finder.core.files:changed` emit (and the section's
+  -- schedule_refresh arming) land NOW, not after a fixed sleep. Only
+  -- the 150ms neotree render debounce remains, which the wait below
+  -- polls on the real post-condition (paint_seen). The old fixed
+  -- 500ms budget raced the full 100+150ms chain and lost ~1 in 5
+  -- under load; flushing removes the 100ms leg + its variance, and
+  -- 1500ms gives 10x headroom on the remaining 150ms leg.
+  core._flush_file_events_for_tests()
+  vim.wait(1500, function() return paint_seen ~= nil end)
   ok("metrics:paint emit fires from existing render path",
     type(paint_seen) == "table"
       and type(paint_seen.dur_ms) == "number"
@@ -3677,6 +3685,19 @@ do
     decorate_calls[#decorate_calls + 1] = path
     if cb then pcall(cb, nil) end
   end
+
+  -- Settle: drain any filesystem refresh left pending from the
+  -- section's own mount/setup (the §2.4 throttle's trailing edge can
+  -- defer up to REFRESH_THROTTLE_MS=800) so it cannot bleed into the
+  -- observation window and trip `saw_full_refresh`. ADR-0060 §2.8
+  -- made the git event itself a no-op for the files panel, so the
+  -- most likely pollution source is a late mount/setup rescan, though
+  -- unrelated external file events could also arrive. Mirrors the
+  -- section-isolation pattern from [33] above (see line ~1315). If
+  -- this flakes again, replace the sleep with a scoped test-only
+  -- cancel/drain or observable quiet-generation seam.
+  vim.wait(900)
+  refresh_calls = {}
 
   up.events.publish("core.git.state:changed", {
     repo_root = vim.fn.getcwd(),

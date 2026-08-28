@@ -154,14 +154,16 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
   -- The only observable that separates idempotent from not is whether a
   -- second create happens at all, so count the API calls.
   local GROUP = "auto-finder.todos.automation"
-  local function group_present()
-    return (pcall(vim.api.nvim_get_autocmds, { group = GROUP })) and true or false
+  local BUF_GROUP = "auto-finder.todos.automation.buf"
+  local function group_present(name)
+    return (pcall(vim.api.nvim_get_autocmds, { group = name })) and true or false
   end
 
   -- Start from a known-absent state so the first install() below is a
   -- REAL create rather than a short-circuit on setup()'s group.
   diag.uninstall()
-  ok("p41: uninstall removes the augroup", not group_present())
+  ok("p41: uninstall removes both augroups",
+    not group_present(GROUP) and not group_present(BUF_GROUP))
 
   local creates = 0
   local real_create = vim.api.nvim_create_augroup
@@ -171,21 +173,23 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
   end
   diag.install()
   local after_first = creates
-  local present_after_first = group_present()
+  local present_after_first = group_present(GROUP)
+  local buf_present_after_first = group_present(BUF_GROUP)
   diag.install()                      -- must be a no-op
   local after_second = creates
   vim.api.nvim_create_augroup = real_create
 
-  ok("p41: install creates the augroup",
-    after_first == 1 and present_after_first,
-    "creates=" .. after_first .. " present=" .. tostring(present_after_first))
+  ok("p41: install creates both augroups",
+    after_first == 2 and present_after_first and buf_present_after_first,
+    "creates=" .. after_first .. " main=" .. tostring(present_after_first)
+      .. " buf=" .. tostring(buf_present_after_first))
   ok("p41: install is idempotent — a second call does not re-create it",
     after_second == after_first,
     "creates went " .. after_first .. " -> " .. after_second)
 
   diag.uninstall()
-  ok("p41: uninstall returns cleanly and the group is gone",
-    not group_present())
+  ok("p41: uninstall returns cleanly and both groups are gone",
+    not group_present(GROUP) and not group_present(BUF_GROUP))
   diag.install()
 
   -- 41b. Open a malformed automated file → buffer-attach emits a
@@ -218,8 +222,9 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
 
   vim.cmd("edit " .. vim.fn.fnameescape(bad_path))
   local bufnr_bad = vim.api.nvim_get_current_buf()
-  -- Synchronous validate runs on attach; no need to wait the
-  -- debounce window for the initial entry.
+  -- M.attach is called from BufReadPost; the initial _validate is
+  -- vim.schedule'd (defensive fix for the headless SEGFAULT, KB todo
+  -- 2026-06-13-…), so wait one tick for it to land before sampling.
   vim.wait(80, function() return false end)
   local diags = vim.diagnostic.get(bufnr_bad, { namespace = diag.NS })
   ok("p41: malformed cron emits a diagnostic",
@@ -247,11 +252,14 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
   -- the diagnostic.
   vim.api.nvim_buf_set_lines(bufnr_bad, 10, 11, false,
     { "  - 0 8 * * *" })  -- valid cron now
-  -- Trigger TextChanged manually (the debouncer's autocmd is what
-  -- normally fires; here we just call _validate via the attach
-  -- path by re-attaching, which runs a synchronous validate).
+  -- Trigger a revalidate by re-attaching. The initial validate is
+  -- scheduled (defensive fix for the headless SEGFAULT, KB todo
+  -- 2026-06-13-…), so poll for the expected condition rather than
+  -- assuming a synchronous result.
   diag.attach(bufnr_bad)
-  vim.wait(40, function() return false end)
+  vim.wait(200, function()
+    return #vim.diagnostic.get(bufnr_bad, { namespace = diag.NS }) == 0
+  end)
   local diags_after = vim.diagnostic.get(bufnr_bad, { namespace = diag.NS })
   ok("p41: diagnostic clears after fix",
     #diags_after == 0, "got " .. #diags_after .. " diagnostics")
@@ -262,10 +270,124 @@ print("\n[41] ADR-0035 Phase 3 — automation diagnostics + bash-disabled indica
     { 'status: open' })
   vim.api.nvim_buf_set_lines(bufnr_bad, 9, 12, false, {})  -- drop condition/execute
   diag.attach(bufnr_bad)
-  vim.wait(40, function() return false end)
+  vim.wait(200, function()
+    return #vim.diagnostic.get(bufnr_bad, { namespace = diag.NS }) == 0
+  end)
   local diags_nonauto = vim.diagnostic.get(bufnr_bad, { namespace = diag.NS })
   ok("p41: non-automated status clears all diagnostics",
     #diags_nonauto == 0)
+
+  -- 41d-regression-A: uninstall before the scheduled validate tick
+  -- must NOT leave a queued callback that re-creates diagnostics
+  -- after teardown. The generation guard in M.attach makes the
+  -- scheduled _validate a no-op when _buffer_state[bufnr] is nil.
+  -- Without the guard, the callback fires after uninstall, calls
+  -- vim.diagnostic.set on the now-untracked buffer, and
+  -- attached_buffers() reports 0 while a diagnostic is visible.
+  do
+    local reg_buf = vim.api.nvim_create_buf(false, true)
+    vim.api.nvim_buf_set_lines(reg_buf, 0, -1, false, {
+      "---",
+      'id: "2026-05-30-p41-reg-uninstall"',
+      "version: 1",
+      'status: automated',
+      "title: uninstall-before-tick regression",
+      "description: test fixture",
+      'created: "2026-05-30T00:00:00Z"',
+      'updated: "2026-05-30T00:00:00Z"',
+      'status_changed: "2026-05-30T00:00:00Z"',
+      "condition:",
+      "  - this is not a cron expression",
+      "execute:",
+      "  - do-something",
+      "---",
+      "",
+      "body",
+    })
+    vim.api.nvim_buf_set_name(reg_buf, todo_dir .. "/2026-05-30-p41-reg-uninstall.md")
+    -- Attach: schedules a _validate on the next tick.
+    diag.attach(reg_buf)
+    -- Uninstall BEFORE the tick lands: clears _buffer_state, drops
+    -- both augroups, resets diagnostics on every tracked buffer.
+    diag.uninstall()
+    -- Now let the event loop run so any queued scheduled callback
+    -- fires. If the generation guard is missing, the callback runs
+    -- _validate which calls vim.diagnostic.set → orphans a diagnostic.
+    vim.wait(50, function() return false end)
+    local diags_after_uninstall = vim.diagnostic.get(reg_buf, { namespace = diag.NS })
+    ok("p41: uninstall-before-first-tick leaves NO orphan diagnostics",
+      #diags_after_uninstall == 0,
+      "got " .. #diags_after_uninstall .. " diagnostics after uninstall+tick")
+    ok("p41: attached_buffers is empty after uninstall-before-tick",
+      #diag.attached_buffers() == 0,
+      "got " .. #diag.attached_buffers() .. " attached buffers")
+    -- Re-install for the downstream sections that expect it.
+    diag.install()
+    pcall(vim.api.nvim_buf_delete, reg_buf, { force = true })
+  end
+
+  -- 41d-regression-B: stale-callback-after-reattach. A rapid
+  -- attach → attach (same buffer, before the first scheduled tick)
+  -- must reject the FIRST attachment's scheduled callback so only
+  -- the LATEST attachment's validate fires. Without the generation
+  -- guard, both callbacks run _validate — the stale one can write
+  -- diagnostics reflecting outdated buffer state. Assert exactly
+  -- one vim.diagnostic.set call from the scheduled callbacks by
+  -- counting via a thin wrapper.
+  do
+    local reg_buf2 = vim.api.nvim_create_buf(false, true)
+    local automated_lines = {
+      "---",
+      'id: "2026-05-30-p41-reg-reattach"',
+      "version: 1",
+      'status: automated',
+      "title: stale-reattach regression",
+      "description: test fixture",
+      'created: "2026-05-30T00:00:00Z"',
+      'updated: "2026-05-30T00:00:00Z"',
+      'status_changed: "2026-05-30T00:00:00Z"',
+      "condition:",
+      "  - this is not a cron expression",
+      "execute:",
+      "  - do-something",
+      "---",
+      "",
+      "body",
+    }
+    vim.api.nvim_buf_set_lines(reg_buf2, 0, -1, false, automated_lines)
+    vim.api.nvim_buf_set_name(reg_buf2, todo_dir .. "/2026-05-30-p41-reg-reattach.md")
+
+    -- Wrap vim.diagnostic.set to count calls for this buffer.
+    local set_count = 0
+    local orig_set = vim.diagnostic.set
+    local function counting_set(ns, buf, diags, opts)
+      if buf == reg_buf2 and ns == diag.NS then
+        set_count = set_count + 1
+      end
+      return orig_set(ns, buf, diags, opts)
+    end
+    vim.diagnostic.set = counting_set
+
+    -- First attach: schedules callback with gen=N.
+    diag.attach(reg_buf2)
+    -- Immediately re-attach: bumps gen to N+1, replaces the prior
+    -- debouncer, schedules a NEW callback with gen=N+1.
+    diag.attach(reg_buf2)
+    -- Let the event loop run: both scheduled callbacks fire. The
+    -- gen guard must reject the first (stale gen=N), so only the
+    -- second (gen=N+1) runs _validate → exactly one diagnostic.set.
+    vim.wait(100, function() return set_count >= 1 end)
+    vim.diagnostic.set = orig_set
+
+    ok("p41: stale-reattach rejects old-gen callback (exactly one diagnostic.set)",
+      set_count == 1,
+      "got " .. set_count .. " diagnostic.set calls for reg_buf2")
+    local diags_reattach = vim.diagnostic.get(reg_buf2, { namespace = diag.NS })
+    ok("p41: stale-reattach leaves correct diagnostics (from latest attachment only)",
+      #diags_reattach >= 1,
+      "got " .. #diags_reattach .. " diagnostics")
+    pcall(vim.api.nvim_buf_delete, reg_buf2, { force = true })
+  end
 
   -- 41e. Refresh-side wiring (Phase 3 wires automation.validate
   -- into compute_errors). Create a malformed automated template

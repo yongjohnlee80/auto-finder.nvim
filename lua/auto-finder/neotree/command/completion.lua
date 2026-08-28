@@ -1,5 +1,17 @@
 local parser = require("auto-finder.neotree.command.parser")
 local utils = require("auto-finder.neotree.utils")
+local log = require("auto-finder.neotree.log")
+local core_git = require("auto-core.git")
+
+local GIT_FLOOR_ERROR = "Git 2.15+ required"
+local warned_git_floor = false
+
+local warn_git_floor = function(err)
+  if err == GIT_FLOOR_ERROR and not warned_git_floor then
+    warned_git_floor = true
+    log.warn(err)
+  end
+end
 
 local M = {
   show_key_value_completions = true,
@@ -36,16 +48,14 @@ end
 ---@return string references_string
 local get_ref_completions = function(key_prefix)
   key_prefix = key_prefix or ""
-  local completions = { key_prefix .. "HEAD" }
-  local ok, refs = utils.execute_command("git show-ref")
-  if not ok then
+  local refs, err = core_git.worktree.list_refs(vim.fn.getcwd())
+  if not refs or #refs == 0 then
+    warn_git_floor(err)
     return ""
   end
+  local completions = { key_prefix .. "HEAD" }
   for _, ref in ipairs(refs) do
-    local _, i = ref:find("refs%/%a+%/")
-    if i then
-      table.insert(completions, key_prefix .. ref:sub(i + 1))
-    end
+    table.insert(completions, key_prefix .. ref)
   end
 
   return table.concat(completions, "\n")

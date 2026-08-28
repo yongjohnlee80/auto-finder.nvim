@@ -6,8 +6,19 @@ local git_diff = require("auto-finder.neotree.git.diff")
 local events = require("auto-finder.neotree.events")
 local log = require("auto-finder.neotree.log")
 local parser = require("auto-finder.neotree.git.parser")
+local core_git = require("auto-core.git")
 local uv = vim.uv or vim.loop
 local co = coroutine
+
+local GIT_FLOOR_ERROR = "Git 2.15+ required"
+local warned_git_floor = false
+
+local warn_git_floor = function(err)
+  if err == GIT_FLOOR_ERROR and not warned_git_floor then
+    warned_git_floor = true
+    log.warn(err)
+  end
+end
 
 ---@type metatable
 local weak_kv = { __mode = "kv" }
@@ -107,7 +118,6 @@ end
 local raw_status_text_cache = setmetatable({}, weak_k)
 
 ---@alias (private) neotree.git._StatusPorcelainVersion
----|1
 ---|2
 ---|false
 
@@ -116,21 +126,11 @@ M._supported_status_porcelain_version = nil
 
 ---@return neotree.git._StatusPorcelainVersion highest_supported_porcelain_version_if_git
 local find_status_porcelain_version = function()
-  if not vim.fn.executable("git") == 1 then
-    log.debug("`git` not available")
+  if not core_git.version_at_least(2, 15) then
+    warn_git_floor(GIT_FLOOR_ERROR)
     return false
   end
-  local git_version_success, git_version_output = utils.execute_command({ "git", "--version" })
-  if not git_version_success then
-    log.warn("`git --version` failed")
-    return false
-  end
-  local version_output_str = table.concat(git_version_output, "\n")
-  local major_str, minor_str = version_output_str:match("(%d+)%.(%d+)")
-  local major, minor = tonumber(major_str), tonumber(minor_str)
-
-  local has_porcelain_v2 = major and major >= 2 and minor >= 12
-  return has_porcelain_v2 and 2 or 1
+  return 2
 end
 
 ---@return neotree.git._StatusPorcelainVersion highest_supported_porcelain_version_if_git
@@ -482,120 +482,52 @@ M.status_async = function(path, base_lookup, opts, callback)
   end)
 end
 
----@param path string
----@param stdout_lines string[]
----@return string[] normalized_stdout_paths
-local process_output = function(path, stdout_lines)
-  local lines = stdout_lines
-  for i, p in ipairs(stdout_lines) do
-    if #p == 0 then
-      lines[i] = nil
-    end
-
-    if utils.is_windows then
-      local drive, root, _ = utils.path_splitroot(p)
-      if drive ~= "" or root ~= "/" then
-        -- if a non-unix looking path on windows (i.e. not MSYS2), should be okay to convert to backslashes
-        lines[i] = utils.windowize_path(p)
-      end
-    end
+---@param path string?
+---@return string?
+local normalize_discovery_path = function(path)
+  if not path or not utils.is_windows then
+    return path
   end
-  return lines
-end
-
----Finds the worktree root, git root, and superproject worktree root by running 3 separate commands. Only necessary in
----the edge case that a path contains a newline.
----@param path string
----@param callback fun(worktree_root: string?, git_dir: string?, superproject_worktree_root: string?)? Async if provided.
----@return string? worktree_root
----@return string? git_dir
----@return string? superproject_worktree_root
-local find_worktree_info_slow = function(path, callback)
-  local base_args = {
-    "-C",
-    path,
-    "rev-parse",
-  }
-  ---@type string[][]
-  local argument_lists = {}
-  for _, arg in ipairs({
-    "--absolute-git-dir",
-    "--show-toplevel",
-    "--show-superproject_worktree_root",
-  }) do
-    local args = { unpack(base_args) }
-    args[#args + 1] = arg
-    argument_lists[#argument_lists + 1] = args
+  local drive, root = utils.path_splitroot(path)
+  if drive ~= "" or root ~= "/" then
+    return utils.windowize_path(path)
   end
-
-  local git_dir = vim.fn.system(git_cmd.with_args(argument_lists[1]))
-  local worktree_root = vim.fn.system(git_cmd.with_args(argument_lists[2]))
-  local superproject_worktree_root = vim.fn.system(git_cmd.with_args(argument_lists[3]))
-  local paths = { worktree_root, git_dir, superproject_worktree_root }
-  for i, p in ipairs(paths) do
-    if #p == 0 or vim.startswith(p, "fatal:") then
-      paths[i] = nil
-    elseif utils.is_windows then
-      paths[i] = utils.windowize_path(p)
-    end
-  end
-  if type(callback) == "function" then
-    vim.schedule(function()
-      callback(paths[1], paths[2], paths[3])
-    end)
-    return
-  end
-  return paths[1], paths[2], paths[3]
+  return path
 end
 
 ---Finds the worktree root and the corresponding git directory, already normalized.
 ---@param path string? Defaults to cwd.
 ---@param callback fun(worktree_root: string?, git_dir: string?, superproject_worktree_root: string?)? Async if provided.
----@return string? git_dir
 ---@return string? worktree_root
+---@return string? git_dir
 ---@return string? superproject_worktree_root
 M.find_worktree_info = function(path, callback)
   path = path or log.assert(uv.cwd())
-
-  if path:find("\n", 1, true) then
-    return find_worktree_info_slow(path, callback)
-  end
-
-  local rev_parse_cmd = git_cmd.with_args({
-    "-C",
-    path,
-    "rev-parse",
-
-    "--absolute-git-dir", -- the order is this because absolute-git-dir won't fail in the git dir, but show-toplevel will.
-    "--show-toplevel", -- stdout if in worktree, stderr if in git dir, nothing if neither
-    "--show-superproject-working-tree", -- stdout if in submodule, nothing if neither
-  })
-
   if callback then
     log.assert(type(callback) == "function", "callback for find_worktree_info should be a function")
-    utils.job(rev_parse_cmd, nil, function(code, stdout_chunks, stderr_chunks)
-      if code ~= 0 then
+    core_git.repo.discover_async(path, function(result)
+      if not result.ok then
+        warn_git_floor(result.error)
+        callback(nil, nil, nil)
         return
       end
-      local full_stdout = table.concat(stdout_chunks, "")
-      local stdout_lines = {}
-      for line in utils.gsplit_plain(full_stdout, "\n") do
-        stdout_lines[#stdout_lines + 1] = line
-      end
-      local info = process_output(path, stdout_lines)
-      local git_dir, worktree_root, superproject_worktree_root = unpack(info)
-      callback(worktree_root, git_dir, superproject_worktree_root)
+      callback(
+        normalize_discovery_path(result.worktree_root),
+        normalize_discovery_path(result.git_dir),
+        normalize_discovery_path(result.superproject_worktree_root)
+      )
     end)
     return
   end
 
-  local ok, rev_parse_lines = utils.execute_command(rev_parse_cmd)
-  if not ok then
+  local result = core_git.repo.discover(path)
+  if not result.ok then
+    warn_git_floor(result.error)
     return
   end
-  local info = process_output(path, rev_parse_lines)
-  local git_dir, worktree_root, superproject_worktree_root = unpack(info)
-  return worktree_root, git_dir, superproject_worktree_root
+  return normalize_discovery_path(result.worktree_root),
+    normalize_discovery_path(result.git_dir),
+    normalize_discovery_path(result.superproject_worktree_root)
 end
 
 ---@type table<string, string|false>

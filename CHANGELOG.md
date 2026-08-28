@@ -2,6 +2,24 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.7] — 2026-08-28 — hardened Git reads, deterministic smoke timing, diagnostics lifecycle hygiene
+
+- **ADR-0069 Git reads** — the bundled neo-tree fork now consumes
+  auto-core's hardened Git discovery/ref primitives, retires its four
+  blocking helper sites, preserves exactly-once async completion and legal
+  path bytes, and rejects unsupported Git before repository work begins.
+- **Smoke stability** — the metrics paint control deterministically flushes
+  the core file-event debounce before polling the actual paint postcondition;
+  the git-state isolation control drains the known trailing refresh window.
+- **Automation diagnostics lifecycle** — buffer-local autocmds live in a
+  separate augroup, initial validation is scheduled behind an attachment
+  generation guard, and teardown/rapid-reattach regressions prove stale
+  callbacks cannot recreate diagnostics.
+- **Known open issue** — `smoke-automation.lua` still terminates with signal
+  11 on the Codex runtime at the long-tracked malformed-template fixture.
+  This release keeps that suite isolated and the bug task open; the lifecycle
+  changes above are defensive hardening, not a claimed SEGFAULT fix.
+
 ## [Unreleased] — `state.section_buffers` stays a live alias across slot mutations
 
 `setup()` publishes `M.state.section_buffers` as a live alias of the

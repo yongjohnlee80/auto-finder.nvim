@@ -316,9 +316,9 @@ end
 ---
 ---This file used to own that itself. ADR-0040 Batch C moved commit/push off the
 ---UI thread here after a network-bound `git push` froze the editor — but the
----staging paths stayed on blocking `vim.fn.system` / `utils.execute_command`,
----so the hardening covered half the surface. Two owners meant two places to
----harden and they had already drifted. auto-core carries it now: `GIT_EDITOR`
+---staging paths stayed on blocking legacy helpers, so the hardening covered
+---half the write surface. ADR-0069 later retired `utils.execute_command`; other
+---direct git reads remain separately scoped. auto-core carries writes now: `GIT_EDITOR`
 ---pinned so no write can spawn an editor, credential prompting off so a push
 ---cannot hang, no read-only flag on a write, `restore --staged` with a
 ---pre-first-commit fallback, and no `--hard` reachable at all.

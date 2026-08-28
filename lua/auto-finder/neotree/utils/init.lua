@@ -213,20 +213,6 @@ M.tbl_equals = function(table1, table2)
   return true
 end
 
----@param cmd string|string[]
----@return boolean success
----@return string[] output_lines
-M.execute_command = function(cmd)
-  local result = vim.fn.systemlist(cmd)
-
-  -- An empty result is ok
-  if vim.v.shell_error ~= 0 or (#result > 0 and vim.startswith(result[1], "fatal:")) then
-    return false, {}
-  else
-    return true, result
-  end
-end
-
 M.find_buffer_by_name = function(name)
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     local buf_name = vim.api.nvim_buf_get_name(buf)

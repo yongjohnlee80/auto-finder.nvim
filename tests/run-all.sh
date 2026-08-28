@@ -175,6 +175,8 @@ SUITES=(
   "r1-lifecycle|tests/adr0060-r1-view-lifecycle.lua"
   # ADR-0065 P3 — review authoring: draft, identity slug, interim submit.
   "adr0065-p3|tests/adr0065-p3-submit.lua"
+  # ADR-0069 - semantic auto-core git-read call-site migration.
+  "adr0069-git-reads|tests/adr0069-git-reads.lua"
 )
 
 # The XDG contract binds EVERY runnable entrypoint, not only the ones

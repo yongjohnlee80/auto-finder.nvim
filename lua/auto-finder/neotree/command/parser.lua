@@ -1,6 +1,18 @@
 local uv = vim.uv or vim.loop
 local utils = require("auto-finder.neotree.utils")
 local _compat = require("auto-finder.neotree.utils._compat")
+local log = require("auto-finder.neotree.log")
+local core_git = require("auto-core.git")
+
+local GIT_FLOOR_ERROR = "Git 2.15+ required"
+local warned_git_floor = false
+
+local warn_git_floor = function(err)
+  if err == GIT_FLOOR_ERROR and not warned_git_floor then
+    warned_git_floor = true
+    log.warn(err)
+  end
+end
 
 ---@enum neotree.command.ParserArgument.Type
 local argtype = {
@@ -112,9 +124,22 @@ M.resolve_path = function(path, validate_type)
 end
 
 ---@param ref string
+---@return boolean
+---@return string?
 M.verify_git_ref = function(ref)
-  local ok, _ = utils.execute_command("git rev-parse --verify " .. ref)
-  return ok
+  local ok, err = core_git.log.rev_exists_at(vim.fn.getcwd(), ref)
+  warn_git_floor(err)
+  return ok, err
+end
+
+local invalid_ref = function(key, value)
+  local valid, err = M.verify_git_ref(value)
+  if not valid then
+    if err == GIT_FLOOR_ERROR then
+      error(err)
+    end
+    error("Invalid value for " .. key .. ": " .. value)
+  end
 end
 
 ---@class neotree.command.Parser.Parsed
@@ -146,9 +171,7 @@ local parse_arg = function(result, arg)
         error("Invalid value for " .. key .. ": " .. value)
       end
     elseif def.type == M.argtypes.REF then
-      if not M.verify_git_ref(value) then
-        error("Invalid value for " .. key .. ": " .. value)
-      end
+      invalid_ref(key, value)
       result[key] = value
     else
       result[key] = value
@@ -158,7 +181,8 @@ local parse_arg = function(result, arg)
     local key = M.reverse_lookup[value]
     if key == nil then
       -- maybe it's a git ref
-      if M.verify_git_ref(value) then
+      local valid_ref, ref_err = M.verify_git_ref(value)
+      if valid_ref then
         result.git_base = value
         return
       end
@@ -171,6 +195,8 @@ local parse_arg = function(result, arg)
         elseif stat.type == "file" then
           result["reveal_file"] = path
         end
+      elseif ref_err == GIT_FLOOR_ERROR then
+        error(ref_err)
       else
         error("Invalid argument: " .. arg)
       end
