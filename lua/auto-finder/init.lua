@@ -1416,6 +1416,30 @@ function M._available_section_types()
   return out
 end
 
+---Record the active section WITHOUT opening a closed panel.
+---
+---`focus` (auto-core `Registry:focus` / `M.focus`) OPENS a closed panel,
+---so the startup / worktree-switch bookkeeping paths must not use it when
+---the panel is closed. This mirrors what a successful focus would leave
+---behind — the RESOLVED/CLAMPED section number in BOTH `state.section`
+---and `registry.active` — but without materializing a window. An
+---out-of-range or unknown key clamps to `default_section` (or 0), exactly
+---as `M.focus` does, so a stale persisted `last_section` can't leave the
+---two mirrors pointing at a slot that no longer exists.
+---@param key integer|string
+function M._record_active_section_closed(key)
+  if not M._registry then return end
+  local views = require("auto-finder.views")
+  local section = views.resolve(key)
+  if not section then
+    key = (M.state.config and M.state.config.default_section) or 0
+    section = views.resolve(key)
+  end
+  local num = section and section.number or key
+  M.state.section = num
+  M._registry.active = num
+end
+
 ---Rebuild the section registry from a new sections list. Disposes
 ---the existing auto-core registry, re-runs the auto-finder
 ---sections init, builds fresh section_defs, calls
@@ -1563,8 +1587,10 @@ function M._rebuild_section_registry(new_sections, opts)
   if M._registry.focus and (panel_open or not opts.no_force_open) then
     pcall(function() M._registry:focus(target) end)
   else
-    M._registry.active = target
-    M.state.section = target
+    -- Panel closed and the caller opted out of opening it: record the
+    -- active section without materializing a window. Route through the
+    -- helper so the resolve/clamp + both-mirror sync live in one place.
+    M._record_active_section_closed(target)
   end
 
   -- Defensive winbar refresh in case `focus` short-circuited
@@ -1642,9 +1668,11 @@ function M._reseed_sections_for_workspace()
         if panel_open then
           pcall(function() M.focus(per_ws_section) end)
         else
-          -- M.state.section is already per_ws_section (set above); just
-          -- align the registry so the next open focuses the right slot.
-          M._registry.active = per_ws_section
+          -- Record the target without opening. The helper resolves/clamps
+          -- `per_ws_section` (matching M.focus's clamp) so a stale
+          -- persisted last_section can't leave state.section /
+          -- registry.active holding a slot that no longer exists.
+          M._record_active_section_closed(per_ws_section)
         end
       end
       return
@@ -1675,8 +1703,14 @@ function M._drop_repos_bufnr_on_worktree_switched()
     pcall(repos_def.on_close, b)
   end
   M._registry._bufs[repos_def.number] = nil
-  -- Re-focus to remount immediately if repos is currently active.
-  if M._registry.active == repos_def.number then
+  -- Re-focus to remount immediately if repos is currently active — but
+  -- ONLY when the panel is already open. Registry:focus opens a closed
+  -- panel, and this fires on worktree:switched; a switch while the finder
+  -- is closed must not force it open (same rule as the workspace reseed).
+  -- The dropped cache remounts on the next explicit open.
+  local panel_open = M.state.panel_winid ~= nil
+    and vim.api.nvim_win_is_valid(M.state.panel_winid)
+  if panel_open and M._registry.active == repos_def.number then
     pcall(function() M._registry:focus(repos_def.number) end)
   end
 end

@@ -1879,6 +1879,7 @@ ok("panel starts closed", not panel_open())
 
 local _orig_persisted = _state_mod.get_sections_for(_wskey)
 local _orig_live = vim.list_extend({}, _af.state.config.sections)
+local _orig_last_section = _state_mod.get_last_section_for(_wskey)
 
 -- (a) SLOT LIST DIFFERS → the _rebuild_section_registry focus path.
 local _target = { "config", "files", "repos", "buffers" }
@@ -1901,14 +1902,73 @@ ok("(b) state.section adopts the per-workspace last_section",
    _af.state.section == 2)
 ok("(b) panel STILL closed after a same-list reseed", not panel_open())
 
+-- (c) A STALE persisted last_section must be CLAMPED (not mirrored raw)
+-- while the panel is closed — matching the clamp M.focus applied before
+-- this path stopped opening the panel. Otherwise state.section /
+-- registry.active hold an invalid slot until the next open.
+_state_mod.set_last_section_for(_wskey, 99) -- out of range
+_af.state.section = 0
+if _af._registry then _af._registry.active = 0 end
+_af._reseed_sections_for_workspace()
+local _default = _af.state.config.default_section or 0
+ok("(c) stale last_section clamped in state.section while closed",
+   _af.state.section == _default)
+ok("(c) stale last_section clamped in registry.active while closed",
+   _af._registry ~= nil and _af._registry.active == _default)
+ok("(c) panel STILL closed after a stale-section reseed", not panel_open())
+
 -- Restore so later sections see the live default composition.
 if _orig_persisted then
   _state_mod.set_sections_for(_wskey, _orig_persisted)
 else
   _state_mod.set_sections_for(_wskey, nil)
 end
-pcall(_state_mod.set_last_section_for, _wskey, nil)
+pcall(_state_mod.set_last_section_for, _wskey, _orig_last_section)
 _af._rebuild_section_registry(_orig_live)
+_af.close()
+end)
+
+-- ───────────────────────── 20c. worktree:switched drop-repos must not force-open a closed panel ────────────────────────
+--
+-- Second closed-panel gap (lector PR #13 r1, HIGH): the worktree:switched
+-- handler in core/init.lua schedules _reseed_sections_for_workspace()
+-- AND _drop_repos_bufnr_on_worktree_switched(). The latter drops the
+-- repos bufnr and then re-focuses repos "to remount immediately" if repos
+-- is active — but Registry:focus OPENS a closed panel, so a worktree
+-- switch while the finder is closed force-opened it. The remount must
+-- happen only when the panel is already open; a closed panel remounts on
+-- its next explicit open.
+print("\n[20c] worktree:switched drop-repos must not force-open a closed panel")
+section(function()
+local _af = require("auto-finder")
+local _core = require("auto-core")
+_core.git.worktree.set_workspace_root(vim.fn.getcwd())
+
+local function panel_open()
+  return _af.state.panel_winid ~= nil
+    and vim.api.nvim_win_is_valid(_af.state.panel_winid)
+end
+
+_af.close()
+ok("panel starts closed (20c)", not panel_open())
+
+-- repos is in the default section list; find its number and make it active.
+local _repos_num
+if _af._registry then
+  for _, s in ipairs(_af._registry.sections) do
+    if s.name == "repos" then _repos_num = s.number; break end
+  end
+end
+ok("repos section is registered", _repos_num ~= nil)
+if _repos_num == nil then return end
+
+_af.state.section = _repos_num
+_af._registry.active = _repos_num
+
+-- Fire the drop-repos bookkeeping directly (the composed handler path).
+_af._drop_repos_bufnr_on_worktree_switched()
+ok("panel STILL closed after drop-repos with repos active",
+   not panel_open())
 _af.close()
 end)
 
