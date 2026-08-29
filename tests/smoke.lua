@@ -1917,6 +1917,24 @@ ok("(c) stale last_section clamped in registry.active while closed",
    _af._registry ~= nil and _af._registry.active == _default)
 ok("(c) panel STILL closed after a stale-section reseed", not panel_open())
 
+-- (d) COLD-START EQUAL-AND-STALE: both mirrors already hold the SAME stale
+-- value (setup reads persisted last_section into state.section, then
+-- auto-core attach seeds registry.active from it). The clamp must STILL
+-- fire — gating it on `per_ws_section ~= registry.active` would skip it and
+-- leave both mirrors on a slot that no longer exists (lector PR#13 r2
+-- [MEDIUM]). NOTE: (c) above pre-set active=0, which forces the inequality
+-- and MASKS this boundary; here we set BOTH mirrors to the stale value so
+-- the equal-active path is actually exercised.
+_state_mod.set_last_section_for(_wskey, 99)
+_af.state.section = 99
+if _af._registry then _af._registry.active = 99 end
+_af._reseed_sections_for_workspace()
+ok("(d) equal-and-stale last_section clamped in state.section (closed)",
+   _af.state.section == _default)
+ok("(d) equal-and-stale last_section clamped in registry.active (closed)",
+   _af._registry ~= nil and _af._registry.active == _default)
+ok("(d) panel STILL closed after equal-and-stale reseed", not panel_open())
+
 -- Restore so later sections see the live default composition.
 if _orig_persisted then
   _state_mod.set_sections_for(_wskey, _orig_persisted)
