@@ -6,7 +6,7 @@
 
 local M = {}
 
-M.version = "0.4.8"
+M.version = "0.4.9"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
