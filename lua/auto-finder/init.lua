@@ -1430,12 +1430,12 @@ end
 function M._record_active_section_closed(key)
   if not M._registry then return end
   local views = require("auto-finder.views")
-  local section = views.resolve(key)
-  if not section then
-    key = (M.state.config and M.state.config.default_section) or 0
-    section = views.resolve(key)
-  end
-  local num = section and section.number or key
+  local default = (M.state.config and M.state.config.default_section) or 0
+  -- Resolve `key`; clamp to default_section when it doesn't resolve, exactly
+  -- as M.focus does. `num` is always a numeric section index — never the raw
+  -- (possibly string) `key` — so both mirrors stay integer-typed.
+  local section = views.resolve(key) or views.resolve(default)
+  local num = (section and section.number) or default
   M.state.section = num
   M._registry.active = num
 end
@@ -1652,26 +1652,31 @@ function M._reseed_sections_for_workspace()
       if current[i] ~= s then same = false; break end
     end
     if same then
-      -- Slot list unchanged. Re-focus the per-workspace
-      -- last_section if it differs from what's active — covers
-      -- the project1 → project2 hop where both projects share
-      -- the same slot composition but the user was on a
-      -- different slot in each. `M.focus`'s clamp handles a
-      -- stale value if the record is bad.
-      if per_ws_section ~= nil and M._registry
-          and per_ws_section ~= M._registry.active then
-        -- Same rule as the rebuild path below: `M.focus` opens a closed
-        -- panel (host.ensure_open), so at startup with the panel closed
-        -- we must only record the target, never force the panel open.
+      -- Slot list unchanged. Re-point to the per-workspace last_section —
+      -- covers the project1 → project2 hop where both projects share the
+      -- same slot composition but the user was on a different slot in each.
+      -- `focus` opens a closed panel (M.focus → host.ensure_open), so the
+      -- two panel states diverge:
+      if per_ws_section ~= nil and M._registry then
         local panel_open = M.state.panel_winid ~= nil
           and vim.api.nvim_win_is_valid(M.state.panel_winid)
         if panel_open then
-          pcall(function() M.focus(per_ws_section) end)
+          -- Open: re-focus only if it actually differs (avoids a redundant
+          -- refocus). M.focus clamps a stale record.
+          if per_ws_section ~= M._registry.active then
+            pcall(function() M.focus(per_ws_section) end)
+          end
         else
-          -- Record the target without opening. The helper resolves/clamps
-          -- `per_ws_section` (matching M.focus's clamp) so a stale
-          -- persisted last_section can't leave state.section /
-          -- registry.active holding a slot that no longer exists.
+          -- Closed: record the target WITHOUT opening, ALWAYS routing
+          -- through the clamp helper — never gated on
+          -- `per_ws_section ~= registry.active`. On a cold start BOTH
+          -- state.section and registry.active can already hold the same
+          -- STALE value (setup reads persisted last_section into
+          -- state.section; attach then seeds registry.active from it), so an
+          -- equality gate would skip the clamp and strand both mirrors on a
+          -- slot that no longer exists (lector PR#13 r2 [MEDIUM], smoke
+          -- [20b](d)). The helper resolves/clamps to default_section and is
+          -- idempotent when the value is already valid.
           M._record_active_section_closed(per_ws_section)
         end
       end
