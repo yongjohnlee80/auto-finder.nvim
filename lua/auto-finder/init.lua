@@ -242,6 +242,7 @@ function M.setup(user_opts)
       dbase_section.configure(cfg.dbase)
     end
   end
+  M._sync_dbase_host()
 
   -- v0.2.0 step 2/4: panel.user_width and panel.last_section now live
   -- in auto-core.state.namespace("auto-finder") with json persist —
@@ -1456,6 +1457,20 @@ end
 ---  without opening the panel (used by the workspace reseed so a fresh
 ---  no-arg launch doesn't pop the finder over the dashboard). When the
 ---  panel is already open, focus happens regardless.
+---_sync_dbase_host advertises (or withdraws) this plugin as a host for
+---autodb's drawer, based on whether the `dbase` section is currently in
+---the panel. autodb owns the drawer; auto-finder is one possible surface
+---for it (ADR-0078 §3.3).
+function M._sync_dbase_host()
+  local ok, dbase_section = pcall(require, "auto-finder.views.dbase")
+  if not ok or type(dbase_section.register) ~= "function" then return end
+  if require("auto-finder.views")._by_name["dbase"] then
+    dbase_section.register()
+  else
+    dbase_section.unregister()
+  end
+end
+
 function M._rebuild_section_registry(new_sections, opts)
   opts = opts or {}
   local cfg = M.state and M.state.config
@@ -1484,8 +1499,17 @@ function M._rebuild_section_registry(new_sections, opts)
     end
   end
 
-  -- Close + delete buffers ONLY for sections being removed.
+  -- Close + delete buffers ONLY for sections being removed. A removed
+  -- dbase also stops being a drawer host — its on_close releases the
+  -- mount, but the provider itself has to go or the next open would
+  -- still resolve to a section that is no longer in the panel.
   for number, s in pairs(removed_numbers) do
+    if s.name == "dbase" then
+      local dok, dbase_section = pcall(require, "auto-finder.views.dbase")
+      if dok and type(dbase_section.unregister) == "function" then
+        pcall(dbase_section.unregister)
+      end
+    end
     local b = M._registry._bufs and M._registry._bufs[number]
     if b and vim.api.nvim_buf_is_valid(b) then
       if s.on_close then pcall(s.on_close, b) end
@@ -1501,6 +1525,9 @@ function M._rebuild_section_registry(new_sections, opts)
   -- because the section module's `_bufnr` was preserved.
   cfg.sections = new_sections
   require("auto-finder.views").setup(new_sections, cfg.view_modules or cfg.section_modules)
+  -- A dbase that just ARRIVED (slot add / workspace change) advertises
+  -- itself now, without waiting to be focused.
+  M._sync_dbase_host()
 
   local sections_list = require("auto-finder.views").enabled()
   local section_defs  = {}

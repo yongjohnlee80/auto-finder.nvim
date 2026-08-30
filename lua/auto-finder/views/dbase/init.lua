@@ -150,11 +150,31 @@ M.provider = {
 
 ---register wires this section into autodb's drawer host registry.
 ---Safe to call repeatedly: same-id registration replaces.
+---
+---Called when the section is CONFIGURED (setup, or a slot add), not when
+---it is first focused. Registering on focus meant `drawer_open` before
+---anyone had visited the section chose autodb's fallback panel even
+---though auto-finder was right there to host it (lector impl-r0 MF1).
 function M.register()
   local d = _drawer()
   if not d then return false end
   local ok = d.register_host(M.provider)
   return ok and true or false
+end
+
+---unregister withdraws this section as a drawer host.
+---
+---Called when the section is REMOVED from the panel (a slot remove or a
+---workspace change), never on an ordinary panel close: closing the panel
+---releases the mount but auto-finder is still a perfectly good host for
+---the next open. Without this, a removed section stayed a candidate and
+---the next `drawer_open` failed against a section that no longer exists
+---instead of falling back to autodb (lector impl-r0 MF1).
+function M.unregister()
+  local d = _drawer()
+  if not d then return end
+  d.unregister_host(PROVIDER_ID)
+  M._view, M._release = nil, nil
 end
 
 ---The section registry caches the first valid buffer and calls this ONCE.
@@ -163,7 +183,9 @@ end
 function M.get_buffer(panel_winid)
   -- Focused directly (`:AutoFinderFocus dbase`) rather than through
   -- `drawer_open`: ask the registry to mount here, which resolves to
-  -- this provider and hands us a view.
+  -- this provider and hands us a view. Registration normally happens at
+  -- setup/slot-add (see M.register); this is the safety net for a
+  -- consumer driving views without going through auto-finder.setup.
   if not M._view and _available() then
     M.register()
     pcall(function() _drawer().open() end)
