@@ -33,7 +33,7 @@ Last verified: **2026-08-23**, `tests/run-all.sh` → **OK**, 9 suites,
 
 | suite | file | assertions | defends | status |
 |---|---|---:|---|---|
-| smoke | `smoke.lua` | 672 | the whole panel/section/view/state surface — setup, width/pin, winfixbuf, section switching, store+namespace migration, buffers/repos/marks slots, live-refresh wiring, log wrapper, follow-mode, ADR-0026 core refactor (phases 1-9), views.todos + automation panel rendering, ADR-0040 restore/async-git, ADR-0059 files:changed classification, views._config_section, views.dbase.tree, dbase slot delegation | live |
+| smoke | `smoke.lua` | 672 | the whole panel/section/view/state surface — setup, width/pin, winfixbuf, section switching, store+namespace migration, buffers/repos/marks slots, live-refresh wiring, log wrapper, follow-mode, ADR-0026 core refactor (phases 1-9), views.todos + automation panel rendering, ADR-0040 restore/async-git, ADR-0059 files:changed classification, views._config_section, dbase facade (the renderer itself moved to autodb — ADR-0078) | live |
 | smoke_automation | `smoke-automation.lua` | 36 | ADR-0035 [41] automation diagnostics (malformed-cron/execute diagnostics, lifecycle guards, bash-disabled indicator) + [42] `s`-modal scaffold on `automated` promotion | live (isolated, natural headless geometry — see below) |
 | smoke_adr0044 | `smoke-adr0044.lua` | 6 | ADR-0044 [45] `worktree:switched` re-anchors the panel tree to the new cwd WITHOUT displacing a non-panel editor split | live (isolated) |
 | adr0048 | `smoke-adr0048.lua` | 146 | ADR-0048 Phase 3 [46] views.tests (auto-run discovery consumer), [47] views.debug (entry points/sessions/breakpoints + secret masking), [48] r5 Env section | live (isolated — canonical home for [46]/[47]) |
@@ -70,11 +70,16 @@ and non-monotonic in source order; they are labels, not an ordering.)
   requires (classification: kind+visibility → skip/redraw/scan).
 - `[48]` — views._config_section: launch-config kind filter, select,
   masked expand (env secret never reaches the buffer).
-- `[49]` — views.dbase.tree (autodb explorer): mounts without autodb,
+- `[49]` — RETIRED by ADR-0078: the renderer moved to
+  `autodb.views.drawer`, and its coverage moved with it to autodb's own
+  suite (§[18]). What stays here is the FACADE — the placeholder path
+  and release-driven teardown. Formerly: mounts without autodb,
   scratch-buffer contract, keymap vocabulary, **toggle state**
   (reimplemented 2026-08-23 — see below).
-- `[50 ADR-0058-M7]` — dbase slot delegates by availability (autodb
-  present → autodb view; absent → dbee remains in charge).
+- `[50 ADR-0058-M7]` — RETIRED in v0.4.0. It asserted a delegation
+  between two backends ("absent → dbee remains in charge"); dbee is gone
+  and there is only autodb, so with autodb absent the slot renders its
+  own placeholder (asserted in `[35] A16`).
 
 ### Durable silent-truncation guards added 2026-08-23
 

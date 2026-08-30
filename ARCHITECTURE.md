@@ -50,7 +50,7 @@ lua/auto-finder/
 │   ├── files/init.lua        neo-tree filesystem source wrapper
 │   ├── buffers/init.lua      neo-tree buffers source wrapper
 │   ├── repos/init.lua        auto-finder-repos source wrapper
-│   └── dbase/                nvim-dbee drawer wrapper (multi-file: init, setup, events, layout, files)
+│   └── dbase/init.lua        facade over autodb's drawer (ADR-0078)
 │
 ├── sections/                 backwards-compat facade (one-liners → views/*)
 │
@@ -139,7 +139,7 @@ flowchart TB
         VFILES["files/<br/>filesystem"]
         VBUF["buffers/<br/>open buffers"]
         VREPOS["repos/<br/>git worktrees"]
-        VDBASE["dbase/<br/>nvim-dbee drawer<br/>(placeholder mount)"]
+        VDBASE["dbase/<br/>autodb drawer<br/>(host provider)"]
 
         VREG -.loads.-> VCONFIG
         VREG -.loads.-> VFILES
@@ -293,7 +293,7 @@ repo registry, worktree state. Subscribes to auto-core events on
 | `files` | `shared.neotree.build_section({ source = "filesystem" })` | Live-refresh via `auto-finder.core.files:changed`. Synchronous mount (see `views/` notes below). |
 | `buffers` | `shared.neotree.build_section({ source = "buffers", core_refresh_topic = "auto-finder.core.buffers:changed" })` | Buf*-event-driven refresh. |
 | `repos` | `shared.neotree.build_section({ source = "auto-finder-repos", core_refresh_topic = "auto-finder.core.repos:changed" })` | Refresh on worktree switch. |
-| `dbase` | Bespoke multi-file (`init`, `setup`, `events`, `layout`, `files`) | **Uses the placeholder mount pattern** — `get_buffer` returns a `shared.loading.buffer` synchronously; `on_focus` defers `dbee.setup` + `drawer_show` via `vim.schedule` behind the five-guard `_still_current` predicate. Only view doing this; see ADR §A16. |
+| `dbase` | Facade over `autodb.views.drawer` (ADR-0078) | Registers a **host provider** with autodb's drawer registry and mounts the view the registry hands it; autodb constructs and disposes it. `get_buffer` returns a real buffer synchronously, so there is no placeholder mount. With autodb absent, renders a self-explaining placeholder instead. `on_close` calls the registry's `release`. |
 
 The five-guard `_still_current` predicate (ADR §2.3) lives in
 `shared/neotree.lua`'s `build_section` as scaffolding —
@@ -381,9 +381,9 @@ sequenceDiagram
     NEO->>VIEW: manager.refresh(source)
     SHNEO-->>ACEVT: publish auto-finder.core.metrics:paint<br/>{ view, dur_ms, generation }
 
-    %% ── dbase placeholder mount ──
-    Note over DBASE: get_buffer → placeholder<br/>on_focus → vim.schedule → five-guard check<br/>→ dbee.setup → events.attach → drawer_show
-    DBASE-->>ACEVT: dbase.connection:changed / dbase.call:* (forwarded from dbee)
+    %% ── dbase: autodb's drawer, hosted here ──
+    Note over DBASE: registers a host provider with autodb<br/>mount(view, release) → view:get_buffer(winid)<br/>on_close → release() → autodb disposes the view
+    ACEVT-->>DBASE: dbase.connection:changed (published by autodb)
 ```
 
 ### Topics published by `core/` (auto-finder-private)
@@ -793,43 +793,20 @@ These watchers honor the events lifecycle convention — they're
 armed inside `ensure_started`'s handle table so a bus reset
 re-arms them on the next `M.open` / `M.focus`.
 
-### 6. dbase view events (forwarded from nvim-dbee)
+### 6. dbase view events (published by autodb)
 
-The dbase view runs a separate event bridge for `nvim-dbee`'s
-own handler events. These are app-level events (database
-connection changed, query lifecycle), not OS-level event sources.
+The dbee event bridge that used to live here (`views/dbase/events.lua`)
+was deleted with nvim-dbee in v0.4.0. There is nothing to forward now:
+**autodb publishes `dbase.connection:changed` to auto-core itself**
+(`autodb/lua/autodb/session.lua`), and this plugin is a subscriber like
+any other.
 
-**Detection — `dbee.api.core.register_event_listener`:**
-
-- `current_connection_changed { conn_id }`
-- `call_state_changed { call = { id, query, state,
-  time_taken_us, timestamp_us, error } }`
-
-**Translation — `views/dbase/events.lua::attach`:**
-
-```
-dbee current_connection_changed { conn_id }
-   │
-   ├─ publish dbase.connection:changed { id }
-   └─ log.notifyIf("dbase.connection.changed", "active connection → "..id)
-
-dbee call_state_changed { call }
-   │
-   ├─ publish dbase.call:state_changed { call_id, conn_id, to }  (always)
-   │
-   └─ terminal-state derived topics:
-       state == "executing"     → publish dbase.call:started { call_id, conn_id, query }
-       state == "archived"      → publish dbase.call:completed { call_id, conn_id, duration_ms }
-       state ∈ executing_failed
-              retrieving_failed
-              archive_failed
-              canceled          → publish dbase.call:failed { call_id, conn_id, err }
-```
-
-The bridge is one-way: dbee → auto-finder. dbee's
-`register_event_listener` is append-only (no unregister hook),
-so the bridge tracks `M._attached` to prevent re-binding on
-section remount.
+The topic KEY is a stable cross-plugin contract and was deliberately kept
+across the backend change, so consumers written against the dbee era keep
+working. The sibling `dbase.call:*` / `dbase.result:shown` topics remain
+registered in auto-core but currently have **no publisher** — the bridge
+that emitted them is gone and autodb does not yet surface per-call
+lifecycle; they are reserved for it.
 
 ### 7. Section / view-switch events (panel-internal)
 

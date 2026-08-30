@@ -4,9 +4,10 @@
 ---prompts stay inside the admin REPL (no `vim.fn.input()` popping
 ---a separate cmdline at the bottom of the editor).
 ---
----Used by:
----  dbase conn add  (name / type / url)
----  dbase load      (interactive pick when name omitted)
+---Used by: any multi-step admin prompt. (The `dbase conn add` / `dbase load`
+---flows it was written for went away with the connection vault in v0.4.0 --
+---autodb owns connection storage now -- but the step runner is general and
+---the panel's <C-c> abort path still depends on it.)
 ---
 ---Lifecycle:
 ---  start(spec, emit)   render banner + first prompt
