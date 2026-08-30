@@ -1461,13 +1461,26 @@ end
 ---autodb's drawer, based on whether the `dbase` section is currently in
 ---the panel. autodb owns the drawer; auto-finder is one possible surface
 ---for it (ADR-0078 §3.3).
+---
+---**Edge-triggered, deliberately.** Re-registering an already-registered
+---provider is not free: autodb's same-id rule tears the mounted owner
+---down so a replacement can never inherit an instance built from the
+---previous profile. Calling this on every rebuild therefore disposed and
+---remounted a LIVE drawer whenever an unrelated slot changed, breaking
+---the survivor-buffer guarantee this function sits inside (lector
+---impl-r1). So it fires only on the transitions: absent -> present
+---registers, present -> absent unregisters, and no change does nothing.
+M._dbase_host_registered = false
 function M._sync_dbase_host()
   local ok, dbase_section = pcall(require, "auto-finder.views.dbase")
   if not ok or type(dbase_section.register) ~= "function" then return end
-  if require("auto-finder.views")._by_name["dbase"] then
-    dbase_section.register()
+  local present = require("auto-finder.views")._by_name["dbase"] ~= nil
+  if present == M._dbase_host_registered then return end
+  if present then
+    M._dbase_host_registered = dbase_section.register() and true or false
   else
     dbase_section.unregister()
+    M._dbase_host_registered = false
   end
 end
 
@@ -1500,16 +1513,10 @@ function M._rebuild_section_registry(new_sections, opts)
   end
 
   -- Close + delete buffers ONLY for sections being removed. A removed
-  -- dbase also stops being a drawer host — its on_close releases the
-  -- mount, but the provider itself has to go or the next open would
-  -- still resolve to a section that is no longer in the panel.
+  -- dbase also stops being a drawer host, but that is handled by the
+  -- edge-triggered _sync_dbase_host below, once the new section list is
+  -- in place — doing it here too would put the edge flag out of step.
   for number, s in pairs(removed_numbers) do
-    if s.name == "dbase" then
-      local dok, dbase_section = pcall(require, "auto-finder.views.dbase")
-      if dok and type(dbase_section.unregister) == "function" then
-        pcall(dbase_section.unregister)
-      end
-    end
     local b = M._registry._bufs and M._registry._bufs[number]
     if b and vim.api.nvim_buf_is_valid(b) then
       if s.on_close then pcall(s.on_close, b) end
