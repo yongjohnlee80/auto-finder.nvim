@@ -120,12 +120,10 @@ M.defaults = {
   -- `auto-finder.sections.dbase` via `section.configure(opts)` on setup so the
   -- consumer doesn't need to live-import the section module.
   --
-  -- Empty since v0.4.0. This used to carry dbee's `sources` (a list of dbee
-  -- Source instances) and an `extra` passthrough merged into `dbee.setup`.
-  -- nvim-dbee was retired (ADR-0063 / roadmap M8) and autodb owns connection
-  -- storage, users and encryption on its own backend, so there is nothing left
-  -- to forward. Kept as a table rather than deleted so the registry's
-  -- config-forwarding path and any consumer passing `dbase = {}` keep working.
+  -- Empty since v0.4.0: autodb owns connection storage, users and encryption
+  -- on its own backend, so there is nothing for this plugin to forward. Kept
+  -- as a table rather than deleted so the registry's config-forwarding path
+  -- and any consumer passing `dbase = {}` keep working.
   dbase = {},
   hijack_directories = true,
   -- Forwarded as-is to `require("auto-finder.neotree").setup()`

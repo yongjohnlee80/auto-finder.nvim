@@ -607,8 +607,10 @@ string arg of ANY logger method call — including
 `logger.notifyIf(event_name, msg, opts)`. The first arg to
 `notifyIf` is an EVENT name (subject to a different scheme,
 typically `dbase.connection.changed` etc.), not a component
-tag. Three false-positive violations from `views/dbase/events.lua`'s
-notifyIf calls.
+tag. Three false-positive violations came from the dbee event bridge's
+notifyIf calls (`views/dbase/events.lua`, deleted with nvim-dbee in
+v0.4.0 — the finding is kept because the RULE it established still
+applies to any notifyIf caller).
 
 **Remediation.** Restrict the grep to LEVEL functions only
 (error/warn/info/debug/trace). Lua patterns lack alternation,
@@ -629,7 +631,9 @@ failed; the fix is the same as F8.1's remediation.
 (Phase 7 baseline 399/0 + 9 new Phase 8 asserts — 3 for
 debounce semantics, 1 for A9 (vim.notify grep), 1 for A10
 (component-tag grep), 4 for the dbase tag migration smokes —
-minus 3 dbase event-name false positives the F8.3 fix removed.)
+minus 3 dbase event-name false positives the F8.3 fix removed. The
+files those three came from were deleted with nvim-dbee in v0.4.0; the
+counts are left as the historical record of that audit.)
 
 ---
 
