@@ -162,6 +162,19 @@ function M.register()
   return ok and true or false
 end
 
+---is_registered asks AUTODB whether this provider is advertised.
+---
+---The registry is the single source of truth; keeping a boolean here (or
+---in auto-finder.init) is a second copy that goes stale the moment any
+---other entry point registers — which is exactly what the late-load
+---safety net in get_buffer does (lector impl-r2 MF1).
+---@return boolean
+function M.is_registered()
+  local d = _drawer()
+  if not d or type(d.has_host) ~= "function" then return false end
+  return d.has_host(PROVIDER_ID) == true
+end
+
 ---unregister withdraws this section as a drawer host.
 ---
 ---Called when the section is REMOVED from the panel (a slot remove or a
