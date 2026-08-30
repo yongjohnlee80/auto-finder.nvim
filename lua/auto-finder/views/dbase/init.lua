@@ -1,48 +1,52 @@
 ---Section — dbase (autodb).
 ---
----A thin delegation to `auto-finder.views.dbase.tree`, autodb's renderer.
+---A thin facade over **autodb's** drawer, which lives in autodb since
+---ADR-0078: the renderer reads only `autodb.session`, so autodb owns it,
+---and moving it there is what lets autodb show a drawer when installed
+---without auto-finder. This file keeps everything that is auto-finder's:
+---the availability gate, the placeholder screen, owned-buffer accounting
+---and unconditional teardown.
+---
+---**This section does not construct the view.** It registers a host
+---PROVIDER with autodb's drawer host registry and mounts the instance
+---the registry hands to `mount` (ADR-0078 §3.3): the registry is the
+---sole constructor and sole disposer, which is what makes "at most one
+---mounted drawer" enforceable in one place rather than trusted to every
+---host. Teardown here therefore calls the `release` it was given rather
+---than disposing the view itself — without that, autodb would still
+---believe the drawer was mounted and the next open would focus a dead
+---surface.
+---
+---The `view_modules` hook is deliberately NOT how this is wired: it
+---replaces the whole module for a section, which would bypass this
+---facade's placeholder and teardown.
 ---
 ---nvim-dbee was retired here in AutoVim v0.4.0 (ADR-0063 / autodb roadmap M8).
----It is **not a fallback** and is not maintained: AutoVim no longer declares,
----installs or updates it, and every dbee module under this directory
----(`setup`, `layout`, `events`, `files`, `vault`, `encrypted_source`, `crypto`)
----was deleted with it. Do not reintroduce a second backend here without
----restoring the ownership latch that went with it — see the note below.
----
----What went away, and why this file is now ~1/3 its former size: dbee mounted
----asynchronously (`dbee.setup` + `drawer_show` behind a deferred schedule), so
----this section needed a placeholder buffer, a generation guard against a stale
----deferred mount, a remount notification to auto-core's section registry, a
----keymap override to fix dbee's `<CR>`, and an implementation-ownership latch
----so a dbee-built buffer could never be handed to autodb (ADR-0060 r1 MF6 /
----r2 #3). autodb's `tree.get_buffer` returns a real buffer synchronously, so
----none of that is needed. `impl_latch` itself survives — the repos slot still
----has two implementations and uses it.
+---It is **not a fallback** and is not maintained. Do not reintroduce a
+---second backend here without restoring the ownership latch that went
+---with it (ADR-0060 r1 MF6 / r2 #3).
 ---
 ---@module 'auto-finder.views.dbase'
 
 local host = require("auto-finder.panel.host")
 
----autodb's renderer WITHOUT the availability gate.
----
----Teardown must not depend on whether the backend is still MOUNTABLE: this
----section may have mounted autodb earlier in the session and must dispose its
----subscriptions and named buffer even after it stops advertising itself
----(ADR-0060 r2 #3). That asymmetry is the only reason two probes remain.
-local function _autodb_view_unchecked()
-  local ok, tree = pcall(require, "auto-finder.views.dbase.tree")
-  if ok then
-    return tree
-  end
+local PROVIDER_ID = "auto-finder"
+-- Above autodb's self-host (priority 0): when auto-finder is present and
+-- the dbase section is enabled, this is where the drawer belongs.
+local PRIORITY = 100
+
+---autodb's drawer module, or nil when autodb is not installed.
+local function _drawer()
+  local ok, d = pcall(require, "autodb.views.drawer")
+  if ok then return d end
   return nil
 end
 
 ---The availability-GATED probe, which decides whether we mount at all.
-local function _autodb_view()
-  if not pcall(require, "autodb.session") then
-    return nil
-  end
-  return _autodb_view_unchecked()
+---A drawer module with no session module behind it is not usable.
+local function _available()
+  if not pcall(require, "autodb.session") then return false end
+  return _drawer() ~= nil
 end
 
 local M = {
@@ -50,14 +54,19 @@ local M = {
   description = "autodb explorer",
   _bufnr = nil,
   _owned_bufs = {},
+  -- The instance the host registry handed us, and the release that ends
+  -- our ownership of it. Never constructed here.
+  _view = nil,
+  _release = nil,
 }
 
----A small screen shown in the panel when no database backend is available,
----so the section stays selectable and explains itself instead of silently
----no-op'ing.
+---A small screen shown in the panel when no database backend is
+---available, so the section stays selectable and explains itself
+---instead of silently no-op'ing.
 ---
----It names **autodb**, not dbee: dbee is deliberately gone, so pointing the
----user at it would send them to a dependency AutoVim removed on purpose.
+---It names **autodb**, not dbee: dbee is deliberately gone, so pointing
+---the user at it would send them to a dependency AutoVim removed on
+---purpose.
 ---@param panel_winid integer
 ---@param reason string?
 ---@return integer bufnr
@@ -88,13 +97,79 @@ local function placeholder_buffer(panel_winid, reason)
   return bufnr
 end
 
+-- ─── the host provider (ADR-0078 §3.3) ────────────────────────
+
+---The profile is auto-finder's identity, frozen before the buffer
+---exists. It reproduces exactly what this section produced before the
+---move — the smoke suite asserts all three, and that is the regression
+---gate on the whole change.
+M.profile = {
+  filetype      = "auto-finder",
+  buf_var       = "auto_finder_view",
+  buf_var_value = "dbase",
+  buf_name      = "auto-finder://dbase",
+  editor_target_winid = function()
+    local ok, af = pcall(require, "auto-finder")
+    if ok and af._editor_target_winid then return af._editor_target_winid() end
+    return nil
+  end,
+}
+
+M.provider = {
+  id = PROVIDER_ID,
+  priority = PRIORITY,
+  profile = M.profile,
+  available = _available,
+
+  ---mount accepts the registry-built view and shows it in our panel.
+  ---@param view any
+  ---@param release fun()
+  ---@return integer? winid
+  mount = function(view, release)
+    M._view, M._release = view, release
+    local ok = pcall(function() require("auto-finder").focus("dbase") end)
+    if not ok then return nil end
+    local p = require("auto-core").ui.panel.get(PROVIDER_ID)
+    return p and p.winid or nil
+  end,
+
+  ---@return integer? winid
+  focus = function()
+    local ok = pcall(function() require("auto-finder").focus("dbase") end)
+    if not ok then return nil end
+    local p = require("auto-core").ui.panel.get(PROVIDER_ID)
+    return p and p.winid or nil
+  end,
+
+  ---close is OUR surface teardown. The registry disposes the view, so
+  ---this must not call release back at it.
+  close = function()
+    M._view, M._release = nil, nil
+  end,
+}
+
+---register wires this section into autodb's drawer host registry.
+---Safe to call repeatedly: same-id registration replaces.
+function M.register()
+  local d = _drawer()
+  if not d then return false end
+  local ok = d.register_host(M.provider)
+  return ok and true or false
+end
+
 ---The section registry caches the first valid buffer and calls this ONCE.
 ---@param panel_winid integer
 ---@return integer bufnr
 function M.get_buffer(panel_winid)
-  local autodb_view = M._autodb_for_tests()
-  if autodb_view then
-    M._bufnr = autodb_view.get_buffer(panel_winid)
+  -- Focused directly (`:AutoFinderFocus dbase`) rather than through
+  -- `drawer_open`: ask the registry to mount here, which resolves to
+  -- this provider and hands us a view.
+  if not M._view and _available() then
+    M.register()
+    pcall(function() _drawer().open() end)
+  end
+  if M._view then
+    M._bufnr = M._view:get_buffer(panel_winid)
     return M._bufnr
   end
   M._bufnr = placeholder_buffer(panel_winid, "autodb is not installed")
@@ -105,9 +180,8 @@ end
 ---@param panel_winid integer
 ---@param bufnr integer
 function M.on_focus(panel_winid, bufnr)
-  local autodb_view = M._autodb_for_tests()
-  if autodb_view and autodb_view.on_focus then
-    pcall(autodb_view.on_focus, panel_winid, bufnr)
+  if M._view then
+    pcall(function() M._view:on_focus(panel_winid, bufnr) end)
   end
 end
 
@@ -120,13 +194,18 @@ function M.configure(opts)
   M._setup_opts = opts
 end
 
----Drop the cached bufnr so the next focus remounts cleanly, and tear down the
----backend UNCONDITIONALLY — see `_autodb_view_unchecked`.
+---Drop the cached bufnr and RELEASE the drawer.
+---
+---Teardown must not depend on whether the backend is still MOUNTABLE:
+---this section may have mounted autodb earlier in the session and must
+---let go even after autodb stops advertising itself (ADR-0060 r2 #3).
+---`release()` is what tells autodb's host registry the surface is gone,
+---so it disposes the view and drops its owner pointer; without it the
+---next open would focus a dead surface (ADR-0078 §3.5).
 function M.on_close()
-  local autodb_view = M._unchecked_for_tests()
-  if autodb_view and autodb_view.on_close then
-    pcall(autodb_view.on_close)
-  end
+  local release = M._release
+  M._view, M._release = nil, nil
+  if release then pcall(release) end
   for bufnr in pairs(M._owned_bufs) do
     if vim.api.nvim_buf_is_valid(bufnr) then
       pcall(vim.api.nvim_buf_delete, bufnr, { force = true })
@@ -136,10 +215,8 @@ function M.on_close()
   M._owned_bufs = {}
 end
 
----Test seams. `_autodb_for_tests` is the availability-GATED probe that decides
----MOUNTS; `_unchecked_for_tests` drives TEARDOWN. Kept separate so a test can
----prove that distinction without monkey-patching `require` (ADR-0060 r2 #3).
-M._autodb_for_tests = _autodb_view
-M._unchecked_for_tests = _autodb_view_unchecked
+---Test seams.
+M._available_for_tests = _available
+M._drawer_for_tests = _drawer
 
 return M

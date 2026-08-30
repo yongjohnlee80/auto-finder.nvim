@@ -6268,72 +6268,30 @@ section(function()
   vim.fn.delete(repo, "rf")
 end)
 
-print("\n[49] ADR-0058 M7 — views.dbase.tree (autodb explorer)")
-section(function()
-  local tree = require("auto-finder.views.dbase.tree")
-  tree._reset_for_tests()
-
-  -- The panel must MOUNT with autodb absent. A missing optional
-  -- dependency is a normal state to render, not a reason to fail.
-  local buf = tree.get_buffer(nil)
-  ok("p49: mounts without autodb installed", buf and vim.api.nvim_buf_is_valid(buf), buf)
-  ok("p49: the buffer is a scratch panel buffer",
-    vim.bo[buf].buftype == "nofile" and vim.bo[buf].swapfile == false
-    and vim.bo[buf].modifiable == false)
-  ok("p49: it is stamped as the dbase view", vim.b[buf].auto_finder_view == "dbase")
-
-  local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-  local joined = table.concat(lines, "\n")
-  ok("p49: it explains that autodb is missing rather than rendering empty",
-    joined:find("autodb", 1, true) ~= nil, vim.inspect(lines))
-  ok("p49: rows are parallel to lines", tree._rows and #tree._rows == #lines,
-    tostring(tree._rows and #tree._rows) .. " vs " .. #lines)
-
-  -- Keymaps are bound to the BUFFER, so they cannot leak into the
-  -- editor area.
-  local maps = {}
-  for _, m in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do maps[m.lhs] = true end
-  ok("p49: the auto-finder vocabulary is bound (<CR>, o, i, R, ?)",
-    maps["<CR>"] and maps["o"] and maps["i"] and maps["R"] and maps["?"],
-    vim.inspect(vim.tbl_keys(maps)))
-  ok("p49: h and l are NOT bound — they stay ordinary cursor motions",
-    maps["h"] == nil and maps["l"] == nil)
-
-  -- Toggling is pure state: it must not require a live session.
-  -- REIMPLEMENT (2026-08-23): _toggle now decides container-ness from
-  -- the row's `expandable` flag (set on every chevron row, tree.lua
-  -- ~L230), not from `kind`. A real container row therefore carries
-  -- expandable = true; leaves omit it. The invariant is unchanged —
-  -- containers toggle expanded/collapsed and collapsing invalidates
-  -- the node so a re-expand refetches — only the row shape moved.
-  tree._expanded = {}
-  local container_row = { kind = "workspace", id = "ws:1", expandable = true }
-  local toggled = tree._toggle_for_tests(container_row)
-  ok("p49: a container toggles open", toggled == true and tree._expanded["ws:1"] == true)
-  tree._cache["ws:1"] = { items = { { id = 9 } } }
-  tree._toggle_for_tests(container_row)
-  ok("p49: collapsing clears the node so re-expanding refetches",
-    tree._expanded["ws:1"] == nil and tree._cache["ws:1"] == nil)
-  ok("p49: a leaf row does not toggle",
-    tree._toggle_for_tests({ kind = "table", id = "t:1" }) == false)
-  -- A nil/invalid row is a no-op: _toggle guards `if not row ... return
-  -- false`, so it returns false (was nil in the pre-guard surface).
-  ok("p49: a nil row is safe", tree._toggle_for_tests(nil) == false)
-
-  -- invalidate() is what a reconnect uses: everything, or one node.
-  tree._cache = { root = { items = {} }, ["ws:2"] = { items = {} } }
-  tree.invalidate("ws:2")
-  ok("p49: invalidate(id) drops one node",
-    tree._cache.root ~= nil and tree._cache["ws:2"] == nil)
-  tree.invalidate(nil)
-  ok("p49: invalidate() drops everything", next(tree._cache) == nil)
-
-  tree.on_close()
-  ok("p49: on_close releases the buffer and rows",
-    tree._bufnr == nil and tree._rows == nil)
-  tree._reset_for_tests()
-end)
-
+-- [49] "ADR-0058 M7 — views.dbase.tree (autodb explorer)" was removed here in
+-- ADR-0078. It drove the renderer directly, and the renderer no longer lives in
+-- this plugin: it moved to `autodb.views.drawer`, because it reads only
+-- `autodb.session` and autodb needs it to show a drawer when installed WITHOUT
+-- auto-finder.
+--
+-- Its assertions did not survive the move for two reasons, and both are the
+-- point of the move rather than collateral:
+--
+--   * the premise. §[49] asserted the renderer "mounts without autodb
+--     installed" — possible only while the renderer lived here. With autodb
+--     absent there is now no renderer at all, and what this plugin owes the
+--     user is the PLACEHOLDER. That contract is asserted in §[35] A16, which
+--     also guards that the placeholder never mentions dbee.
+--   * the shape. It reached into module-level state (`tree._rows`,
+--     `_expanded`, `_cache`, `_bufnr`). The drawer is an instance factory now
+--     (ADR-0078 §3.2) precisely so two hosts cannot share that state, so there
+--     is no module-level state left to assert against.
+--
+-- The renderer's own behaviour — rendering, toggling, invalidate, keymap
+-- vocabulary, buffer identity per host profile — is autodb's to cover, in
+-- autodb's suite, next to the code. What remains auto-finder's is the facade:
+-- the placeholder path, owned-buffer teardown, and that closing the section
+-- RELEASES the drawer rather than disposing it behind the registry's back.
 -- [50] "ADR-0058 M7 — dbase slot delegates by availability" was removed here in
 -- v0.4.0. It asserted that with autodb absent "dbee remains in charge" — the
 -- availability delegation between two backends. dbee is retired (ADR-0063 /
