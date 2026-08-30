@@ -1468,19 +1468,25 @@ end
 ---previous profile. Calling this on every rebuild therefore disposed and
 ---remounted a LIVE drawer whenever an unrelated slot changed, breaking
 ---the survivor-buffer guarantee this function sits inside (lector
----impl-r1). So it fires only on the transitions: absent -> present
----registers, present -> absent unregisters, and no change does nothing.
-M._dbase_host_registered = false
+---impl-r1). So it fires only on the transitions.
+---
+---**The "am I registered" half is read from autodb, never remembered.**
+---A local boolean here was a second copy of a fact autodb already owns,
+---and the section's own late-load safety net registers without going
+---through this function — so the copy went stale, and then an unrelated
+---slot add tore down a live drawer while a dbase removal left a dead
+---provider behind (lector impl-r2 MF1). Asking the registry makes every
+---entry point authoritative for free.
 function M._sync_dbase_host()
   local ok, dbase_section = pcall(require, "auto-finder.views.dbase")
   if not ok or type(dbase_section.register) ~= "function" then return end
   local present = require("auto-finder.views")._by_name["dbase"] ~= nil
-  if present == M._dbase_host_registered then return end
+  local registered = dbase_section.is_registered()
+  if present == registered then return end
   if present then
-    M._dbase_host_registered = dbase_section.register() and true or false
+    dbase_section.register()
   else
     dbase_section.unregister()
-    M._dbase_host_registered = false
   end
 end
 
