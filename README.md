@@ -1,9 +1,9 @@
 # auto-finder.nvim
 
 A multi-view side panel for Neovim. One window hosts purpose-built
-**views** — filesystem, open buffers, git worktrees, an
-autodb explorer, and a prompt-style config REPL — each reachable
-with a single keystroke.
+**views** — filesystem, git repos × worktrees, open buffers, an
+autodb explorer, test/debug runners, and a prompt-style config REPL —
+each reachable with a single keystroke.
 
 Built on top of [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
 (panel + state + event-bus primitives) and a vendored fork of
@@ -14,7 +14,7 @@ is the user-facing surface.
 ## At a glance
 
 ```
-┌─ auto-finder ──── [0: config] [1: files] [2: repos] [3: dbase] · ─┐
+┌─ auto-finder ──── [0: config] [1: files] [2: repos] · ────────────┐
 │                                                                    │
 │  (active view's buffer renders here)                               │
 │                                                                    │
@@ -34,24 +34,26 @@ is the user-facing surface.
 
 ## What ships
 
-Five views in the box:
+**Three views are in the default slot list** — the panel is useful
+the moment you install it:
 
 | # | View | What it shows |
 |--:|---|---|
-| 0 | **config** | Prompt-style admin REPL. Switch views, resize, toggle file filters, manage dbase connections. Tab-completion + clickable winbar throughout. |
+| 0 | **config** | Prompt-style admin REPL. Switch views, resize the panel, toggle file filters, rearrange slots. Tab-completion + clickable winbar throughout. |
 | 1 | **files** | Filesystem tree (neo-tree filesystem source). Live-refresh on filesystem events; git status decorations from the auto-core git layer. |
-| 2 | **repos** | Auto-discovered git repos × worktrees from [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim). No registry, no manual add — what worktree.nvim sees is what shows up. fs_event watchers refresh on worktree mutations. |
-| 3 | **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. Tracked via Buf* autocmds through the core's buffer cache. |
-| 4 | **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) explorer inside the panel. Soft dep — renders a "no backend" buffer when autodb is absent |
+| 2 | **repos** | Git repos × worktrees, discovered by [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) — no registry, no manual add. Expands to per-worktree changes, commit history and per-commit diffs, with in-panel git actions. See [Repos view](#repos-view). |
 
-More registrable views ship in the box but aren't in the default
-slot list — add them with `slot add <name>` from the config REPL
-(or list them in `opts.sections`): **marks** (nvim marks browser),
-**todos** (the auto-core task store — see
-[Automation](#automation-todo-listautomated)), and the ADR-0048
-pair **tests** / **debug** consuming
-[`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)
-(see [Tests & Debug views](#tests--debug-views-auto-run)).
+Six more views ship in the box but aren't in the default slot
+list — add them with `slot add <name>` from the config REPL (or
+list them in `opts.sections`):
+
+| View | What it shows |
+|---|---|
+| **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. |
+| **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb)'s explorer, hosted in the panel. Soft dep — renders a "no backend" buffer when autodb is absent. See [DBase view](#dbase-view--autodb-inside-the-panel). |
+| **marks** | nvim marks browser. |
+| **todos** | The auto-core task store — see [Automation](#automation-todo-listautomated). |
+| **tests** / **debug** | The ADR-0048 pair, consuming [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim). See [Tests & Debug views](#tests--debug-views-auto-run). |
 
 To **re-order** the slots rather than edit one at a time, use `slot
 assign` — a walk over slots 1..9 that asks for a section type per
@@ -67,11 +69,12 @@ Plus the foundations behind the views, all centralized in
 `lua/auto-finder/core/`:
 
 - **Centralized caches** for the file tree, git status, buffer
-  list, and repos registry. Today views still render through
-  neo-tree's `manager.refresh` path on receiving a translated
-  event; the cache surface exists so a future phase can flip
-  views to delta-rendering directly from `core.<area>.snapshot_now()`
-  (see [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the
+  list, and repos registry. The neo-tree-backed views still render
+  through neo-tree's `manager.refresh` path on receiving a
+  translated event; the cache surface exists so a future phase can
+  flip them to delta-rendering directly from
+  `core.<area>.snapshot_now()` (see
+  [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the
   implemented-vs-future-work breakdown). What changes today:
   views subscribe to translated `auto-finder.core.*` topics
   rather than driving each refresh themselves.
@@ -98,11 +101,10 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 - **Neovim ≥ 0.10**
 - [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
-  `^0.1.58` — foundation library (panel singleton, state
+  `^0.2.0` — foundation library (panel singleton, state
   namespace, event bus, `fs.watch`, `git.watch`, `git.status`,
   centralized log, and the `fs.atomic` write primitive that
-  auto-finder's dbase/todos persistence delegates to as of
-  v0.2.55 / ADR-0040 Batch B). **Hard dep.**
+  auto-finder's persistence delegates to). **Hard dep.**
 - [`MunifTanjim/nui.nvim`](https://github.com/MunifTanjim/nui.nvim),
   [`nvim-lua/plenary.nvim`](https://github.com/nvim-lua/plenary.nvim),
   [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
@@ -112,13 +114,16 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   `lua/auto-finder/neotree/` (since v0.1.3) and the two will
   collide on the same require path. Disable upstream
   explicitly if you had it installed: `{ "nvim-neo-tree/neo-tree.nvim", enabled = false }`.
+- [`yongjohnlee80/worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim)
+  `^0.5.0` — powers the **repos** view. From v0.5.0 the view renders
+  worktree.nvim's own explorer (commits, diffs, git actions); the
+  switch is by **availability**, so an older worktree.nvim falls back
+  to the bundled `auto-finder-repos` neo-tree source, and no
+  worktree.nvim at all renders an empty view.
 - [`yongjohnlee80/autodb`](https://github.com/yongjohnlee80/autodb) —
   soft dep for the **dbase** view. When absent, the view shows
   a placeholder explaining the dependency; the rest of the
   panel is unaffected.
-- [`yongjohnlee80/worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim)
-  — required by the **repos** view. When absent, the repos
-  view renders empty.
 - [`yongjohnlee80/auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)
   `^0.1.0` — soft dep for the **tests** and **debug** views
   (ADR-0048 Phase 3). When absent, both views render a
@@ -132,14 +137,16 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 ```lua
 {
   "yongjohnlee80/auto-finder.nvim",
-  version = "^0.2.0",
+  version = "^0.4.0",
   dependencies = {
     "yongjohnlee80/auto-core.nvim",       -- foundation; hard dep
+    "yongjohnlee80/worktree.nvim",        -- repos view
     "MunifTanjim/nui.nvim",               -- bundled neo-tree fork deps
     "nvim-lua/plenary.nvim",
     "nvim-tree/nvim-web-devicons",
-    -- autodb is NOT listed: the dbase view probes for it and degrades to a
-    -- "no backend" buffer, so the panel works without it.
+    -- autodb and auto-run are NOT listed: the dbase / tests / debug views
+    -- probe for them and degrade to a placeholder, so the panel works
+    -- without either installed.
   },
   opts = {
     -- Width spec — pick ONE of `default` or `percentage`.
@@ -152,21 +159,18 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
     -- Views the panel hosts, in order. The order also defines
     -- the numeric index used by `0..9` and `:AutoFinderFocus N`.
-    sections = { "config", "files", "repos", "buffers", "dbase" },
+    -- This is the default; add "buffers" / "dbase" / "marks" /
+    -- "todos" / "tests" / "debug" here or via `slot add`.
+    sections = { "config", "files", "repos" },
 
     -- Open the panel for `nvim .` style directory invocations.
     hijack_directories = true,
 
-    -- Per-view opts. Each is forwarded to the underlying neo-tree
-    -- source's deep-merged config. Use this to inject custom
-    -- keymaps without forking the plugin.
+    -- Per-view opts for the neo-tree-backed views. Each is forwarded
+    -- to the underlying neo-tree source's deep-merged config. Use this
+    -- to inject custom keymaps without forking the plugin.
     files   = { window = { mappings = {} } },
-    repos   = { window = { mappings = {} } },
     buffers = { window = { mappings = {} } },
-
-    -- dbase takes no options since v0.4.0 — autodb owns connections,
-    -- users and encryption on its own backend.
-    dbase = {},
   },
   keys = {
     { "<leader>e",  "<cmd>AutoFinder<cr>",        desc = "auto-finder: toggle panel" },
@@ -176,11 +180,11 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 }
 ```
 
-> **Caret pin (`^0.2.0`)**: future v0.2.x releases auto-include
+> **Caret pin (`^0.4.0`)**: future v0.4.x releases auto-include
 > without a manual bump. The plugin holds an additive-only
-> minor-bump contract — v0.2.x releases never rename, remove,
+> minor-bump contract — v0.4.x releases never rename, remove,
 > or break-shape any existing public surface. Crossing to
-> v0.3.0 (when it eventually lands) requires bumping the caret
+> v0.5.0 (when it eventually lands) requires bumping the caret
 > deliberately.
 
 ## Commands
@@ -188,46 +192,84 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 | Command                      | Effect                                                          |
 |------------------------------|-----------------------------------------------------------------|
 | `:AutoFinder[!]`             | Toggle the panel (`!` ignores width-guard)                      |
-| `:AutoFinderFocus <N\|name>` | Switch to view N (e.g. `:AutoFinderFocus dbase`)                |
+| `:AutoFinderFocus <N\|name>` | Switch to view N (e.g. `:AutoFinderFocus repos`)                |
 | `:AutoFinderResize <N>`      | Pin panel width to N columns (hard cap)                         |
 | `:AutoFinderReset`           | Clear the pin (back to dynamic width)                           |
+| `:AutoFinderResumeDiff`      | Reopen the last repos diff at the file and line you left it on  |
 
 ## Config REPL cheatsheet
 
 Inside the panel, press `0` to focus the config view. Type
-`help` for the full list, or any of these:
+`help` (or `?`) for the full list, or any of these:
 
 ```
 focus 1                  # jump to files (numeric or name)
 focus files              # same thing
 focus repos              # jump to the repos × worktrees view
-focus dbase              # jump to the autodb explorer
 panel resize 50          # pin width to 50 cols (hard cap)
 panel reset              # release the pin (alias: panel dynamic)
 panel show               # show mode / default / range / live width
 files show hidden        # include .gitignored files in the tree
 files hide dotfiles      # hide .* files
+files follow on          # follow the current buffer in the tree
+repos follow on          # follow the current buffer's repo/worktree
+slot add todos           # add a view to the slot list
+slot assign files repos  # replace the whole slot list (any permutation)
+status                   # panel + view state
 reload                   # re-render the active view
+clear                    # clear the REPL transcript
 quit                     # close the panel (view buffers persist)
-
-# DBase connection-file management
-dbase new <name>         # create empty connections file
-dbase ls                 # list available connections files
-dbase rm <name>          # delete a connections file
-dbase load [name]        # load file as active (prompts if name omitted)
-dbase conn add           # prompt for name/type/url, append to active file
-dbase conn ls            # list connections in the active file
-dbase conn rm <name>     # remove a connection by name
 ```
-
-(Worktree mutations are owned by `worktree.nvim` — use its
-`<leader>gw` / `<leader>gA` / `<leader>gC` / `<leader>gc`
-keymaps to switch / add / clone / init worktrees. The repos
-view just renders whatever worktree.nvim is currently tracking.)
 
 Tab-completion works on every verb, including numeric width
 candidates inside the configured `[width.min .. width.max]`
 range.
+
+(Worktree *mutations* are owned by `worktree.nvim` — use its
+`<leader>gw` / `<leader>gA` / `<leader>gC` / `<leader>gc`
+keymaps to switch / add / clone / init worktrees. The repos
+view renders what worktree.nvim tracks, and owns only the
+per-row git actions listed below.)
+
+## Repos view
+
+With `worktree.nvim` `^0.5.0` installed, the repos view is a **pure
+renderer over `worktree.repos`** — it never shells git itself, and
+every node is cached, so a repaint (cursor move, watch toggle, focus
+change) costs zero git subprocesses. Git is paid on first expand and
+after an explicit invalidation only.
+
+```
+▾ repo
+  ▾ worktree            ● watched
+    ▾ UNCOMMITTED (n files)
+        <changed file>
+    ▾ <commit>
+        <changed file>
+        <review json>
+  ▸ <collapsed worktree>
+```
+
+| Key    | Action                                            |
+|--------|---------------------------------------------------|
+| `<CR>` | Expand / open the row                             |
+| `o`    | Diff this commit                                  |
+| `w`    | Watch / unwatch this worktree                     |
+| `m`    | Load more commits                                 |
+| `i`    | Info for the row under the cursor                 |
+| `R`    | Reload                                            |
+| `f`    | Fetch this repository                             |
+| `s`    | Stage / unstage this file                         |
+| `c`    | Commit what is staged                             |
+| `P`    | Push — **confirms first, naming the repository**  |
+| `?`    | Help                                              |
+
+`P` sits one key from `p` and a push is the only action here that
+leaves the machine, so the confirmation names the repo it is about to
+publish: a mistyped key on the wrong row cannot push.
+
+Left the diff to go read a file? `:AutoFinderResumeDiff` reopens it at
+the file and line you were on.
 
 ## DBase view — autodb inside the panel
 
@@ -235,22 +277,22 @@ The **dbase** view hosts [autodb](https://github.com/yongjohnlee80/autodb)'s
 explorer in the panel: connections, workspaces, notes and script history, beside
 your files and repos.
 
+Since ADR-0078 the drawer itself **lives in autodb**, and this view is a thin
+facade over it: auto-finder registers a host *provider* with autodb's drawer-host
+registry and mounts the instance the registry hands back. The registry is the
+sole constructor and sole disposer, which is what makes "at most one mounted
+drawer" enforceable in one place — and it is what lets autodb show a drawer even
+when auto-finder is not installed. What stays auto-finder's: the availability
+gate, the placeholder screen, owned-buffer accounting, and teardown.
+
 autodb is a **soft dependency and is not declared here**. The view probes for it
 and, when it is absent, renders a short buffer saying so rather than failing —
 the panel stays usable without a database backend installed.
 
-| Key    | Action                                  |
-|--------|-----------------------------------------|
-| `<CR>` | Activate the focused row                |
-| `o`    | Toggle expand / collapse on a container |
-| `i`    | Inspect the focused row                 |
-| `R`    | Refresh                                 |
-| `?`    | Help                                    |
-
-`h` and `l` are deliberately **not** bound — they stay ordinary cursor motions.
-
-Connections, users, roles and at-rest encryption belong to autodb's own backend,
-so there is nothing to configure here and no connection file to protect.
+Keymaps inside the drawer are autodb's; press `?` there for its help. Connections,
+users, roles and at-rest encryption belong to autodb's own backend, so there is
+nothing to configure here and no connection file to protect — the view takes no
+options.
 
 ### nvim-dbee has been removed
 
@@ -264,7 +306,8 @@ file explorer made no sense.
 
 If you were using the dbee-backed dbase view, your connections still live in
 dbee's own store; move them into autodb (`<leader>Dc` in AutoVim, or the
-standalone TUI). Nothing here reads them any more.
+standalone TUI). Nothing here reads them any more, and the `dbase …` REPL verbs
+that managed them are gone.
 
 One consequence worth stating plainly: schema-aware SQL completion went with
 dbee. `cmp-dbee` hard-requires `dbee` and gates on `dbee.api.core.is_loaded()`,
@@ -354,12 +397,15 @@ auto-finder is layered:
   every cache + watcher + subscription. Publishes
   `auto-finder.core.*` topics that views consume.
 - **`views/`** — UI renderers (each a directory). Subscribe
-  to translated topics; render against neo-tree.
+  to translated topics. The files and buffers views render
+  against the bundled neo-tree fork; repos and dbase are pure
+  renderers over `worktree.repos` and autodb's drawer.
 - **`shared/`** — pure helpers (neo-tree mount, debounce,
   loading placeholder, window predicates, subscription sets).
 - **`panel/`** — the window host. Implements
   `winfixwidth`/`winfixbuf` protection + the `with_unfixed_buf`
-  primitive that internal swaps use.
+  primitive that internal swaps use, plus the config REPL's
+  admin dispatcher.
 - **`sections/`** — backwards-compat facade re-exporting
   `views/*` for any third-party caller pinned to the v0.1
   `require("auto-finder.sections.<name>")` shape.
@@ -396,16 +442,25 @@ is in **[`AUTOMATION.md`](./AUTOMATION.md)**.
 
 ## Development
 
-- Smoke suite: `nvim --headless -u NONE -l tests/smoke.lua`.
-  Exits 0 with `<N> passed, 0 failed` when clean. v0.2.25 ships
-  with 425 assertions across 34 sections.
+- **Run the whole suite with `tests/run-all.sh`.** Every standalone
+  suite is wired into it, and each one ends by printing a canonical
+  `N passed, M failed` summary line. A suite whose output lacks that
+  line did not reach the end of its file — it aborted or crashed
+  mid-run — and the runner counts it as FAILED rather than parsing
+  whatever partial PASS lines it emitted. That sentinel is the only
+  thing that can catch a C-level crash, so **running a single suite
+  by hand is not a substitute**.
+- Single suite, when you are iterating on one:
+  `nvim --headless -u NONE -l tests/smoke.lua`.
+- Suite → surface inventory:
+  [`tests/auto-finder-coverage.md`](./tests/auto-finder-coverage.md).
 - Per-phase failure / remediation audit log:
   [`tests/auto-finder-test-audit.md`](./tests/auto-finder-test-audit.md).
 - Catalog of smoke sections removed during the ADR 0026
   refactor with reimplementation plans:
   [`tests/auto-finder-flaky.test.md`](./tests/auto-finder-flaky.test.md).
 - Version policy: stays within the existing minor line
-  (`v0.2.x`) until explicit approval to bump. See `CHANGELOG.md`
+  (`v0.4.x`) until explicit approval to bump. See `CHANGELOG.md`
   for release-by-release notes.
 
 ## License
