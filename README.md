@@ -11,6 +11,17 @@ neo-tree (filesystem rendering). The internal architecture is
 documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md); this README
 is the user-facing surface.
 
+![auto-finder.nvim — panel tour](./media-asset/autofinder-intro.gif)
+
+<sub>One panel, one keystroke per view. The tour runs: **files** (tree
++ live filter) → **repos** (worktrees, commit history, per-commit file
+lists) → full-width editing with the panel dismissed → **todos** (the
+task store, expanded to a task's full frontmatter) → jumping straight
+from a task to the ADR document it cites. The slot numbers you see
+(`0: config  1: files  2: repos  3: dbase  4: todos  5: debug  6: tests`)
+are a custom arrangement — slots are configurable per workspace, see
+[`slot assign`](#what-ships).</sub>
+
 ## At a glance
 
 ```
@@ -37,23 +48,31 @@ is the user-facing surface.
 **Three views are in the default slot list** — the panel is useful
 the moment you install it:
 
-| # | View | What it shows |
-|--:|---|---|
-| 0 | **config** | Prompt-style admin REPL. Switch views, resize the panel, toggle file filters, rearrange slots. Tab-completion + clickable winbar throughout. |
-| 1 | **files** | Filesystem tree (neo-tree filesystem source). Live-refresh on filesystem events; git status decorations from the auto-core git layer. |
-| 2 | **repos** | Git repos × worktrees, discovered by [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) — no registry, no manual add. Expands to per-worktree changes, commit history and per-commit diffs, with in-panel git actions. See [Repos view](#repos-view). |
+| # | View | Needs | What it shows · what it solves |
+|--:|---|---|---|
+| 0 | **config** | — | Prompt-style admin REPL. Switch views, resize the panel, toggle file filters, rearrange slots. Tab-completion + clickable winbar throughout. *Solves: no hunting through `opts` for a setting you want to change once.* |
+| 1 | **files** | — | Filesystem tree (neo-tree filesystem source). Live-refresh on filesystem events; git status decorations from the auto-core git layer. Type-to-filter narrows the tree in place. *Solves: the ordinary explorer job, without a second plugin.* |
+| 2 | **repos** | [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) | Git repos × worktrees, discovered automatically — no registry, no manual add. Expands to per-worktree changes, commit history and per-commit file lists, with in-panel git actions. See [Repos view](#repos-view). *Solves: juggling several repos and worktrees without leaving the editor.* |
 
 Six more views ship in the box but aren't in the default slot
 list — add them with `slot add <name>` from the config REPL (or
 list them in `opts.sections`):
 
-| View | What it shows |
-|---|---|
-| **buffers** | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. |
-| **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb)'s explorer, hosted in the panel. Soft dep — renders a "no backend" buffer when autodb is absent. See [DBase view](#dbase-view--autodb-inside-the-panel). |
-| **marks** | nvim marks browser. |
-| **todos** | The auto-core task store — see [Automation](#automation-todo-listautomated). |
-| **tests** / **debug** | The ADR-0048 pair, consuming [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim). See [Tests & Debug views](#tests--debug-views-auto-run). |
+| View | Needs | What it shows · what it solves |
+|---|---|---|
+| **buffers** | — | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. *Solves: `:ls` as a navigable tree.* |
+| **marks** | — | nvim marks browser. *Solves: marks you set and then forgot.* |
+| **todos** | — | The auto-core task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. See [Automation](#automation-todo-listautomated). *Solves: tracking work in the repo instead of a browser tab.* |
+| **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) **≥ v0.3.0** | autodb's database explorer, hosted in the panel — connections, workspaces, notes and script history. See [DBase view](#dbase-view--autodb-inside-the-panel). *Solves: querying a managed database without a second application.* |
+| **tests** / **debug** | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | The ADR-0048 pair: a discovered test tree with per-row status glyphs, and a debug view over entry points, `launch.json` configs, live dap sessions and persisted breakpoints. See [Tests & Debug views](#tests--debug-views-auto-run). *Solves: running and debugging without a terminal round-trip.* |
+
+**Every companion is optional and probed at runtime, never imported.**
+auto-finder calls `pcall(require, …)` for autodb, auto-run and
+worktree; when one is absent the view renders a one-line placeholder
+and the rest of the panel is unaffected. Install auto-finder on its
+own and **config, files, buffers, marks and todos work immediately** —
+`auto-core.nvim` is the only hard dependency, and it carries the task
+store that the todos view reads.
 
 To **re-order** the slots rather than edit one at a time, use `slot
 assign` — a walk over slots 1..9 that asks for a section type per
@@ -124,10 +143,29 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   switch is by **availability**, so an older worktree.nvim falls back
   to the bundled `auto-finder-repos` neo-tree source, and no
   worktree.nvim at all renders an empty view.
-- [`yongjohnlee80/autodb`](https://github.com/yongjohnlee80/autodb) —
-  soft dep for the **dbase** view. When absent, the view shows
-  a placeholder explaining the dependency; the rest of the
-  panel is unaffected.
+- [`yongjohnlee80/autodb`](https://github.com/yongjohnlee80/autodb)
+  **`^0.3.0`** — soft dep for the **dbase** view. When absent, the
+  view shows a placeholder explaining the dependency; the rest of
+  the panel is unaffected.
+
+  > **v0.3.0 is a hard floor, not a preference.** The dbase view
+  > mounts autodb's own drawer module, `autodb.views.drawer`, which
+  > only exists from autodb v0.3.0 — that release moved the drawer
+  > UI out of auto-finder and into autodb. The availability gate
+  > requires **both** halves:
+  >
+  > ```lua
+  > if not pcall(require, "autodb.session") then return false end
+  > return _drawer() ~= nil
+  > ```
+  >
+  > On autodb ≤ v0.2.x the session half loads fine while the drawer
+  > half is missing, so the panel reports *"no database backend
+  > available: autodb is not installed"* even though autodb is
+  > installed and working — login and workspace selection keep
+  > working, because those go through `autodb.session`. If you see
+  > that message with a healthy autodb, check your version pin
+  > first: a `^0.2.0` caret refuses to cross into 0.3.x by design.
 - [`yongjohnlee80/auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)
   `^0.1.0` — soft dep for the **tests** and **debug** views
   (ADR-0048 Phase 3). When absent, both views render a
@@ -190,6 +228,61 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 > or break-shape any existing public surface. Crossing to
 > v0.5.0 (when it eventually lands) requires bumping the caret
 > deliberately.
+
+That spec alone gives you **config, files, repos, buffers, marks and
+todos**. Nothing else is required.
+
+### Adding the companion plugins
+
+The dbase, tests and debug views are powered by three separate
+plugins. Install whichever you want as ordinary lazy specs — order
+does not matter, and auto-finder picks them up on the next start.
+Then make the view visible by listing it in `sections` (or run `slot
+add <name>` once from the config REPL, which persists per workspace).
+
+```lua
+-- dbase view — a database explorer in the panel.
+{
+  "yongjohnlee80/autodb",
+  version = "^0.3.0",   -- v0.3.0 is the floor: it owns `autodb.views.drawer`
+  build = "make build", -- autodb ships a Go backend alongside the plugin
+},
+
+-- tests + debug views — test discovery, runners, dap integration.
+{ "yongjohnlee80/auto-run.nvim", version = "^0.1.0" },
+
+-- repos view — already in the dependencies list above, shown here
+-- for completeness. Owns worktree switching / add / clone / init.
+{ "yongjohnlee80/worktree.nvim" },
+```
+
+…and turn the views on:
+
+```lua
+opts = {
+  sections = { "config", "files", "repos", "dbase", "todos", "debug", "tests" },
+}
+```
+
+| Want | Install | Then |
+|---|---|---|
+| Database explorer | [`autodb`](https://github.com/yongjohnlee80/autodb) `^0.3.0` | add `"dbase"` to `sections` |
+| Test tree + runner | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | add `"tests"` to `sections` |
+| Debug entry points, dap sessions, breakpoints | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | add `"debug"` to `sections` |
+| Repos × worktrees | [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) | in `sections` by default |
+| Task store | — (ships with `auto-core.nvim`) | add `"todos"` to `sections` |
+
+If a view is listed in `sections` but its plugin is missing, the panel
+still opens — that view just renders a placeholder naming what to
+install. Nothing errors and no other view is affected.
+
+### Using AutoVim instead
+
+[AutoVim](https://github.com/yongjohnlee80/autovim) is a full Neovim
+configuration that wires all of the above together with the pins
+already matched, which is the arrangement shown in the demo above.
+Installing auto-finder by hand as described here is fully supported —
+AutoVim is a convenience, not a requirement.
 
 ## Commands
 
@@ -303,6 +396,13 @@ gate, the placeholder screen, owned-buffer accounting, and teardown.
 autodb is a **soft dependency and is not declared here**. The view probes for it
 and, when it is absent, renders a short buffer saying so rather than failing —
 the panel stays usable without a database backend installed.
+
+**Requires autodb `^0.3.0`.** The view mounts autodb's own
+`autodb.views.drawer`, which arrived in v0.3.0 when the drawer UI moved out of
+auto-finder. On an older autodb the panel reports *"no database backend
+available: autodb is not installed"* even when autodb is installed and
+healthy — see [Requirements](#requirements) for why, and check your version
+pin before anything else.
 
 Keymaps inside the drawer are autodb's; press `?` there for its help. Connections,
 users, roles and at-rest encryption belong to autodb's own backend, so there is
