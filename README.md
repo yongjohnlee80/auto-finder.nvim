@@ -105,10 +105,14 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   namespace, event bus, `fs.watch`, `git.watch`, `git.status`,
   centralized log, and the `fs.atomic` write primitive that
   auto-finder's persistence delegates to). **Hard dep.**
-- [`MunifTanjim/nui.nvim`](https://github.com/MunifTanjim/nui.nvim),
-  [`nvim-lua/plenary.nvim`](https://github.com/nvim-lua/plenary.nvim),
-  [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
-  — required by the bundled neo-tree fork.
+- [`MunifTanjim/nui.nvim`](https://github.com/MunifTanjim/nui.nvim) and
+  [`nvim-lua/plenary.nvim`](https://github.com/nvim-lua/plenary.nvim)
+  — hard deps of the bundled neo-tree fork.
+- [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
+  — **optional**, recommended. The fork's health check lists it under
+  "Optional icons" and the default icon provider falls back to a plain
+  glyph without it (the failed require is memoized, so the fallback
+  costs nothing per render).
 - **Do not install upstream `nvim-neo-tree/neo-tree.nvim`
   alongside** — auto-finder ships its own fork under
   `lua/auto-finder/neotree/` (since v0.1.3) and the two will
@@ -143,7 +147,7 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
     "yongjohnlee80/worktree.nvim",        -- repos view
     "MunifTanjim/nui.nvim",               -- bundled neo-tree fork deps
     "nvim-lua/plenary.nvim",
-    "nvim-tree/nvim-web-devicons",
+    "nvim-tree/nvim-web-devicons",        -- optional: icons
     -- autodb and auto-run are NOT listed: the dbase / tests / debug views
     -- probe for them and degrade to a placeholder, so the panel works
     -- without either installed.
@@ -234,10 +238,21 @@ per-row git actions listed below.)
 ## Repos view
 
 With `worktree.nvim` `^0.5.0` installed, the repos view is a **pure
-renderer over `worktree.repos`** — it never shells git itself, and
-every node is cached, so a repaint (cursor move, watch toggle, focus
-change) costs zero git subprocesses. Git is paid on first expand and
-after an explicit invalidation only.
+renderer over `worktree.repos`** — every byte of tree data arrives
+through that API, and the view shells no git of its own for reads or
+actions.
+
+Every node is cached, so a **cache-preserving repaint** — cursor move,
+focus change — costs zero git subprocesses. Git is paid on first expand
+and after an explicit invalidation; toggling a watch (`w`) is one such
+invalidation, dropping the repo and worktree caches so the next render
+re-reads status and history.
+
+(One narrow exception to "shells no git", and it is not tree data:
+submitting a review resolves the reviewer identity with `git -C
+<worktree> config user.name`. It is run per-worktree on purpose —
+`user.name` is per-repository, so answering from Neovim's cwd would
+attribute a review of one repo to another's configured identity.)
 
 ```
 ▾ repo
