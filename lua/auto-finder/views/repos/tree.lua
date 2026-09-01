@@ -1,8 +1,21 @@
 ---View — the repos explorer over worktree.nvim (ADR-0060 §2.2).
 ---
----A pure renderer, the same shape as `views/dbase/tree.lua` is over autodb:
----every byte of data arrives through `worktree.repos`, and this view never
----shells git itself. The tree it draws:
+---A pure renderer over an external data API: every byte of TREE DATA arrives
+---through `worktree.repos`, and this view shells no git of its own for reads
+---or actions.
+---
+---(This used to cite `views/dbase/tree.lua` as the sibling example of the same
+---shape. That file is gone — ADR-0078 moved the drawer into autodb, leaving
+---`views/dbase/init.lua` as a host-provider facade rather than a renderer, so
+---the analogy no longer holds either way.)
+---
+---ONE NARROW EXCEPTION, and it is not tree data: submitting a review resolves
+---the reviewer identity by shelling `git -C <worktree> config user.name`
+---(`authoring.reviewer`, reached from `_submit_review` below). It is run
+---per-worktree deliberately — `user.name` is per-repository, so answering from
+---Neovim's cwd would attribute a review of one repo to another's identity.
+---
+---The tree it draws:
 ---
 ---    ▾ repo
 ---      ▾ worktree            ● watched
@@ -13,11 +26,17 @@
 ---            <review json>
 ---      ▸ <collapsed worktree>
 ---
----**Everything is cached per node id.** A repaint (cursor move, watch toggle,
----focus change) must cost ZERO git subprocesses — the panel this replaces ran a
----blocking `git status` per worktree on every navigate plus a `git config` per
----repo, which is what made it expensive. Git is paid on first expand and after
----an explicit invalidation only.
+---**Everything is cached per node id.** A CACHE-PRESERVING repaint — cursor
+---move, focus change — must cost ZERO git subprocesses. The panel this replaces
+---ran a blocking `git status` per worktree on every navigate plus a `git config`
+---per repo, which is what made it expensive. Git is paid on first expand and
+---after an explicit invalidation.
+---
+---Toggling a watch is an INVALIDATION, not a free repaint: `toggle_watch` drops
+---the `repo:` and `wt:` caches and force-expands a newly watched worktree, so
+---the render that follows re-reads status and history. This paragraph used to
+---list watch toggle among the zero-git repaints; it was wrong, and the README
+---repeated it verbatim until 2026-09-01 (auto-finder#15).
 ---@module 'auto-finder.views.repos.tree'
 
 local logger = require("auto-finder.log")

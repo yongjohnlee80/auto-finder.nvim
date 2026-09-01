@@ -2,6 +2,26 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.10] — 2026-09-01 — repos tree module doc corrected
+
+Three claims in `views/repos/tree.lua`'s module doc were wrong. Two of them
+had been copied verbatim into the README, which is how they were found (#15).
+
+- **"this view never shells git itself"** — `_submit_review` reaches
+  `authoring.submit`, which calls `authoring.reviewer` and runs
+  `git -C <worktree> config user.name`. Narrowed to tree-data reads and
+  actions, with the identity exception named and its per-worktree rationale
+  kept.
+- **watch toggle listed among the zero-git repaints** — `toggle_watch`
+  invalidates the `repo:` and `wt:` caches and force-expands a newly watched
+  worktree, so the render that follows re-reads status and history. Zero-cost
+  now claims only cache-preserving repaints (cursor move, focus change).
+- **`views/dbase/tree.lua` cited as the sibling example** — that file does not
+  exist. ADR-0078 moved the drawer into autodb, leaving `views/dbase/init.lua`
+  as a host-provider facade rather than a renderer.
+
+Comments only, no executable change. `tests/run-all.sh`: 12 suites, 0 failed.
+
 ## [v0.4.8] — 2026-08-28 — automation smoke no longer corrupts headless geometry
 
 - `smoke-automation.lua` no longer copies the main smoke suite's unused
