@@ -104,11 +104,14 @@ end
 ---rows (independently indented at IND*3) do not move.
 local function _chevron(expanded) return expanded and "▾" or "▸" end
 
--- Johno's scheme (ADR-0060 §2.2, colours revised 2026-09-02 in §10): deleted
--- RED, modified YELLOW, added GREEN with a `+`. Added and modified SHARED the
--- green until 2026-09-02 with the marker as the only distinction; Johno asked
--- for a colour of its own for modified, so `AutoCoreGitModified` now resolves
--- to a yellow tint auto-core derives from the active scheme. The marker stays.
+-- Johno's scheme (ADR-0060 §2.2 as revised in §10, 2026-09-02): added GREEN
+-- with a `+`, modified YELLOW/ORANGE, deleted RED — FOREGROUND only, the way
+-- the todos panel colours its Completed and Deferred headers. The groups are
+-- auto-core's, which links them to the Diagnostic* family (Ok/Warn/Error).
+-- They used to link to DiffAdd/DiffDelete, whose background tints painted the
+-- whole row a wash that read as "not so green"; a derived yellow tint for
+-- modified (auto-core v0.2.8) had the same problem and is gone. The `+`
+-- marker stays: it still tells added from modified when colour cannot.
 local KIND_HL = {
   added      = "AutoCoreGitAdded",
   modified   = "AutoCoreGitModified",
@@ -223,11 +226,11 @@ local function _render(bufnr)
               msg(2, "not watched — w to watch and list commits")
             else
               local cc = _cache(wid)
+              -- The window this worktree has asked for so far: the base 15
+              -- (ADR-0060 §2.4) plus one more window per `m`.
+              local window = 15 + (M._more[wid] or 0) * 15
               if not cc.items then
-                local extra = (M._more[wid] or 0)
-                local nodes, meta = backend.children(repo, wt, {
-                  limit = 15 + extra * 15,
-                })
+                local nodes, meta = backend.children(repo, wt, { limit = window })
                 cc.items, cc.meta = nodes, meta
               end
               if #cc.items == 0 then
@@ -289,9 +292,29 @@ local function _render(bufnr)
                   end
                 end
               end
-              -- Only a bounded window shows a load-more affordance; a
-              -- divergence range is already complete by definition.
-              if cc.meta and cc.meta.mode == "window" and #cc.items > 0 then
+              -- Only a bounded window that is actually FULL shows a load-more
+              -- affordance: a divergence range is complete by definition, and
+              -- a window that came back short has nothing left to load. The
+              -- row used to appear for EVERY windowed worktree, so a repo with
+              -- one commit offered `m` and the key could never do anything —
+              -- three of this workspace's four repos (2026-09-02) — while a
+              -- long history paged fine: "works for some". auto-core reports
+              -- `has_more` exactly (it asks for one commit past the window);
+              -- an older auto-core without the field falls back to comparing
+              -- the commits it returned against the window we asked for.
+              local more = false
+              if cc.meta and cc.meta.mode == "window" then
+                if cc.meta.has_more ~= nil then
+                  more = cc.meta.has_more == true
+                else
+                  local n = 0
+                  for _, node in ipairs(cc.items) do
+                    if node.kind == "commit" then n = n + 1 end
+                  end
+                  more = n >= window
+                end
+              end
+              if more then
                 _row(rows, lines, hls, {
                   kind = "more", id = wid, repo = repo, worktree = wt,
                   hl = "AutoCoreDimmed",
