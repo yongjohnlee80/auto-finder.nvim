@@ -358,6 +358,93 @@ ok("p8: and a short window (17 < 30) withdraws it",
   ("rows=%d"):format(commit_rows(mainwt.path)))
 backend.children = real_children
 
+-- ── p9: the repo-wide `reviews` section, and the [feedback] badge (§11) ──
+-- Johno, 2026-09-02: the review JSONs should be reachable under the repository
+-- itself, "so the review json file can be removed, or reattached to a different
+-- commit in case of rebase" — which the per-commit rows cannot support, because
+-- after a rebase no commit row names the file any more. The section is a
+-- SIBLING of the worktrees, its rows are `<filename> [severity]`, and a changed
+-- file a reviewer has written on is badged in the commit tree.
+local function row_of(kind, pred)
+  for _, r in ipairs(tree._rows) do
+    if r.kind == kind and (pred == nil or pred(r)) then return r end
+  end
+end
+
+-- A SECTION row is the one with no commit behind it; the commit-level review
+-- rows (p4) carry `node`. Both render identically on purpose, so the row model
+-- is what tells them apart, not the text.
+local function section_review()
+  return row_of("review", function(r) return r.node == nil end)
+end
+
+tree.invalidate(nil)
+tree._expanded["repo:" .. repo.common_dir] = true
+paint()
+local sect = row_of("reviews")
+ok("p9: the repo carries a `reviews` section beside its worktrees",
+  sect ~= nil and sect.repo.common_dir == repo.common_dir, text())
+-- The count is on the collapsed row, so a reader knows there is something in
+-- there without opening it.
+local n_files = #require("worktree.repos").reviews_index(repo)
+ok("p9: fixture: the store holds the review p4 wrote", n_files >= 1, tostring(n_files))
+ok("p9: the section row states how many reviews there are",
+  text():find("reviews  %(" .. n_files .. "%)") ~= nil, text())
+ok("p9: and it lists nothing until it is expanded", section_review() == nil, text())
+
+tree._expanded[sect.id] = true
+paint()
+local rrow = section_review()
+ok("p9: expanding it lists the review file", rrow ~= nil, text())
+ok("p9: *** the row names the COMMIT and the revision ***",
+  rrow ~= nil and rrow.text:find(commit.sha:sub(1, 7) .. ".r1.review.json", 1, true) ~= nil,
+  rrow and rrow.text)
+ok("p9: *** and carries the worst severity as a badge ***",
+  rrow ~= nil and rrow.text:find("[nit]", 1, true) ~= nil, rrow and rrow.text)
+-- The slug repeats on every file in the directory and is already the row above.
+ok("p9: the redundant <slug>@ prefix is elided from the label",
+  rrow ~= nil and rrow.text:find(repo.slug .. "@", 1, true) == nil, rrow and rrow.text)
+ok("p9: the row is painted in the severity's own colour",
+  rrow ~= nil and rrow.hl == "AutoCoreReviewNit", rrow and tostring(rrow.hl))
+ok("p9: <CR> has a real file to open",
+  rrow ~= nil and vim.fn.filereadable(rrow.review.path) == 1,
+  rrow and rrow.review.path)
+ok("p9: i has the metadata it prints — commit, created, severities",
+  rrow ~= nil and rrow.review.commit == commit.sha
+  and type(rrow.review.created) == "string"
+  and rrow.review.severities["nit"] == 1, vim.inspect(rrow and rrow.review))
+
+-- The rebase property, end to end through the panel: the commit the review
+-- names is gone, and the section still shows the file.
+do
+  local gone = "0000000000000000000000000000000000000000"
+  ok("p9: *** CONTROL: the per-commit lookup goes blind on a rewritten sha ***",
+    #backend.reviews(repo, gone) == 0)
+  ok("p9: *** while the repo-wide section still lists every review ***",
+    #require("worktree.repos").reviews_all(repo) >= 1)
+end
+
+-- The badge. p4's review comments on newfile.txt in the feature commit; the
+-- merge commit's own file was never reviewed, which is the negative half.
+tree._expanded["wt:" .. feat.path] = true
+tree._expanded["commit:" .. commit.sha] = true
+paint()
+local freviewed = row_of("file", function(r)
+  return r.file.path == "newfile.txt" and r.node and r.node.sha == commit.sha
+end)
+ok("p9: *** a changed file with feedback on it is badged ***",
+  freviewed ~= nil and freviewed.text:find("[feedback]", 1, true) ~= nil,
+  freviewed and freviewed.text)
+ok("p9: the badge carries the tally the tree read it from",
+  freviewed ~= nil and freviewed.feedback ~= nil and freviewed.feedback.count == 1
+  and freviewed.feedback.worst == "nit", vim.inspect(freviewed and freviewed.feedback))
+local funreviewed = row_of("file", function(r) return r.file.path == "merged.txt" end)
+ok("p9: *** and a file nobody reviewed is NOT badged ***",
+  funreviewed ~= nil and funreviewed.text:find("[feedback]", 1, true) == nil,
+  funreviewed and funreviewed.text)
+ok("p9: the file rows keep their own status colour",
+  freviewed ~= nil and freviewed.hl == "AutoCoreGitAdded", freviewed and tostring(freviewed.hl))
+
 -- unwatch clears the commits again
 backend.toggle_watch(feat.path)
 tree.invalidate(nil)
