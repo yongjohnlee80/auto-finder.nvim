@@ -2,6 +2,35 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.14] — 2026-09-03 — the review submit stops trapping the reviewer
+
+ADR-0065 §2.10. Pairs with worktree.nvim v0.5.6 and auto-core v0.2.11.
+
+The `s` submit in the diff view was unusable — *"it keeps bugging out that I have
+to submit due to unanchored ... I had to discard at the end"*. The prompt loop
+was the symptom; the blocker was in worktree.nvim (a repo with no git remote
+carried no review identity, so `validate` refused every review — §11.8). Three
+more defects lived here:
+
+- **The close prompt forced a false dilemma.** A draft lives in
+  `authoring._drafts` and survives closing the view, yet the unsent-review prompt
+  offered only submit / discard / cancel. Added **`close and keep the draft`**;
+  the prompt states the draft is kept either way. (The prompt stays, by design:
+  an invisible unsent draft can still be lost without the reader being told.)
+- **Every abort was silent.** Cancelling the verdict returned with no message, so
+  the next `q` met the same prompt and it read as a loop. Every non-event now
+  names what survived, with a count. `s` on an empty draft refuses before asking
+  anything; a blank summary is stored as absent, not `""`.
+- **Unanchored findings left the critical path.** They were collected by a loop on
+  every submit; now `c` annotates a line, **`u` records a finding with no line**,
+  and `s` asks only verdict + optional summary. No severity, no finding.
+
+review-json §6 is unchanged: an unanchored finding still reaches the Markdown and
+stays out of the JSON, with nothing invented to place it.
+
+`tests/adr0060-repos-render.lua` p10 (91/0) and `tests/run-all.sh` all green.
+Reviewed by lector (approved, exact head 4489c75, PR #19).
+
 ## [v0.4.13] — 2026-09-02 — a `reviews` section on every repository, a `[feedback]` badge, and `d` to remove a review
 
 ADR-0060 §11. Pairs with worktree.nvim v0.5.5 (the store policy) and auto-core
