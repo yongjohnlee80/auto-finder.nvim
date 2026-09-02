@@ -120,6 +120,51 @@ local KIND_HL = {
   untracked  = "AutoCoreGitUntracked",
   conflicted = "AutoCoreGitConflicted",
 }
+-- Review severity colours are auto-core's ANNOTATION groups, so a finding reads
+-- the same in this tree as it does inline in the diff view. They link to the
+-- Diagnostic* family — foreground only, like the status colours above (§10).
+local SEVERITY_HL = {
+  ["must-fix"]   = "AutoCoreReviewMustFix",
+  ["should-fix"] = "AutoCoreReviewShouldFix",
+  ["nit"]        = "AutoCoreReviewNit",
+  ["question"]   = "AutoCoreReviewQuestion",
+}
+
+---_review_label renders one review row as a FILENAME plus a bracketed badge
+---(§11 — Johno: "the severity should be appended beside the filename in
+---filename [severity] kinda way").
+---
+---The `<slug>@` prefix is dropped. Every file in a repo's review directory
+---carries the same slug, so on these rows it is twenty-odd columns of a narrow
+---panel spent repeating the repo row above; what remains still names the commit
+---— `<short-sha>.r<N>.review.json` — which is the identifying half. `i` prints
+---the whole path.
+---
+---The badge is the WORST severity in the file, because that is what a reader
+---triages on. A review with no comments has no severity to show, so it falls
+---back to its verdict — a summary-only approval is the common case — and a file
+---that would not parse says so instead of looking empty. Malformed is additive,
+---never a replacement: a review can carry real findings AND fail validation,
+---and hiding either half is how a reviewer loses one.
+---@param meta table  a `worktree.review.describe` record
+---@return string
+local function _review_label(meta)
+  local name = tostring(meta.name or "?")
+  if meta.slug and meta.slug ~= "" then
+    name = name:gsub("^" .. vim.pesc(meta.slug) .. "@", "")
+  end
+  -- An UNDESCRIBED record — an older worktree.nvim's cheap `{revision, path,
+  -- name}` — has no severity to report. It gets the bare filename rather than a
+  -- badge that would read as "no comments" when the truth is "not looked at".
+  if meta.severities == nil then return name end
+  local parts = {}
+  if meta.worst then parts[#parts + 1] = meta.worst
+  elseif meta.verdict and meta.verdict ~= "" then parts[#parts + 1] = meta.verdict
+  elseif not meta.err then parts[#parts + 1] = "no comments" end
+  if meta.err then parts[#parts + 1] = "malformed" end
+  return name .. "  [" .. table.concat(parts, " · ") .. "]"
+end
+
 -- Fallback marker for items with no index side (a commit's files).
 local KIND_MARK = {
   added = "+", modified = "M", deleted = "D",
@@ -265,29 +310,63 @@ local function _render(bufnr)
                     if node.kind == "uncommitted" then
                       fc.items = backend.uncommitted(wt)
                       fc.reviews = {}
+                      -- The working tree has no commit for a review to anchor
+                      -- to, so it can carry no feedback by construction.
+                      fc.reviewed = {}
                     else
                       fc.items = backend.commit_files(repo, node.sha)
-                      fc.reviews = backend.reviews(repo, node.sha)
+                      -- ONE read pass answers both questions this commit's rows
+                      -- ask: what reviews it has (described, so each row can
+                      -- show its severity) and which of its files carry
+                      -- comments (a pure merge over those same records). Paid
+                      -- once per expansion and cached with the file list, so a
+                      -- repaint costs nothing.
+                      --
+                      -- Guarded on the SURFACE, not a version: against an older
+                      -- worktree.nvim the rows fall back to the cheap revision
+                      -- listing and no file is badged, which is the tree this
+                      -- panel has always drawn.
+                      if type(backend.reviews_described) == "function" then
+                        fc.reviews = backend.reviews_described(repo, node.sha)
+                        fc.reviewed = type(backend.tally_paths) == "function"
+                          and backend.tally_paths(fc.reviews) or {}
+                      else
+                        fc.reviews = backend.reviews(repo, node.sha)
+                        fc.reviewed = {}
+                      end
                     end
                   end
                   if #fc.items == 0 and #(fc.reviews or {}) == 0 then
                     msg(3, "(no files)")
                   end
                   for _, f in ipairs(fc.items) do
+                    -- The badge is deliberately just the WORD, not the severity:
+                    -- it answers "is there feedback on this file", and the row
+                    -- already carries the file's own status colour. `<CR>` on the
+                    -- review row, or `o` on the commit, is where the finding
+                    -- itself is read.
+                    local reviewed = (fc.reviewed or {})[f.path]
                     _row(rows, lines, hls, {
                       kind = "file", repo = repo, worktree = wt, node = node,
                       file = f, hl = KIND_HL[f.kind] or "AutoCoreDimmed",
+                      feedback = reviewed or nil,
                       text = string.rep(IND, 3) .. (KIND_MARK[f.kind] or "?")
                         .. " " .. f.path
-                        .. (f.orig and ("  ← " .. f.orig) or ""),
+                        .. (f.orig and ("  ← " .. f.orig) or "")
+                        .. (reviewed and "  [feedback]" or ""),
                     })
                   end
                   -- Requirement 9: review files sit beside the changed files.
+                  -- Rendered through the SAME label and colour as the repo's
+                  -- `reviews` section (§11) — the same file listed in two places
+                  -- reading two different ways is how a reader stops trusting
+                  -- either.
                   for _, rv in ipairs(fc.reviews or {}) do
                     _row(rows, lines, hls, {
                       kind = "review", repo = repo, worktree = wt, node = node,
-                      review = rv, hl = "AutoCoreReviewFrame",
-                      text = string.rep(IND, 3) .. "R " .. rv.name,
+                      review = rv,
+                      hl = (rv.worst and SEVERITY_HL[rv.worst]) or "AutoCoreReviewFrame",
+                      text = string.rep(IND, 3) .. "R " .. _review_label(rv),
                     })
                   end
                 end
@@ -321,6 +400,45 @@ local function _render(bufnr)
                   text = string.rep(IND, 2) .. "… m for more commits",
                 })
               end
+            end
+          end
+        end
+
+        -- ── reviews: the repository's whole review index (§11) ──
+        --
+        -- A SIBLING of the worktrees rather than a child of a commit, because
+        -- under a commit is the one place a review cannot always be found. The
+        -- file names the sha it reviewed, so the moment history is rewritten —
+        -- a rebase, an amend — no commit row can show it and the review is
+        -- invisible in the tree, which is exactly when someone needs to find
+        -- it and re-point it. Keyed on the repo, nothing in the store hides.
+        --
+        -- Two tiers of cost, each paying only for what it draws: the count on
+        -- this row is one directory scan (`reviews_index`), and the documents
+        -- are opened only once the section is expanded (`reviews_all`).
+        -- Guarded on the surface, not on a version: an older worktree.nvim
+        -- simply renders the tree it always did.
+        if type(backend.reviews_index) == "function" then
+          local vid = "reviews:" .. repo.common_dir
+          local vc = _cache(vid)
+          if not vc.index then vc.index = backend.reviews_index(repo) or {} end
+          local vopen = container(1, {
+            kind = "reviews", id = vid, repo = repo,
+            hl = "AutoCoreSectionInactive",
+            label = "reviews",
+            suffix = #vc.index > 0 and ("  (" .. #vc.index .. ")") or "",
+          })
+          if vopen then
+            if not vc.items then vc.items = backend.reviews_all(repo) or {} end
+            if #vc.items == 0 then
+              msg(2, "(no reviews recorded for this repository)")
+            end
+            for _, meta in ipairs(vc.items) do
+              _row(rows, lines, hls, {
+                kind = "review", repo = repo, review = meta,
+                hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
+                text = string.rep(IND, 2) .. "R " .. _review_label(meta),
+              })
             end
           end
         end
@@ -790,14 +908,87 @@ local function _info(row)
       "  index:    " .. tostring(row.file.x) .. "  worktree: " .. tostring(row.file.y),
       row.file.orig and ("  renamed from: " .. row.file.orig) or "",
     }
-  elseif row.kind == "review" then
+  elseif row.kind == "reviews" then
+    local backend = _repos()
+    local dir = backend and type(backend.reviews_dir) == "function"
+      and backend.reviews_dir(row.repo) or nil
     lines = {
-      "Review: " .. tostring(row.review.name),
-      "  revision: " .. tostring(row.review.revision),
-      "  path:     " .. tostring(row.review.path),
+      "Reviews for " .. tostring(row.repo.label),
+      "  slug:  " .. tostring(row.repo.slug),
+      "  store: " .. tostring(dir or "(unavailable)"),
       "",
-      "<CR> opens the JSON.",
+      "One file per (repo, commit, revision). Listed here for the WHOLE repo,",
+      "so a review still shows after a rebase has moved the commit it names.",
+      "",
+      "<CR> on a review opens its JSON · i describes it",
     }
+  elseif row.kind == "review" then
+    -- Both kinds of review row land here — the ones under a commit and the
+    -- ones in the repo's `reviews` section — and only the second arrives
+    -- already described, so the document is read here either way. This is the
+    -- view §11 asks for: which commit, when, by whom, and how bad.
+    local backend = _repos()
+    local meta = row.review
+    if backend and type(backend.review_meta) == "function" then
+      meta = backend.review_meta(row.review.path) or row.review
+    end
+    lines = {
+      "Review: " .. tostring(meta.name),
+      "  commit:   " .. tostring(meta.commit
+        or ("(not recorded — the filename says " .. tostring(meta.short) .. ")")),
+      "  revision: " .. tostring(meta.revision),
+      "  created:  " .. tostring(meta.created or "(not recorded)"),
+      "  reviewer: " .. tostring(meta.reviewer or "(not recorded)"),
+      "  verdict:  " .. tostring(meta.verdict or "(none)"),
+      "  comments: " .. tostring(meta.comments or 0)
+        .. (((meta.resolved or 0) > 0) and ("  (" .. meta.resolved .. " resolved)") or ""),
+      "  worst:    " .. tostring(meta.worst or "(no comments)"),
+      "  path:     " .. tostring(meta.path),
+    }
+    if meta.severities and next(meta.severities) then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  severities:"
+      -- The ladder in order, then anything unrecognised, so a severity this
+      -- version has never heard of is still shown rather than dropped.
+      local seen = {}
+      for _, sev in ipairs({ "must-fix", "should-fix", "nit", "question" }) do
+        seen[sev] = true
+        local n = meta.severities[sev]
+        if n then lines[#lines + 1] = ("    %-11s %d"):format(sev, n) end
+      end
+      local rest = {}
+      for sev in pairs(meta.severities) do
+        if not seen[sev] then rest[#rest + 1] = sev end
+      end
+      table.sort(rest)
+      for _, sev in ipairs(rest) do
+        lines[#lines + 1] = ("    %-11s %d"):format(sev, meta.severities[sev])
+      end
+    end
+    if meta.file_list and #meta.file_list > 0 then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  files:"
+      for _, p in ipairs(meta.file_list) do
+        local f = meta.files[p] or {}
+        lines[#lines + 1] = ("    %s  (%d%s)"):format(p, f.count or 0,
+          f.worst and (", " .. f.worst) or "")
+      end
+    end
+    if meta.summary and meta.summary ~= "" then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  summary: " .. tostring(meta.summary)
+    end
+    if meta.revision_mismatch then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = ("  ! the document says revision %s, the filename says %s")
+        :format(tostring(meta.revision_mismatch), tostring(meta.revision))
+    end
+    if meta.err then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  ! " .. tostring(meta.err)
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "<CR> opens the JSON."
   else
     return
   end
@@ -821,6 +1012,10 @@ M.HELP = {
   "auto-finder repos — worktree explorer",
   "",
   "  repo → worktree → UNCOMMITTED / commits → files · reviews",
+  "  repo → reviews  → every review this repository has, newest first",
+  "",
+  "  a file with review feedback on it is badged [feedback]",
+  "  a review row is named <commit>.r<N>.review.json  [worst severity]",
   "",
   "  <CR>  expand · open a file · open a review JSON",
   "  o     diff the commit — three columns: files | a/ (old) | b/ (new)",
