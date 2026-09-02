@@ -104,9 +104,11 @@ end
 ---rows (independently indented at IND*3) do not move.
 local function _chevron(expanded) return expanded and "▾" or "▸" end
 
--- Johno's scheme (ADR-0060 §2.2): deleted RED, modified GREEN, added GREEN
--- with a `+`. Added and modified share the colour on purpose; the MARKER is
--- what distinguishes them.
+-- Johno's scheme (ADR-0060 §2.2, colours revised 2026-09-02 in §10): deleted
+-- RED, modified YELLOW, added GREEN with a `+`. Added and modified SHARED the
+-- green until 2026-09-02 with the marker as the only distinction; Johno asked
+-- for a colour of its own for modified, so `AutoCoreGitModified` now resolves
+-- to a yellow tint auto-core derives from the active scheme. The marker stays.
 local KIND_HL = {
   added      = "AutoCoreGitAdded",
   modified   = "AutoCoreGitModified",
