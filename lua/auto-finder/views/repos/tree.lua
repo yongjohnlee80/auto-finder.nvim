@@ -130,6 +130,43 @@ local SEVERITY_HL = {
   ["question"]   = "AutoCoreReviewQuestion",
 }
 
+---CLOSE_CHOICES are the answers to the unsent-review prompt, spelled out.
+---
+---`keep` is the one that was MISSING, and its absence was the defect. A draft
+---lives in `authoring._drafts` — module state, keyed by (slug, sha) — so it
+---SURVIVES closing the diff view and repaints on reopen; `open_diff` says so in
+---its own comment. The prompt nevertheless offered only submit / discard /
+---cancel, which forced a reader who just wanted to look away into either
+---finishing a multi-prompt submit or destroying work that was never at risk.
+---Johno hit exactly that: "it keeps bugging out that I have to submit ... I had
+---to discard at the end" (2026-09-02).
+local CLOSE_CHOICES = {
+  submit  = "submit the review now",
+  keep    = "close and keep the draft",
+  discard = "discard the draft",
+  stay    = "stay in the diff view",
+}
+
+---_draft_holds names a draft's contents for a prompt or a message.
+---
+---A COUNT is the difference between "something went wrong" and "your three
+---comments are still here", and every message below that reports a non-event
+---uses it. The footer's own count is a different question — how many ANCHORED
+---annotations are drawn — so unanchored findings appear here and not there.
+---@param d table
+---@return string
+local function _draft_holds(d)
+  local bits = {}
+  local a, u = #(d.comments or {}), #(d.unanchored or {})
+  if a > 0 then bits[#bits + 1] = a .. (a == 1 and " comment" or " comments") end
+  if u > 0 then bits[#bits + 1] = u .. " unanchored" end
+  if type(d.summary) == "string" and vim.trim(d.summary) ~= "" then
+    bits[#bits + 1] = "a summary"
+  end
+  if #bits == 0 then return "nothing" end
+  return table.concat(bits, " + ")
+end
+
 ---_review_label renders one review row as a FILENAME plus a bracketed badge
 ---(§11 — Johno: "the severity should be appended beside the filename in
 ---filename [severity] kinda way").
@@ -706,24 +743,73 @@ function M.open_diff(row, opts)
         -- prompted on "key" would prompt again on the finishing call and never
         -- close (ADR-0065 §2.3).
         vim.schedule(function()
-          vim.ui.select({ "submit", "discard", "cancel" }, {
-            prompt = ("unsent review (%d anchored, %d unanchored%s):"):format(
-              #(draft.comments or {}), #(draft.unanchored or {}),
-              (draft.summary and vim.trim(draft.summary) ~= "") and ", summary" or ""),
+          local C = CLOSE_CHOICES
+          vim.ui.select({ C.submit, C.keep, C.discard, C.stay }, {
+            prompt = ("unsent review — %s (kept either way):"):format(_draft_holds(draft)),
           }, function(choice)
-            if choice == "submit" then
+            if choice == C.submit then
               M._submit_review(row, sha)
-            elseif choice == "discard" then
-              authoring.discard(row.repo.slug, sha)
+            elseif choice == C.keep then
+              logger.notify(("repos: closed — %s kept; reopen with o and s submits")
+                :format(_draft_holds(draft)), { level = vim.log.levels.INFO })
               pcall(function() dv.close("resume") end)
+            elseif choice == C.discard then
+              -- The one destructive answer, so it says what it destroyed.
+              local held = _draft_holds(draft)
+              authoring.discard(row.repo.slug, sha)
+              logger.notify("repos: discarded " .. held, { level = vim.log.levels.WARN })
+              pcall(function() dv.close("resume") end)
+            else
+              -- `stay`, or the prompt itself dismissed. Doing nothing is
+              -- correct — the view is still open because this hook vetoed the
+              -- close — but SAYING nothing is what made the prompt read as a
+              -- loop, so the way out is named.
+              logger.notify(("repos: still open — %s kept; q offers `%s`")
+                :format(_draft_holds(draft), C.keep), { level = vim.log.levels.INFO })
             end
           end)
         end)
         return "cancel"
       end,
     }
-    keymaps = { { key = "s", desc = "submit review",
-                  fn = function() M._submit_review(row, sha) end } }
+    keymaps = {
+      { key = "s", desc = "submit review",
+        fn = function() M._submit_review(row, sha) end },
+      -- UNANCHORED findings need a way in (review-json §6): "this module has no
+      -- tests", "the ADR contradicts §3" — findings with no `(path, line)`,
+      -- which must not be dropped to fit the schema and must not be given an
+      -- invented line number.
+      --
+      -- Their own KEY, because they used to be collected by a loop on the
+      -- submit path: every submit asked "unanchored finding 1 (blank to
+      -- finish)" whether or not the reviewer had one, so writing a
+      -- single-comment review cost three modal prompts and each was another
+      -- place to abort into silence. `c` annotates a line and `u` records a
+      -- finding without one; `s` now only asks what it cannot infer.
+      { key = "u", desc = "unanchored finding",
+        fn = function()
+          vim.ui.input({ prompt = "finding with no line: " }, function(body)
+            if not (body and vim.trim(body) ~= "") then
+              logger.notify("repos: nothing added", { level = vim.log.levels.INFO })
+              return
+            end
+            vim.ui.select(authoring.SEVERITIES, { prompt = "severity:" }, function(sev)
+              -- No severity, no finding. It used to fall back to "comment" and
+              -- store it anyway, so cancelling the picker still changed the
+              -- draft.
+              if not sev then
+                logger.notify("repos: nothing added — no severity chosen",
+                  { level = vim.log.levels.INFO })
+                return
+              end
+              draft.unanchored = draft.unanchored or {}
+              table.insert(draft.unanchored, { severity = sev, body = vim.trim(body) })
+              logger.notify(("repos: %s on this review — s submits")
+                :format(_draft_holds(draft)), { level = vim.log.levels.INFO })
+            end)
+          end)
+        end },
+    }
   end
 
   -- `o` opens the current file for full examination (requirement 7). Bound for
@@ -808,35 +894,33 @@ function M._submit_review(row, sha)
     return
   end
   local draft = authoring.draft(row.repo.slug, sha)
+  -- Refuse EARLY and say what would make it submittable. `authoring.submit`
+  -- refuses an empty draft too, but only after the reader has answered a
+  -- verdict and a summary — two prompts spent to be told there was nothing to
+  -- write.
+  if not authoring.dirty(draft) then
+    logger.notify("repos: nothing to submit yet — c annotates a line, u records a finding without one",
+      { level = vim.log.levels.WARN })
+    return
+  end
   local verdicts = { "comment", "approved", "change_requested" }
   vim.ui.select(verdicts, { prompt = "verdict:" }, function(verdict)
-    if not verdict then return end
+    -- Abort LOUDLY, naming what survived. A silent `return` here is what made
+    -- the close prompt read as a loop: cancel the verdict, get no message,
+    -- press q, meet the same prompt, conclude the panel is stuck.
+    if not verdict then
+      logger.notify(("repos: submit cancelled — %s kept"):format(_draft_holds(draft)),
+        { level = vim.log.levels.INFO })
+      return
+    end
     draft.verdict = verdict
     vim.ui.input({ prompt = "summary (optional): " }, function(summary)
-      draft.summary = summary
-      -- UNANCHORED findings need a way IN, or review-json §6 is honoured only
-      -- by whatever a caller happens to inject. "this module has no tests",
-      -- "the ADR contradicts §3" — findings with no `(path, line)` — must not
-      -- be dropped to fit the schema, and inventing a line number to place them
-      -- is explicitly forbidden. So they are collected here, one at a time,
-      -- until the reviewer enters an empty line.
-      draft.unanchored = draft.unanchored or {}
-      local function ask_unanchored()
-        vim.ui.input({
-          prompt = ("unanchored finding %d (blank to finish): "):format(#draft.unanchored + 1),
-        }, function(body)
-          if body and vim.trim(body) ~= "" then
-            vim.ui.select(authoring.SEVERITIES, { prompt = "severity:" }, function(sev)
-              table.insert(draft.unanchored,
-                { severity = sev or "comment", body = vim.trim(body) })
-              ask_unanchored()
-            end)
-            return
-          end
-          M._finish_submit(row, sha)
-        end)
-      end
-      ask_unanchored()
+      -- An empty or dismissed summary is NOT an abort — a review may be all
+      -- comments — but it must not be stored as "" either, which is neither a
+      -- summary nor absent. The verdict is the only thing `s` insists on.
+      draft.summary = (type(summary) == "string" and vim.trim(summary) ~= "")
+        and vim.trim(summary) or nil
+      M._finish_submit(row, sha)
     end)
   end)
 end
@@ -1034,8 +1118,11 @@ M.HELP = {
   "",
   "  in the diff view (o), on the a/ or b/ pane:",
   "  c     annotate the line — in visual mode, the selection",
+  "  u     record a finding with NO line (\"this module has no tests\")",
   "  x     drop a pending annotation on this line",
-  "  s     submit — writes the review JSON and its paired Markdown",
+  "  s     submit — verdict, an optional summary, then writes the JSON",
+  "        and its paired Markdown. q on an unsent draft offers to close",
+  "        and KEEP it — a draft survives closing and repaints on reopen.",
   "  o     open this file's working-tree copy for full examination",
   "  <Tab>/<S-Tab> or <C-l>/<C-h>  cycle panes        q  close",
   "",
