@@ -1022,6 +1022,7 @@ M.HELP = {
   "  w     watch / unwatch this worktree (persists)",
   "  m     load another window of commits",
   "  i     info about the node          R  reload (all with no node)",
+  "  d     remove this review JSON — confirms, and keeps its Markdown",
   "  ?     this help",
   "",
   "  git actions:",
@@ -1174,6 +1175,76 @@ function M.git_commit(row)
   end)
 end
 
+---remove_review is `d` on a review row: delete the review's JSON, after a
+---confirmation that NAMES it (§11.6).
+---
+---A review is the only artifact on this panel that git cannot regenerate, so it
+---gets the treatment §9 gave `push`: the prompt names the file and the
+---repository, because "are you sure?" on a panel holding several repos does not
+---say which one is about to go.
+---
+---It also says what is KEPT. The canonical Markdown is the PRIMARY and this
+---JSON is its projection (ADR-0067), the Markdown lives in the knowledge base
+---rather than the review store, and a projection can be written again from
+---prose while prose cannot be recovered from a projection — so only the JSON
+---goes. "Remove the review" could reasonably be read as removing both, which
+---is exactly why the prompt says which it means.
+---
+---`d`, not `x`: in the diff view `x` DROPS A PENDING annotation that was never
+---written, and using one key for "discard an unsaved draft" and "delete a file
+---from disk" would blur the only distinction that matters here.
+function M.remove_review(row)
+  if not (row and row.kind == "review" and row.review and row.review.path) then
+    logger.notify("repos: put the cursor on a review to remove it",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local backend = _repos()
+  if not (backend and type(backend.remove_review) == "function") then
+    logger.notify("repos: removing a review needs a newer worktree.nvim (remove_review)",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local meta = row.review
+  -- The RAW filename, not the elided row label: a prompt that is about to
+  -- delete something names it exactly as the filesystem does.
+  local label = tostring(meta.name or meta.path)
+  local prompt = ("Delete review %s from %s?  Its canonical Markdown is kept."):format(
+    label, tostring(row.repo and row.repo.label or "this repository"))
+
+  local function go(choice)
+    if choice ~= "yes" then
+      logger.notify("repos: removal cancelled", { level = vim.log.levels.INFO })
+      return
+    end
+    local ok, err, detail = backend.remove_review(row.repo, meta.path)
+    if not ok then
+      logger.notify("repos: could not remove " .. label .. " — " .. tostring(err),
+        { level = vim.log.levels.ERROR })
+      return
+    end
+    -- EVERYTHING is invalidated, not just one node: the file was listed in the
+    -- repo's `reviews` section and again under its commit, its severity fed a
+    -- file's `[feedback]` badge, and the section's count came from a third
+    -- read. A partial invalidation leaves one of those showing a file that is
+    -- no longer there.
+    M.invalidate(nil)
+    _rerender()
+    local kept = detail and detail.document
+    logger.notify("repos: removed " .. label
+      .. (kept and ("  — the Markdown is kept at " .. tostring(kept)) or ""),
+      { level = vim.log.levels.INFO })
+  end
+
+  local okc, float = pcall(require, "auto-core.ui.float")
+  if okc and float and type(float.confirm) == "function" then
+    float.confirm(prompt, { on_choice = go })
+  else
+    -- No confirm primitive is NOT a licence to delete unconfirmed.
+    vim.ui.select({ "yes", "no" }, { prompt = prompt }, go)
+  end
+end
+
 ---git_push is `P`: publish, but only after an explicit confirmation.
 ---
 ---`P` is one keypress from `p`, and a push is the only action on this panel
@@ -1238,6 +1309,8 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: commit what is staged")
   set("P", function() M.git_push(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: push (confirms first)")
+  set("d", function() M.remove_review(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: remove this review JSON (confirms first)")
   set("?", _help, "auto-finder.repos: help")
 end
 
