@@ -137,13 +137,24 @@ local unt_row, unt_mark = row_hl("dirty.txt")
 ok("p4: an untracked file's row is painted AutoCoreGitUntracked",
   unt_row == "AutoCoreGitUntracked" and unt_mark == "AutoCoreGitUntracked",
   ("row=%s mark=%s"):format(tostring(unt_row), tostring(unt_mark)))
-local function bg_of(name)
+-- FOREGROUND only (ADR-0060 §10, 2026-09-02): the row is a whole-line extmark,
+-- so a group carrying a background paints a wash across the row — which is what
+-- read as "not so green / not so orange". Added/modified/deleted must differ by
+-- foreground and carry no background at all, like the todos panel's headers.
+local function attrs_of(name)
   local h = vim.api.nvim_get_hl(0, { name = name, link = false })
-  return type(h) == "table" and h.bg or nil
+  return type(h) == "table" and h or {}
 end
-ok("p4: modified resolves to a background of its OWN, not added's green",
-  bg_of("AutoCoreGitModified") ~= nil and bg_of("AutoCoreGitModified") ~= bg_of("AutoCoreGitAdded"),
-  ("modified=%s added=%s"):format(tostring(bg_of("AutoCoreGitModified")), tostring(bg_of("AutoCoreGitAdded"))))
+local A, Mo, D = attrs_of("AutoCoreGitAdded"), attrs_of("AutoCoreGitModified"), attrs_of("AutoCoreGitDeleted")
+ok("p4: added / modified / deleted are three DIFFERENT foregrounds",
+  A.fg ~= nil and Mo.fg ~= nil and D.fg ~= nil and A.fg ~= Mo.fg and Mo.fg ~= D.fg and A.fg ~= D.fg,
+  ("added=%s modified=%s deleted=%s"):format(tostring(A.fg), tostring(Mo.fg), tostring(D.fg)))
+ok("p4: and none of them paints a background",
+  A.bg == nil and Mo.bg == nil and D.bg == nil,
+  ("added=%s modified=%s deleted=%s"):format(tostring(A.bg), tostring(Mo.bg), tostring(D.bg)))
+ok("p4: they are the todos panel's colours — DiagnosticOk / DiagnosticWarn / DiagnosticError",
+  A.fg == attrs_of("DiagnosticOk").fg and Mo.fg == attrs_of("DiagnosticWarn").fg
+  and D.fg == attrs_of("DiagnosticError").fg)
 
 -- expand the commit -> its files
 local nodes = backend.children(repo, feat)
@@ -255,6 +266,97 @@ table.sort(shown)
 ok("p6: the view shows EXACTLY the files the tree lists for that node",
   #shown > 0 and vim.deep_equal(shown, listed), vim.inspect({ shown = shown, listed = listed }))
 dv.close()
+
+-- ── p7: a ROOT commit (2026-09-02) — "(no files)" under a commit whose `o` lists every file ──
+-- `commit_files` reads `diff-tree`, which prints nothing for a parentless commit
+-- unless told `--root`; `git show` (the diff view) shows the root by default.
+-- So a repository's first commit — the ONLY commit in ddex-sftp — listed no
+-- children in the tree while `o` opened 25 files. Same invariant as p6: what
+-- the tree LISTS under a node is exactly what `o` SHOWS.
+local mainwt
+for _, w in ipairs(backend.worktrees(repo)) do if w.branch == "main" then mainwt = w end end
+ok("p7: fixture has the main worktree", mainwt ~= nil)
+backend.toggle_watch(mainwt.path)
+tree.invalidate(nil)
+tree._expanded["repo:" .. repo.common_dir] = true
+tree._expanded["wt:" .. mainwt.path] = true
+paint()
+local rootrow
+for _, r in ipairs(tree._rows) do
+  if r.kind == "commit" and r.worktree and r.worktree.path == mainwt.path
+    and r.node and r.node.commit and #r.node.commit.parents == 0 then rootrow = r end
+end
+ok("p7: fixture: main's one commit is a ROOT commit", rootrow ~= nil, text())
+tree._expanded["commit:" .. rootrow.node.sha] = true
+paint()
+local rlisted = {}
+for _, r in ipairs(tree._rows) do
+  if r.kind == "file" and r.node and r.node.sha == rootrow.node.sha then rlisted[#rlisted + 1] = r.file.path end
+end
+ok("p7: the root commit expands to the file it created, not '(no files)'",
+  vim.deep_equal(rlisted, { "a.txt" }) and not text():find("(no files)", 1, true), text())
+tree.open_diff(rootrow)
+ok("p7: o on the root commit opens the diff view", dv.is_open() == true)
+local rst = dv._state_for_tests()
+local rshown = {}
+for _, f in ipairs(rst and rst.files or {}) do rshown[#rshown + 1] = f.path end
+ok("p7: and the view shows EXACTLY the files the tree lists",
+  #rshown > 0 and vim.deep_equal(rshown, rlisted), vim.inspect({ shown = rshown, listed = rlisted }))
+dv.close()
+
+-- ── p8: the load-more affordance (2026-09-02) — an `m` that could never load ──
+-- The row appeared for EVERY windowed worktree, full or not: a repo with one
+-- commit (ddex-sftp) offered `m for more commits` and the key did nothing,
+-- while golib's 231 commits paged fine — "works for some". The affordance now
+-- follows auto-core's `has_more`, which asks git for one commit past the
+-- window and is therefore exact.
+local function commit_rows(wtpath)
+  local n = 0
+  for _, r in ipairs(tree._rows) do
+    if r.kind == "commit" and r.worktree and r.worktree.path == wtpath then n = n + 1 end
+  end
+  return n
+end
+ok("p8: a one-commit base branch offers no 'more' row",
+  commit_rows(mainwt.path) == 1 and not text():find("m for more commits", 1, true), text())
+-- Grow main past one window (15) so there IS more to load.
+for i = 1, 16 do
+  vim.fn.writefile({ tostring(i) }, proj .. "/w" .. i .. ".txt")
+  G(proj, "add", "."); G(proj, "commit", "-q", "-m", "window filler " .. i)
+end
+tree.invalidate(nil)
+paint()
+ok("p8: a FULL window lists 15 of the 17 commits and offers 'm for more commits'",
+  commit_rows(mainwt.path) == 15 and text():find("m for more commits", 1, true) ~= nil,
+  ("rows=%d"):format(commit_rows(mainwt.path)))
+local morerow
+for _, r in ipairs(tree._rows) do
+  if r.kind == "more" and r.worktree and r.worktree.path == mainwt.path then morerow = r end
+end
+ok("p8: the 'more' row belongs to main", morerow ~= nil)
+tree.load_more(morerow)
+ok("p8: m loads the rest (17 of 17) and the row disappears — nothing left to load",
+  commit_rows(mainwt.path) == 17 and not text():find("m for more commits", 1, true),
+  ("rows=%d"):format(commit_rows(mainwt.path)))
+-- An OLDER auto-core reports no `has_more`; the tree then compares the count it
+-- got against the window it asked for, so a mixed install still pages.
+local real_children = backend.children
+backend.children = function(...)
+  local nodes, meta = real_children(...)
+  meta.has_more = nil
+  return nodes, meta
+end
+tree._more["wt:" .. mainwt.path] = nil
+tree.invalidate(nil)
+paint()
+ok("p8: without has_more, a full window still offers 'more' (count == window)",
+  commit_rows(mainwt.path) == 15 and text():find("m for more commits", 1, true) ~= nil,
+  ("rows=%d"):format(commit_rows(mainwt.path)))
+tree.load_more(morerow)
+ok("p8: and a short window (17 < 30) withdraws it",
+  commit_rows(mainwt.path) == 17 and not text():find("m for more commits", 1, true),
+  ("rows=%d"):format(commit_rows(mainwt.path)))
+backend.children = real_children
 
 -- unwatch clears the commits again
 backend.toggle_watch(feat.path)
