@@ -2,6 +2,48 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.13] — 2026-09-02 — a `reviews` section on every repository, a `[feedback]` badge, and `d` to remove a review
+
+ADR-0060 §11. Pairs with worktree.nvim v0.5.5 (the store policy) and auto-core
+v0.2.10; against an older worktree.nvim the tree renders exactly as before.
+
+Review JSONs were reachable only under the commit they name, which is the one
+place they cannot always be found: the filename carries the sha, so after a
+rebase or an amend no commit row names the file and the review is invisible in
+the panel — exactly when someone needs to find it and re-point it.
+
+- **A `reviews` node on each repository**, a sibling of its worktrees, listing
+  every review the repo has. The per-commit rows stay where they were, so a
+  review is reachable from its commit *and* from the repo.
+- **Rows are `<commit>.r<N>.review.json  [worst severity]`.** The `<slug>@`
+  prefix is elided — every file in the directory carries it and it is already
+  the row above — and what remains still names the commit. The badge falls back
+  to the verdict for a review with no comments, and `malformed` is additive
+  rather than a replacement: a review can carry real findings *and* fail
+  validation, and hiding either half loses one. Rows use auto-core's annotation
+  groups, so a finding is the same colour here as inline in the diff view.
+  Both review row kinds render through this one label and colour.
+- **`i` describes a review** — full sha, revision, created, reviewer, verdict,
+  comment and resolved counts, the severity tally, the files it touches with
+  per-file counts, the summary, and any parse or validation error, including a
+  document whose own revision disagrees with its filename. `i` on the section
+  names the store directory.
+- **`[feedback]`** badges a commit's changed files where a reviewer has
+  written, merged across revisions.
+- **`d` removes a review JSON**, after a confirmation that names the file and
+  the repository and states that the canonical Markdown is kept. `d` rather
+  than `x`, which in the diff view drops a *pending, never-written* annotation.
+  The guard is on the row kind, so a stray `d` on a file row cannot delete that
+  file's review.
+- **Two tiers of cost**, keeping the zero-cost repaint: the count on a collapsed
+  row is one directory scan, documents open only on expand, and a commit's rows
+  plus its badges come from one read pass.
+
+`tests/adr0060-repos-render.lua` 67/0 (new p9) and
+`tests/adr0060-git-actions.lua` 68/0 (new [9]); `tests/run-all.sh` all green,
+rerun against the corrected worktree.nvim head. Reviewed by lector
+(approved, exact head 64d498b, PR #18).
+
 ## [v0.4.12] — 2026-09-02 — repos panel: load-more only when there is more; root commits and foreground colours pinned
 
 Pairs with auto-core v0.2.9 (auto-core PR #13); this side stays correct against an
