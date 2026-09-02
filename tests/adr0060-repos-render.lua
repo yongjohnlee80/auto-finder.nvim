@@ -57,6 +57,7 @@ require("worktree.repos")._reset_for_tests()
 require("worktree").set_root(lab)
 
 local tree = require("auto-finder.views.repos.tree")
+local logger = require("auto-finder.log")
 local backend = require("worktree.repos")
 ok("p4: backend available", backend.available() == true)
 
@@ -444,6 +445,162 @@ ok("p9: *** and a file nobody reviewed is NOT badged ***",
   funreviewed and funreviewed.text)
 ok("p9: the file rows keep their own status colour",
   freviewed ~= nil and freviewed.hl == "AutoCoreGitAdded", freviewed and tostring(freviewed.hl))
+
+-- ── p10: the submit flow — no silent aborts, and `q` can KEEP a draft ──
+-- Johno, 2026-09-02: "it keeps bugging out that I have to submit due to
+-- unanchored ... I had to discard at the end. not usable still". The draft
+-- lives in `authoring._drafts` and SURVIVES closing the view, yet the unsent-
+-- review prompt offered only submit / discard / cancel — so a reader who
+-- changed their mind had to either finish a multi-prompt submit or destroy work
+-- that was never at risk, and every abort in the chain returned silently.
+do
+  local A = require("auto-finder.views.repos.authoring")
+  local notes = {}
+  local real_notify = logger.notify
+  logger.notify = function(m, o) notes[#notes + 1] = tostring(m); return real_notify(m, o) end
+  local real_select, real_input = vim.ui.select, vim.ui.input
+  local asked = {}
+  local function said(pat)
+    for _, n in ipairs(notes) do if n:find(pat, 1, true) then return n end end
+  end
+
+  local crow
+  for _, r in ipairs(tree._rows) do if r.kind == "commit" and r.node.sha == commit.sha then crow = r end end
+  ok("p10: fixture: a commit row to review", crow ~= nil)
+  A.discard(repo.slug, commit.sha)
+
+  -- 1. `s` on an EMPTY draft refuses at once, naming both ways in.
+  notes, asked = {}, {}
+  vim.ui.select = function(items, o, cb) asked[#asked + 1] = o and o.prompt; cb(items[1]) end
+  vim.ui.input = function(o, cb) asked[#asked + 1] = o and o.prompt; cb("") end
+  tree._submit_review(crow, commit.sha)
+  ok("p10: *** s on an empty draft refuses BEFORE asking anything ***",
+    #asked == 0 and said("nothing to submit yet") ~= nil,
+    vim.inspect({ asked = asked, notes = notes }))
+  ok("p10: and it names the two ways to add something",
+    (said("nothing to submit yet") or ""):find("c annotates", 1, true) ~= nil
+    and (said("nothing to submit yet") or ""):find("u records", 1, true) ~= nil,
+    said("nothing to submit yet"))
+
+  -- 2. Cancelling the verdict must SAY the draft survived.
+  local draft = A.draft(repo.slug, commit.sha)
+  table.insert(draft.comments, { path = "newfile.txt", line = 1, side = "RIGHT",
+    severity = "must-fix", body = "sample review fix this!" })
+  notes, asked = {}, {}
+  vim.ui.select = function(_, o, cb) asked[#asked + 1] = o and o.prompt; cb(nil) end
+  tree._submit_review(crow, commit.sha)
+  ok("p10: *** cancelling the verdict is ANNOUNCED, not silent ***",
+    said("submit cancelled") ~= nil, vim.inspect(notes))
+  ok("p10: and the message counts what was kept",
+    (said("submit cancelled") or ""):find("1 comment kept", 1, true) ~= nil,
+    said("submit cancelled"))
+  ok("p10: the draft really is intact", #A.draft(repo.slug, commit.sha).comments == 1)
+
+  -- 3. An empty summary is stored as ABSENT, not as "".
+  notes = {}
+  vim.ui.select = function(items, _, cb) cb(items[1]) end
+  vim.ui.input = function(_, cb) cb("   ") end
+  tree._submit_review(crow, commit.sha)
+  vim.wait(200, function() return false end, 20)
+  ok("p10: a blank summary submits and is not stored as an empty string",
+    said("wrote review") ~= nil, vim.inspect(notes))
+  local written = A.draft(repo.slug, commit.sha)
+  ok("p10: and the draft is cleared by a successful submit", #written.comments == 0)
+
+  -- 4. The close guard: four answers, and KEEP is one of them.
+  tree.open_diff(crow)
+  local st = dv._state_for_tests()
+  ok("p10: the view exposes its annotate wiring", st and st.annotate ~= nil)
+  local draft2 = A.draft(repo.slug, commit.sha)
+  table.insert(draft2.comments, { path = "newfile.txt", line = 1, side = "RIGHT",
+    severity = "nit", body = "second pass" })
+  local offered
+  notes = {}
+  vim.ui.select = function(items, o, cb) offered = vim.deepcopy(items); asked = o and o.prompt; cb(nil) end
+  local answer = st.annotate.before_close("key")
+  vim.wait(200, function() return offered ~= nil end, 20)
+  ok("p10: *** a dirty draft still vetoes the keypress close ***", answer == "cancel", tostring(answer))
+  ok("p10: *** and the prompt offers KEEP alongside submit and discard ***",
+    offered ~= nil and #offered == 4
+    and table.concat(offered, "|"):find("close and keep the draft", 1, true) ~= nil,
+    vim.inspect(offered))
+  ok("p10: the prompt says the draft is kept either way",
+    tostring(asked):find("kept either way", 1, true) ~= nil, tostring(asked))
+  ok("p10: *** dismissing the prompt NAMES the way out instead of going quiet ***",
+    said("still open") ~= nil and (said("still open") or ""):find("keep", 1, true) ~= nil,
+    vim.inspect(notes))
+
+  -- 5. KEEP closes and retains; DISCARD reports what it destroyed.
+  notes = {}
+  vim.ui.select = function(items, _, cb)
+    for _, it in ipairs(items) do if it:find("keep", 1, true) then cb(it); return end end
+  end
+  st.annotate.before_close("key")
+  vim.wait(300, function() return said("closed") ~= nil end, 20)
+  ok("p10: *** keep closes the view ***", dv.is_open() == false, tostring(dv.is_open()))
+  ok("p10: *** and the draft survives it ***",
+    #A.draft(repo.slug, commit.sha).comments == 1)
+  ok("p10: and the message says so", said("kept") ~= nil, vim.inspect(notes))
+
+  tree.open_diff(crow)
+  local st2 = dv._state_for_tests()
+  notes = {}
+  vim.ui.select = function(items, _, cb)
+    for _, it in ipairs(items) do if it:find("discard", 1, true) then cb(it); return end end
+  end
+  st2.annotate.before_close("key")
+  vim.wait(300, function() return said("discarded") ~= nil end, 20)
+  ok("p10: *** discard reports WHAT it destroyed ***",
+    (said("discarded") or ""):find("1 comment", 1, true) ~= nil, vim.inspect(notes))
+  ok("p10: and the draft is gone", #A.draft(repo.slug, commit.sha).comments == 0)
+  pcall(dv.close, "resume")
+
+  -- 6. `u` is its own key, so submit no longer walks an unanchored loop.
+  tree.open_diff(crow)
+  local st3 = dv._state_for_tests()
+  local ukey
+  for _, km in ipairs(st3.keymaps or {}) do if km.key == "u" then ukey = km end end
+  ok("p10: *** the view binds `u` for a finding with no line ***",
+    ukey ~= nil and ukey.desc:find("unanchored", 1, true) ~= nil,
+    vim.inspect(vim.tbl_map(function(k) return k.key end, st3.keymaps or {})))
+  notes = {}
+  vim.ui.input = function(_, cb) cb("this module has no tests") end
+  vim.ui.select = function(items, _, cb) cb(items[1]) end
+  ukey.fn()
+  ok("p10: u records the finding", #A.draft(repo.slug, commit.sha).unanchored == 1,
+    vim.inspect(A.draft(repo.slug, commit.sha).unanchored))
+  -- Cancelling the severity must add NOTHING; it used to store "comment".
+  notes = {}
+  vim.ui.select = function(_, _, cb) cb(nil) end
+  ukey.fn()
+  ok("p10: *** cancelling the severity adds nothing (it used to store one) ***",
+    #A.draft(repo.slug, commit.sha).unanchored == 1 and said("nothing added") ~= nil,
+    vim.inspect(notes))
+  -- And an empty body adds nothing either.
+  notes = {}
+  vim.ui.input = function(_, cb) cb("  ") end
+  ukey.fn()
+  ok("p10: an empty finding adds nothing",
+    #A.draft(repo.slug, commit.sha).unanchored == 1 and said("nothing added") ~= nil)
+  -- CONTROL: submit no longer asks for unanchored findings at all.
+  notes, asked = {}, {}
+  local prompts = {}
+  vim.ui.select = function(items, o, cb) prompts[#prompts + 1] = tostring(o and o.prompt); cb(items[1]) end
+  vim.ui.input = function(o, cb) prompts[#prompts + 1] = tostring(o and o.prompt); cb("") end
+  tree._submit_review(crow, commit.sha)
+  vim.wait(300, function() return said("wrote review") ~= nil end, 20)
+  ok("p10: *** submit asks only verdict + summary — no unanchored loop ***",
+    #prompts == 2 and prompts[1]:find("verdict") and prompts[2]:find("summary")
+    and table.concat(prompts, "|"):find("blank to finish", 1, true) == nil,
+    vim.inspect(prompts))
+  ok("p10: and the unanchored finding still reached the review",
+    said("wrote review") ~= nil, vim.inspect(notes))
+  pcall(dv.close, "resume")
+  A.discard(repo.slug, commit.sha)
+
+  vim.ui.select, vim.ui.input = real_select, real_input
+  logger.notify = real_notify
+end
 
 -- unwatch clears the commits again
 backend.toggle_watch(feat.path)
