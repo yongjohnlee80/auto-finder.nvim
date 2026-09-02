@@ -318,6 +318,118 @@ end)()
       { repo_root = "/x", git_dir = "/x/.git", kind = "index" }) == 1)
 end)()
 
+-- ── [9] d removes a review JSON, but only after a confirmation (§11.6) ──
+-- A review is the one artifact on this panel git cannot regenerate, so the
+-- gate matters as much as the delete. Same shape as [4]'s push: the fallback
+-- confirm path is forced so the assertions do not depend on which primitive is
+-- present.
+;(function()
+  local removed = {}
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    remove_review = function(repo, path)
+      removed[#removed + 1] = { repo = repo, path = path }
+      return true, nil, { path = path, document = "/kb/agents/lector/reviews/doc-r1-review.md" }
+    end,
+  }
+  local asked = nil
+  local orig_select = vim.ui.select
+  local orig_float = package.loaded["auto-core.ui.float"]
+  package.loaded["auto-core.ui.float"] = { confirm = nil }
+  vim.ui.select = function(_, opts, cb) asked = opts and opts.prompt; cb("no") end
+
+  local row = {
+    kind = "review",
+    repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+    review = { name = "own__myrepo@1cfe731.r1.review.json",
+               path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+               short = "1cfe731", revision = 1, severities = {} },
+  }
+
+  tree.remove_review(row)
+  ok("[9] *** d asks before deleting ***", asked ~= nil, tostring(asked))
+  ok("[9] and the prompt NAMES the review file",
+    asked and asked:find("own__myrepo@1cfe731.r1.review.json", 1, true) ~= nil, tostring(asked))
+  ok("[9] and the repository it belongs to",
+    asked and asked:find("myrepo", 1, true) ~= nil, tostring(asked))
+  ok("[9] *** and says the Markdown is KEPT — 'remove the review' is ambiguous ***",
+    asked and asked:lower():find("markdown is kept", 1, true) ~= nil, tostring(asked))
+  ok("[9] *** answering no deletes NOTHING ***", #removed == 0, tostring(#removed))
+
+  vim.ui.select = function(_, _, cb) cb("yes") end
+  tree.remove_review(row)
+  ok("[9] *** answering yes removes exactly that file, once ***",
+    #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
+  ok("[9] and it goes through the repo that owns the store",
+    removed[1].repo and removed[1].repo.slug == "own__myrepo")
+
+  -- No answer at all is not a yes.
+  local prompted = false
+  vim.ui.select = function(_, _, cb) prompted = true; cb(nil) end
+  tree.remove_review(row)
+  ok("[9] with no answer, nothing is deleted", #removed == 1, tostring(#removed))
+  ok("[9] and it still prompted rather than assuming yes", prompted)
+
+  -- Wrong row: a stray `d` in a tree full of files must not reach the store.
+  -- `asked` is reset so the guard can be observed: a wrong row must return
+  -- BEFORE the confirm, so no prompt is raised at all. (This assertion was
+  -- briefly written as `ok(..., true)` — vacuous, exactly the class this repo
+  -- has had to fix twice.)
+  asked = nil
+  vim.ui.select = function(_, opts, cb) asked = opts and opts.prompt; cb("yes") end
+  local before = #removed
+  for _, wrong in ipairs({
+    { kind = "file", repo = row.repo, file = { path = "a.go" } },
+    { kind = "commit", repo = row.repo, node = { sha = "abc" } },
+    { kind = "repo", repo = row.repo },
+    { kind = "reviews", repo = row.repo },
+    { kind = "review", repo = row.repo, review = {} },   -- a row with no path
+    -- The one that needs the KIND check rather than the path check: a row that
+    -- is NOT a review while carrying a review's record. No row does that today,
+    -- and the obvious next feature makes one — badging a changed file with the
+    -- review that comments on it. `d` on a file row must not delete that file's
+    -- review, so the guard is on the kind, not merely on the presence of a path.
+    { kind = "file", repo = row.repo, file = { path = "a.go" }, review = row.review },
+  }) do
+    tree.remove_review(wrong)
+  end
+  ok("[9] *** d on anything that is not a review deletes nothing ***",
+    #removed == before, ("%d vs %d"):format(#removed, before))
+  ok("[9] *** and does not even raise the prompt — the guard returns first ***",
+    asked == nil, tostring(asked))
+  tree.remove_review(nil)
+  ok("[9] d with no row under the cursor is a no-op", #removed == before)
+
+  -- A failed delete is a notification, not a traceback (r1 SF2), and never a
+  -- silent success.
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    remove_review = function() return false, "the revision could not be fenced" end,
+  }
+  local said
+  local prev_notify = logger.notify
+  logger.notify = function(msg, o) said = tostring(msg); return prev_notify(msg, o) end
+  local okc = pcall(tree.remove_review, row)
+  logger.notify = prev_notify
+  ok("[9] a refused delete does not throw", okc == true)
+  ok("[9] *** and REPORTS why ***",
+    said ~= nil and said:find("could not remove", 1, true) ~= nil
+    and said:find("fenced", 1, true) ~= nil, tostring(said))
+
+  -- An older worktree.nvim has no such verb: say so rather than doing nothing.
+  package.loaded["worktree.repos"] = { available = function() return true end }
+  said = nil
+  logger.notify = function(msg, o) said = tostring(msg); return prev_notify(msg, o) end
+  pcall(tree.remove_review, row)
+  logger.notify = prev_notify
+  ok("[9] against an older worktree.nvim it explains itself",
+    said ~= nil and said:find("newer worktree.nvim", 1, true) ~= nil, tostring(said))
+
+  vim.ui.select = orig_select
+  package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["worktree.repos"] = nil
+end)()
+
 logger.notify = orig_notify
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail)); io.stdout:flush()
 if fail > 0 then os.exit(1) end
