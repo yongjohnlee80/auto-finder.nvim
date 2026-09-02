@@ -2,6 +2,43 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.12] — 2026-09-02 — repos panel: load-more only when there is more; root commits and foreground colours pinned
+
+Pairs with auto-core v0.2.9 (auto-core PR #13); this side stays correct against an
+older auto-core.
+
+- **`… m for more commits` appears only when there is more to load.** The row
+  rendered for every windowed worktree, full or not, so a repository with one
+  commit offered a key that could never do anything while a 231-commit history
+  paged fine — "works for some". The tree now follows `meta.has_more` from
+  auto-core's `log.range` (exact: it asks for one commit past the window) and,
+  against an auto-core without the field, falls back to comparing the commits
+  returned with the window it asked for.
+- **Root commits list their files.** Fixed in auto-core (`diff-tree --root`);
+  p7 in the render harness pins the invariant that the files the tree lists
+  under a node are exactly the files `o` shows — now for a root commit as well
+  as a merge.
+- **Status colours are foreground only.** auto-core's `AutoCoreGit*` groups link
+  to `DiagnosticOk` / `DiagnosticWarn` / `DiagnosticError` — the todos panel's
+  Completed / Deferred palette — instead of the DiffAdd / DiffDelete /
+  derived-tint backgrounds that washed the whole row ("not so green / not so
+  orange"). p4 asserts three distinct foregrounds and no background.
+- `tests/adr0060-repos-render.lua` 50/0; `tests/run-all.sh` all suites green.
+  Reviewed by lector (approved, exact head 4c6c84f, PR #17). ADR-0060 §10.
+
+## [v0.4.11] — 2026-09-02 — repos panel: `o` on a merge commit opens its diff; modified coloured apart from added
+
+(Entry backfilled at v0.4.12; the annotated tag carried these notes.)
+
+- `o` on a merge commit said "repos: no diff for <sha>" while the tree listed
+  its files. The cause was auto-core's plain `git show -p` (an empty combined
+  diff for a clean merge), fixed there in v0.2.8; p6 pins the invariant that
+  the files the tree lists are exactly the files the diff view shows.
+- Modified files stopped sharing added's green, via a derived yellow background
+  from auto-core v0.2.8 — superseded by v0.4.12's foreground palette.
+- The render suite resolves sibling plugins by shape instead of a hardcoded
+  Linux path, so it validates the checkout under test on every host.
+
 ## [v0.4.10] — 2026-09-01 — repos tree module doc corrected
 
 Three claims in `views/repos/tree.lua`'s module doc were wrong. Two of them
