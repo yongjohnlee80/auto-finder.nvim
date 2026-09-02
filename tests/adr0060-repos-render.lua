@@ -1,11 +1,28 @@
 -- ADR-0060 P4 render harness: drive the real tree over a real repo layout.
+--
+-- Paths resolve BY SHAPE from this file's own location, not from a hardcoded
+-- host path: the original named `/home/johno/...` and could not run anywhere
+-- else, and it put `auto-finder.nvim/main` on the rtp rather than the checkout
+-- the file lives in — so a green run validated `main`, not the branch under
+-- edit (the rtp-shadow hazard in lua-nvim-plugin-development). Siblings take
+-- `main` first, then the SAME-BRANCH worktree if one exists, prepended last so
+-- it WINS: a fix that spans repos (2026-09-02 — the merge-diff argv lives in
+-- auto-core, the panel that shows it here) is validated against its paired
+-- branch before either merges; once merged, `main` carries it.
+local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
-local PR = "/home/johno/Source/Projects/nvim-plugins"
-for _, p in ipairs({ PR .. "/auto-core.nvim/main", PR .. "/worktree.nvim/main",
-                     LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim",
-                     PR .. "/auto-finder.nvim/main" }) do
+local sib = vim.fn.fnamemodify(root, ":h:h")
+local branch_dir = vim.fn.fnamemodify(root, ":t")
+for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
   if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
 end
+for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
+  for _, wt in ipairs({ "main", branch_dir }) do
+    local r = sib .. "/" .. plugin .. "/" .. wt
+    if vim.fn.isdirectory(r) == 1 then vim.opt.runtimepath:prepend(r) end
+  end
+end
+vim.opt.runtimepath:prepend(root)
 vim.o.columns, vim.o.lines = 200, 60
 local sb = vim.fn.tempname() .. "-p4"
 dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("p4")
@@ -97,6 +114,37 @@ ok("p4: UNCOMMITTED expands to changed files",
 ok("p4: a modified file is marked M", text():match("M a%.txt") ~= nil, text())
 ok("p4: an untracked file is marked +", text():match("%+ dirty%.txt") ~= nil, text())
 
+-- Status COLOURS (2026-09-02): added GREEN, modified YELLOW, deleted RED. The
+-- row model names the group and the buffer carries it as an extmark — assert
+-- at the buffer, where the reader sees it — and modified must no longer resolve
+-- to added's colour (it linked to DiffAdd; only the marker told them apart).
+local ns_tree = vim.api.nvim_get_namespaces()["auto_finder_repos_tree"]
+ok("p4: the tree paints through its own namespace", type(ns_tree) == "number")
+local function row_hl(path)
+  for i, r in ipairs(tree._rows) do
+    if r.kind == "file" and r.file and r.file.path == path then
+      local marks = vim.api.nvim_buf_get_extmarks(buf, ns_tree, { i - 1, 0 }, { i - 1, -1 },
+        { details = true })
+      return r.hl, marks[1] and marks[1][4] and marks[1][4].hl_group or nil
+    end
+  end
+end
+local mod_row, mod_mark = row_hl("a.txt")
+ok("p4: a modified file's row is painted AutoCoreGitModified (model AND extmark)",
+  mod_row == "AutoCoreGitModified" and mod_mark == "AutoCoreGitModified",
+  ("row=%s mark=%s"):format(tostring(mod_row), tostring(mod_mark)))
+local unt_row, unt_mark = row_hl("dirty.txt")
+ok("p4: an untracked file's row is painted AutoCoreGitUntracked",
+  unt_row == "AutoCoreGitUntracked" and unt_mark == "AutoCoreGitUntracked",
+  ("row=%s mark=%s"):format(tostring(unt_row), tostring(unt_mark)))
+local function bg_of(name)
+  local h = vim.api.nvim_get_hl(0, { name = name, link = false })
+  return type(h) == "table" and h.bg or nil
+end
+ok("p4: modified resolves to a background of its OWN, not added's green",
+  bg_of("AutoCoreGitModified") ~= nil and bg_of("AutoCoreGitModified") ~= bg_of("AutoCoreGitAdded"),
+  ("modified=%s added=%s"):format(tostring(bg_of("AutoCoreGitModified")), tostring(bg_of("AutoCoreGitAdded"))))
+
 -- expand the commit -> its files
 local nodes = backend.children(repo, feat)
 local commit
@@ -165,6 +213,48 @@ end
 ok("p5: the recorded review comment renders inline on the b/ side", ann == 1, tostring(ann))
 dv.close()
 ok("p5: closing the diff view disposes it", dv.is_open() == false)
+
+-- ── p6: a MERGE commit (2026-09-02) — `o` said "no diff" for every PR merge ──
+-- The tree listed the merge's files (`commit_files` reads `diff-tree -m
+-- --first-parent`) while the view read a plain `git show -p`, whose COMBINED
+-- diff is empty for a clean merge. The invariant pinned here is the one Johno
+-- named: the files the tree LISTS under a node are exactly the files `o` SHOWS.
+local fwt = lab .. "/feature"
+G(fwt, "checkout", "-q", "-b", "topic")
+vim.fn.writefile({ "merged" }, fwt .. "/merged.txt")
+G(fwt, "add", "merged.txt"); G(fwt, "commit", "-q", "-m", "topic adds merged.txt")
+G(fwt, "checkout", "-q", "feature")
+ok("p6: fixture merged cleanly (--no-ff)", G(fwt, "merge", "-q", "--no-ff", "--no-edit", "topic") == 0)
+local msha = vim.trim(vim.fn.system({ "git", "-C", fwt, "rev-parse", "HEAD" }))
+local mparents = vim.trim(vim.fn.system({ "git", "-C", fwt, "rev-list", "--parents", "-n1", msha }))
+ok("p6: fixture HEAD is a two-parent merge", select(2, mparents:gsub(" ", "")) == 2, mparents)
+tree.invalidate(nil)
+tree._expanded["repo:" .. repo.common_dir] = true
+tree._expanded["wt:" .. feat.path] = true
+tree._expanded["commit:" .. msha] = true
+paint()
+local listed, mrow = {}, nil
+for _, r in ipairs(tree._rows) do
+  if r.kind == "commit" and r.node and r.node.sha == msha then mrow = r end
+  if r.kind == "file" and r.node and r.node.sha == msha then listed[#listed + 1] = r.file.path end
+end
+table.sort(listed)
+ok("p6: the merge commit is listed and expands to the file it brought in",
+  mrow ~= nil and vim.deep_equal(listed, { "merged.txt" }), vim.inspect(listed))
+local add_row, add_mark = row_hl("merged.txt")
+ok("p6: the file it added is painted AutoCoreGitAdded",
+  add_row == "AutoCoreGitAdded" and add_mark == "AutoCoreGitAdded",
+  ("row=%s mark=%s"):format(tostring(add_row), tostring(add_mark)))
+tree.open_diff(mrow)
+ok("p6: o on the MERGE commit opens the diff view (was: 'repos: no diff for …')",
+  dv.is_open() == true)
+local mst = dv._state_for_tests()
+local shown = {}
+for _, f in ipairs(mst and mst.files or {}) do shown[#shown + 1] = f.path end
+table.sort(shown)
+ok("p6: the view shows EXACTLY the files the tree lists for that node",
+  #shown > 0 and vim.deep_equal(shown, listed), vim.inspect({ shown = shown, listed = listed }))
+dv.close()
 
 -- unwatch clears the commits again
 backend.toggle_watch(feat.path)
