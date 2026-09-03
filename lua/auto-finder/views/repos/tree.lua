@@ -878,7 +878,10 @@ function M.open_diff(row, opts)
       disabled_reason = "UNCOMMITTED has no commit to anchor a review to — commit or stash first",
     }
   else
-    local draft = authoring.draft(row.repo.slug, sha)
+    -- The repo's worktree path, so the reviewer SNAPSHOT this binds resolves
+    -- against the right repository's `git config user.name` (ADR-0081 §2.5).
+    local draft = authoring.draft(row.repo.slug, sha,
+      { cwd = row.worktree and row.worktree.path or nil })
     annotate = {
       -- Findings go in through ONE entry point (ADR-0081 P5), so "is there
       -- unsaved work?" has exactly one answer. An anchored annotation carries a

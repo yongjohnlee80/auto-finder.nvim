@@ -52,7 +52,16 @@ end
 ---@param sha string
 ---@return string
 function M.scope(slug, sha)
-  return tostring(slug) .. "@" .. tostring(sha)
+  local s, h = tostring(slug or ""), tostring(sha or "")
+  -- ENFORCE the contract this function documents. It accepted a short sha
+  -- happily, and a scope built from an abbreviation is the collision §2.5
+  -- exists to prevent: two commits sharing a 7-char prefix would merge two
+  -- reviewers' drafts into one (lector SF2). Refusing is right — a caller with
+  -- only an abbreviation has not resolved its identity yet, and silently
+  -- accepting it hides that until two drafts merge.
+  -- Lua has no `%x{40}`: the repetition is built explicitly, once.
+  if s == "" or not h:match("^" .. ("%x"):rep(40) .. "$") then return nil end
+  return s .. "@" .. h
 end
 
 ---draft returns (and lazily creates) the draft for a commit.
@@ -61,10 +70,32 @@ end
 ---auto-core's dirty predicate reads), while `verdict` and `summary` are this
 ---module's own fields on the same table.
 ---@return table
-function M.draft(slug, sha)
+function M.draft(slug, sha, opts)
   local d = _drafts().get(M.scope(slug, sha))
   if d.verdict == nil then d.verdict = "comment" end
+  -- SNAPSHOT the reviewer when the draft is first bound (ADR-0081 §2.5).
+  -- `submit` used to resolve `git config user.name` at WRITE time, so a draft
+  -- begun as Alice and submitted after the repo config changed was persisted as
+  -- Bob -- silent authorship corruption, reproduced by lector (MF5). The
+  -- snapshot lives in `meta`, which is CONTEXT and never makes a draft dirty.
+  if type(d.meta) ~= "table" then d.meta = {} end
+  if d.meta.reviewer == nil then
+    local display, rslug = M.reviewer(opts and opts.cwd or nil)
+    -- Recorded even when it resolves to nothing, so a later read cannot mistake
+    -- "we asked and got nothing" for "we never asked".
+    d.meta.reviewer = { display = display, slug = rslug,
+                        bound_at = os.time(), cwd = opts and opts.cwd or nil }
+  end
   return d
+end
+
+---reviewer_snapshot returns the identity bound to this draft, if any.
+---@param slug string
+---@param sha string
+---@return table?
+function M.reviewer_snapshot(slug, sha)
+  local d = _drafts().peek(M.scope(slug, sha))
+  return d and type(d.meta) == "table" and d.meta.reviewer or nil
 end
 
 ---peek returns the draft for a commit WITHOUT creating one.
@@ -332,12 +363,25 @@ function M.submit(opts)
   local slug = repo and repo.slug
   if not (slug and sha) then return nil, "no repo/commit to attach a review to" end
 
-  local d = M.draft(slug, sha)
+  -- `cwd` is passed so a first-touch snapshot resolves against the RIGHT repo;
+  -- a dirty draft will already carry one from the composer.
+  local d = M.draft(slug, sha, { cwd = opts.cwd })
   if not M.dirty(d) then
     return nil, "nothing to submit — add a comment, a summary or an unanchored finding first"
   end
 
-  local display, rslug = M.reviewer(opts.cwd)
+  -- FROM THE SNAPSHOT, not from the config as it stands now. The draft was
+  -- authored by whoever began it; re-resolving here re-attributed their work to
+  -- whoever the repo config happens to name at submit time (lector MF5).
+  local snap = (type(d) == "table" and type(d.meta) == "table" and d.meta.reviewer)
+    or nil
+  local display, rslug = snap and snap.display or nil, snap and snap.slug or nil
+  if not display or display == "" then
+    -- No snapshot (a draft from before this change, or a caller that built one
+    -- by hand): resolve now and say so in the record's own terms rather than
+    -- silently substituting.
+    display, rslug = M.reviewer(opts.cwd)
+  end
   if not rslug then
     return nil, "the reviewer name produced no safe path segment; set git config user.name"
   end

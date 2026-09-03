@@ -220,6 +220,78 @@ do
   ok("*** each worktree reports its OWN configured reviewer ***",
     da == "Alice A" and db == "Bob B", ("a=%s b=%s"):format(tostring(da), tostring(db)))
   ok("and they genuinely differ (positive control)", da ~= db)
+
+  -- MF5: THE IDENTITY IS SNAPSHOTTED WHEN THE DRAFT IS BOUND, not resolved at
+  -- write time. lector began a dirty draft as "Alice Reviewer", changed the
+  -- repo config to "Bob Reviewer", submitted, and the review was persisted as
+  -- BOB with the draft metadata empty. Silent authorship corruption: the
+  -- reviewer never sees the name that was written.
+  do
+    local snapdir = tmp .. "/repo_snap"
+    vim.fn.mkdir(snapdir, "p")
+    vim.fn.system({ "git", "-C", snapdir, "init", "-q" })
+    vim.fn.system({ "git", "-C", snapdir, "config", "user.name", "Alice Reviewer" })
+    local ssha = string.rep("a", 40)
+    local sslug = "own__snap"
+
+    local d = A.draft(sslug, ssha, { cwd = snapdir })
+    A.add_finding(d, { path = "x.lua", line = 1, severity = "nit", body = "b" })
+    local snap = A.reviewer_snapshot(sslug, ssha)
+    ok("[6] *** SF2: scope() REFUSES a short sha, per its own contract ***",
+    (function()
+      -- A scope built from an abbreviation is the collision §2.5 exists to
+      -- prevent: two commits sharing a 7-char prefix would merge two
+      -- reviewers' drafts into one. A caller holding only an abbreviation has
+      -- not resolved its identity yet.
+      return A.scope("own__x", string.rep("a", 40)) ~= nil
+        and A.scope("own__x", "abc1234") == nil
+        and A.scope("own__x", "") == nil
+        and A.scope("", string.rep("a", 40)) == nil
+        and A.scope("own__x", string.rep("z", 40)) == nil
+        and A.scope("own__x", string.rep("a", 41)) == nil
+    end)())
+  ok("[6] *** MF5: the draft SNAPSHOTS its reviewer when bound ***",
+      snap ~= nil and snap.display == "Alice Reviewer"
+      and snap.slug == "alice-reviewer", vim.inspect(snap))
+
+    -- The repo's identity changes under the draft.
+    vim.fn.system({ "git", "-C", snapdir, "config", "user.name", "Bob Reviewer" })
+    ok("[6] fixture: the repo now reports Bob",
+      select(1, A.reviewer(snapdir)) == "Bob Reviewer")
+
+    ok("[6] *** MF5: the snapshot does NOT follow the config change ***",
+      (A.reviewer_snapshot(sslug, ssha) or {}).display == "Alice Reviewer",
+      vim.inspect(A.reviewer_snapshot(sslug, ssha)))
+
+    -- And a submit writes ALICE, because Alice wrote it.
+    local res, serr = A.submit({ repo = { slug = sslug, label = "snap",
+      owner = "own", name = "snap", url = "git@github.com:own/snap.git" },
+      sha = ssha, cwd = snapdir })
+    ok("[6] MF5: fixture: the submit succeeded", res ~= nil, tostring(serr))
+    if res then
+      local written = select(1, require("worktree.review").load(sslug, ssha,
+        res.revision))
+      ok("[6] *** MF5: the PERSISTED review is attributed to Alice, not Bob ***",
+        written ~= nil and written.reviewer == "Alice Reviewer"
+        and written.reviewer_slug == "alice-reviewer",
+        vim.inspect(written and { written.reviewer, written.reviewer_slug }))
+      ok("[6] MF5: and its document sits under Alice's reviews directory",
+        written ~= nil and tostring(written.document):find("/alice%-reviewer/"),
+        tostring(written and written.document))
+    end
+
+    -- CONTROL: a draft bound AFTER the change snapshots Bob, so the assertion
+    -- above is about the snapshot and not about Alice being hard-coded.
+    do
+      local bsha = string.rep("b", 40)
+      A.add_finding(A.draft(sslug, bsha, { cwd = snapdir }),
+        { path = "y.lua", line = 2, severity = "nit", body = "c" })
+      ok("[6] CONTROL — a draft bound after the change snapshots BOB",
+        (A.reviewer_snapshot(sslug, bsha) or {}).display == "Bob Reviewer",
+        vim.inspect(A.reviewer_snapshot(sslug, bsha)))
+      A.discard(sslug, bsha)
+    end
+  end
 end
 
 io.stdout:write("\n[7] a draft is DIRTY on any of its three contents\n")
