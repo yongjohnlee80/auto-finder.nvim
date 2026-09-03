@@ -263,7 +263,23 @@ function M.submit(opts)
       draft = d, repo_label = repo.label, sha = sha,
       reviewer = display, revision = rev,
     })
-  end, { topic = M.topic(repo, sha) })
+  end, {
+    topic = M.topic(repo, sha),
+    -- FORWARD the resolved KB root. `_kb_root()` has been sitting here,
+    -- correct and unreachable, since ADR-0067 A4: it was written for
+    -- `markdown_path`, that function was deleted when the store took ownership
+    -- of the canonical path, and the value it resolves was never passed on. So
+    -- `save_pair` fell back to reading `$AUTO_AGENTS_KB_ROOT` — a variable
+    -- injected into AGENT spawns only — and every submit from the editor died
+    -- at the preflight with "cannot resolve $KB_ROOT for the review document".
+    -- Three fix rounds went past it because every test sets that variable and
+    -- every agent process has it (Johno, 2026-09-02/03).
+    --
+    -- The resolver reaches the KB through AUTO-CORE, which owns the
+    -- `auto-agents.kb.root()` hop, so the panel keeps depending on auto-core
+    -- and worktree.nvim alone.
+    kb_root = _kb_root(),
+  })
 
   if not res then
     -- The orphan Markdown, when there is one, is PRESERVED by save_pair and
