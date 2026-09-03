@@ -218,8 +218,19 @@ local _rvres, _rverr = review.save_pair(repo.slug, rv, "# render fixture review"
 assert(_rvres, "review fixture must write a pair: " .. tostring(_rverr))
 tree.invalidate("commit:" .. commit.sha)
 paint()
-ok("p4: a review JSON shows beside the commit's files",
-  text():find("%.review%.json") ~= nil, text())
+-- 2026-09-03: the per-commit review ROW is GONE — the review appears only in
+-- the repo's `reviews` section now, and the commit tree shows only the file
+-- badge. So expanding a commit must NOT list a `.review.json` row.
+ok("p4: *** the commit tree does NOT list the review file (only the badge) ***",
+  (function()
+    -- Look only at the commit subtree, not the reviews section below it.
+    for _, r in ipairs(tree._rows) do
+      if r.kind == "review" or r.kind == "review_file" then
+        if r.node and r.node.sha == commit.sha then return false end
+      end
+    end
+    return true
+  end)(), text())
 
 -- rows model maps lines back to nodes
 ok("p4: the row model is parallel to the buffer lines",
@@ -606,6 +617,31 @@ do
       vim.inspect(drafts.peek(A.scope(repo.slug, qsha))))
   end
 
+  -- ── an UNCOMMITTED draft is listed too (ADR-0081 §2.5 amendment) ──
+  -- Johno, 2026-09-03: "I have uncommitted work on hello.md where it would be
+  -- nice to save a feedback as a draft." A working-tree draft has no sha; it
+  -- must still surface here so an agent can pick it up, and reopen the
+  -- UNCOMMITTED diff rather than a commit's.
+  do
+    local wt_path = mainwt.path
+    A.add_finding(A.draft_working(repo.slug, wt_path),
+      { path = "hello.md", line = 1, severity = "must-fix", body = "tighten this" })
+    tree.invalidate(nil); paint()
+    local wrow
+    for _, r in ipairs(tree._rows) do
+      if r.kind == "draft" and r.working then wrow = r end
+    end
+    ok("[p11] *** an UNCOMMITTED draft is listed in the reviews section ***",
+      wrow ~= nil and wrow.text:find("UNCOMMITTED", 1, true) ~= nil
+      and wrow.text:find("draft", 1, true) ~= nil, wrow and wrow.text)
+    ok("[p11] the working draft row carries its worktree, not a sha",
+      wrow ~= nil and wrow.sha == nil and wrow.worktree == wt_path,
+      vim.inspect(wrow and { sha = wrow.sha, worktree = wrow.worktree }))
+    ok("[p11] *** and a committed draft is NOT confused with the working one ***",
+      wrow ~= nil and A.is_working(wrow.scope) == true)
+    A.discard_scope(wrow.scope)
+  end
+
   -- Leave the store clean for whatever runs after this.
   drafts.discard(A.scope(repo.slug, dsha))
   drafts.discard(A.scope(repo.slug, ssha))
@@ -642,15 +678,32 @@ paint()
 local freviewed = row_of("file", function(r)
   return r.file.path == "newfile.txt" and r.node and r.node.sha == commit.sha
 end)
-ok("p9: *** a changed file with feedback on it is badged ***",
-  freviewed ~= nil and freviewed.text:find("[feedback]", 1, true) ~= nil,
+-- 2026-09-03: the badge names the WORST SEVERITY, not the literal "feedback".
+ok("p9: *** a reviewed file is badged with its worst SEVERITY, not [feedback] ***",
+  freviewed ~= nil and freviewed.text:find("[nit]", 1, true) ~= nil
+  and freviewed.text:find("[feedback]", 1, true) == nil,
   freviewed and freviewed.text)
+ok("p9: the row exposes the severity it badged", freviewed ~= nil
+  and freviewed.severity == "nit", tostring(freviewed and freviewed.severity))
+ok("p9: *** the badge is painted in the severity's colour, over the row ***",
+  (function()
+    -- The whole-line hl is the file's status colour; a span paints the badge
+    -- in AutoCoreReviewNit at higher priority.
+    for _, r in ipairs(tree._rows) do
+      if r == freviewed then
+        local sp = (r.spans or {})[1]
+        return sp ~= nil and sp.hl == "AutoCoreReviewNit"
+          and r.text:sub(sp.from + 1, sp.to) == "  [nit]"
+      end
+    end
+    return false
+  end)(), vim.inspect(freviewed and freviewed.spans))
 ok("p9: the badge carries the tally the tree read it from",
   freviewed ~= nil and freviewed.feedback ~= nil and freviewed.feedback.count == 1
   and freviewed.feedback.worst == "nit", vim.inspect(freviewed and freviewed.feedback))
 local funreviewed = row_of("file", function(r) return r.file.path == "merged.txt" end)
 ok("p9: *** and a file nobody reviewed is NOT badged ***",
-  funreviewed ~= nil and funreviewed.text:find("[feedback]", 1, true) == nil,
+  funreviewed ~= nil and funreviewed.text:find("[", 1, true) == nil,
   funreviewed and funreviewed.text)
 ok("p9: the file rows keep their own status colour",
   freviewed ~= nil and freviewed.hl == "AutoCoreGitAdded", freviewed and tostring(freviewed.hl))

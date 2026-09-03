@@ -290,6 +290,49 @@ do
         and A.scope("own__x", string.rep("z", 40)) == nil
         and A.scope("own__x", string.rep("a", 41)) == nil
     end)())
+
+  -- ── UNCOMMITTED drafts (ADR-0081 §2.5 amendment) ──
+  -- A draft can be authored on uncommitted work; only the SAVED review needs a
+  -- commit. The working scope is a distinct namespace that cannot collide with
+  -- any committed scope, so `submit` can refuse it by inspection.
+  ok("[6] *** working scope is distinct and never collides with a commit scope ***",
+    (function()
+      local w = A.scope_working("own__x", "/home/me/proj")
+      return type(w) == "string" and A.is_working(w) == true
+        -- it is NOT a committed scope: no 40-hex tail
+        and w:match("@" .. ("%x"):rep(40) .. "$") == nil
+        -- and a committed scope is not a working one
+        and A.is_working(A.scope("own__x", string.rep("a", 40))) == false
+        and A.scope_working("own__x", "") == nil
+        and A.scope_working("", "/p") == nil
+    end)())
+  ok("[6] *** draft_working creates a draft and snapshots its reviewer ***",
+    (function()
+      local wdir = tmp .. "/repo_working"
+      vim.fn.mkdir(wdir, "p")
+      vim.fn.system({ "git", "-C", wdir, "init", "-q" })
+      vim.fn.system({ "git", "-C", wdir, "config", "user.name", "Working Wendy" })
+      local d = A.draft_working("own__w", wdir)
+      A.add_finding(d, { severity = "must-fix", body = "fix before you commit",
+                         anchored = false })
+      local snap = A.reviewer_snapshot and nil  -- snapshot lives in meta
+      return d ~= nil and A.dirty(d) == true
+        and d.meta.reviewer ~= nil and d.meta.reviewer.display == "Working Wendy"
+        and d.meta.worktree == wdir
+        and A.peek_working("own__w", wdir) ~= nil
+        and snap == nil
+    end)())
+  ok("[6] discard_scope drops a working draft", (function()
+      local wdir = tmp .. "/repo_working2"
+      vim.fn.mkdir(wdir, "p")
+      vim.fn.system({ "git", "-C", wdir, "init", "-q" })
+      A.add_finding(A.draft_working("own__w2", wdir),
+        { severity = "nit", body = "x", anchored = false })
+      local scope = A.scope_working("own__w2", wdir)
+      local before = A.peek_working("own__w2", wdir) ~= nil
+      A.discard_scope(scope)
+      return before and A.peek_working("own__w2", wdir) == nil
+    end)())
   ok("[6] *** MF5: the draft SNAPSHOTS its reviewer when bound ***",
       snap ~= nil and snap.display == "Alice Reviewer"
       and snap.slug == "alice-reviewer", vim.inspect(snap))

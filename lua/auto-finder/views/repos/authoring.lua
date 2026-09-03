@@ -64,6 +64,69 @@ function M.scope(slug, sha)
   return s .. "@" .. h
 end
 
+---WORKING_MARK is the scope segment for a draft on UNCOMMITTED work (ADR-0081
+---§2.5, uncommitted-scope amendment). `@working:` can never be a committed
+---scope's `@<40-hex>`, so the two namespaces cannot collide, and it carries the
+---worktree PATH — a repo can have several linked worktrees, each with its own
+---working tree, and a draft belongs to exactly one of them. A path is stable
+---(it is not a window id, which §2.5 forbids); a reopened diff on the same
+---checkout resolves to the same draft.
+M.WORKING_MARK = "@working:"
+
+---scope_working is the opaque draft key for uncommitted work in one worktree.
+---
+---Deliberately NOT `scope()` with a fake sha: a saved review still cannot anchor
+---to the working tree (that gate stays), so this key exists only for the DRAFT,
+---and keeping it a distinct shape is what lets `submit` refuse it by inspection
+---rather than by guessing.
+---@param slug string
+---@param worktree_path string
+---@return string?
+function M.scope_working(slug, worktree_path)
+  local s, p = tostring(slug or ""), tostring(worktree_path or "")
+  if s == "" or p == "" then return nil end
+  return s .. M.WORKING_MARK .. p
+end
+
+---is_working reports whether a scope is an uncommitted-work draft.
+---@param scope string
+---@return boolean
+function M.is_working(scope)
+  return type(scope) == "string" and scope:find(M.WORKING_MARK, 1, true) ~= nil
+end
+
+---draft_working returns (and lazily creates) the draft for a worktree's
+---uncommitted changes. The reviewer is snapshotted from that worktree, exactly
+---as the committed path does (§2.5) — authorship is bound the same way whether
+---or not there is a commit yet.
+---@param slug string
+---@param worktree_path string
+---@return table?
+function M.draft_working(slug, worktree_path)
+  local scope = M.scope_working(slug, worktree_path)
+  if not scope then return nil end
+  local d = _drafts().get(scope)
+  if d.verdict == nil then d.verdict = "comment" end
+  if type(d.meta) ~= "table" then d.meta = {} end
+  if d.meta.reviewer == nil then
+    local display, rslug = M.reviewer(worktree_path)
+    d.meta.reviewer = { display = display, slug = rslug,
+                        bound_at = os.time(), cwd = worktree_path }
+  end
+  -- The working tree it belongs to, so a lister can reopen the right diff.
+  d.meta.worktree = worktree_path
+  return d
+end
+
+---peek_working reads the uncommitted draft WITHOUT creating one.
+---@param slug string
+---@param worktree_path string
+---@return table?
+function M.peek_working(slug, worktree_path)
+  local scope = M.scope_working(slug, worktree_path)
+  return scope and _drafts().peek(scope) or nil
+end
+
 ---draft returns (and lazily creates) the draft for a commit.
 ---
 ---The table is auto-core's and LIVE: findings go in `items` (the generic list
@@ -202,6 +265,15 @@ end
 
 ---discard drops a draft outright.
 function M.discard(slug, sha) return _drafts().discard(M.scope(slug, sha)) end
+
+---discard_scope drops a draft by its opaque scope — the form a caller with a
+---working-tree draft (no sha) or a lister already holding the scope needs.
+---@param scope string
+---@return boolean
+function M.discard_scope(scope)
+  if type(scope) ~= "string" or scope == "" then return false end
+  return _drafts().discard(scope)
+end
 
 ---slugify turns a display name into a safe PATH SEGMENT.
 ---
