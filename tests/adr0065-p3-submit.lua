@@ -29,14 +29,41 @@ package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.pa
 local sib = vim.fn.fnamemodify(root, ":h:h")
 local branch_dir = vim.fn.fnamemodify(root, ":t")
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
-  for _, wt in ipairs({ "main", branch_dir }) do
+  -- THE SAME-BRANCH SIBLING FIRST. These are APPENDED, so the FIRST entry wins
+  -- the runtimepath search -- the opposite of the prepend idiom used elsewhere
+  -- in this repo, and the loop had `main` first, so every run resolved
+  -- `worktree.*` to MAIN while claiming to test the paired branch. It reported
+  -- green against the OLD store for an entire review round; lector's exact-head
+  -- run failed correctly and mine could not have.
+  for _, wt in ipairs({ branch_dir, "main" }) do
     local r = sib .. "/" .. plugin .. "/" .. wt
     if vim.fn.isdirectory(r) == 1 then
       vim.opt.runtimepath:append(r)
-      package.path = r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua;" .. package.path
+      package.path = package.path .. ";" .. r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua"
     end
   end
 end
+
+-- ASSERT WHAT LOADED. A harness that silently resolves a dependency to the
+-- wrong copy produces evidence about code nobody is reviewing, and
+-- `debug.getinfo().source` is the only reliable way to ask -- `package.searchpath`
+-- answers where a module WOULD be found, not where it came from.
+local function _assert_sibling(modname, fn_name)
+  local okm, mod = pcall(require, modname)
+  if not okm or type(mod) ~= "table" or type(mod[fn_name]) ~= "function" then
+    error(("harness: could not load %s.%s"):format(modname, fn_name), 0)
+  end
+  local src = debug.getinfo(mod[fn_name], "S").source:sub(2)
+  local want = "/" .. branch_dir .. "/"
+  if not src:find(want, 1, true) and vim.fn.isdirectory(
+      sib .. "/" .. modname:match("^[^.]+") .. ".nvim/" .. branch_dir) == 1 then
+    error(("harness: %s resolved to %s, not the %s sibling — this suite would "
+      .. "report on the wrong code"):format(modname, src, branch_dir), 0)
+  end
+  return src
+end
+_assert_sibling("worktree.review", "save_pair")
+_assert_sibling("auto-core.docstore", "write_json")
 
 local pass, fail = 0, 0
 local function ok(n, c, d)
@@ -90,9 +117,16 @@ io.stdout:write("\n[3] submit writes BOTH artifacts, JSON last\n")
 -- ADR-0067 A4: the write goes through `save_pair`, so BOTH artifacts are
 -- claimed with `store.create_exclusive` and the JSON no longer passes through
 -- `review.save`. Record at that one boundary and classify by filename.
+-- INSTRUMENTED AT THE LIVE BOUNDARY. ADR-0081 P4b moved the reservation claim
+-- into `auto-core.docstore.revisions`, so `worktree.store.create_exclusive` no
+-- longer sees it -- and worktree's own md/json claims DELEGATE to auto-core, so
+-- one patch on `docstore.create_exclusive` observes all three. Patching the
+-- retired boundary recorded { markdown, json } and lost the ordering proof
+-- entirely (lector r3 MF3).
 local order = {}
-local real_create = store.create_exclusive
-store.create_exclusive = function(path, body)
+local _ds = require("auto-core.docstore")
+local real_create = _ds.create_exclusive
+_ds.create_exclusive = function(path, body)
   local pth = tostring(path)
   if pth:find("%-review%.md$") then order[#order + 1] = "markdown"
   elseif pth:find("%.review%.json$") then order[#order + 1] = "json"
@@ -100,10 +134,11 @@ store.create_exclusive = function(path, body)
   elseif pth:find("%.tombstone$") then order[#order + 1] = "tombstone" end
   return real_create(path, body)
 end
+local function _restore_create() _ds.create_exclusive = real_create end
 local d = A.draft(repo.slug, SHA)
-d.comments = { { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" } }
-d.unanchored = { { severity = "nit", body = "this module has no tests" } }
-d.summary = "overall fine"
+A.add_finding(d, { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" })
+A.add_finding(d, { severity = "nit", body = "this module has no tests", anchored = false })
+A.set_summary(repo.slug, SHA, "overall fine")
 local res, reason = A.submit({ repo = repo, sha = SHA })
 ok("*** submit succeeds ***", res ~= nil, tostring(reason))
 ok("it wrote a Markdown review", res and vim.fn.filereadable(res.md_path) == 1, res and res.md_path)
@@ -118,7 +153,7 @@ ok("*** the UNANCHORED finding lives in the Markdown ***",
 ok("*** and is absent from the JSON — nothing was invented to place it ***",
   not vim.inspect(doc.comments):find("no tests", 1, true))
 ok("the draft is cleared after a successful submit",
-  #A.draft(repo.slug, SHA).comments == 0)
+  #A.anchored(A.draft(repo.slug, SHA)) == 0)
 do
   local imd, ijson, ireserve
   for i, ev in ipairs(order) do
@@ -137,6 +172,11 @@ do
       return n.markdown == 1 and n.json == 1
     end)(), vim.inspect(order))
 end
+-- The recorder's work is done. Left installed it would sit under every later
+-- section, including the one that injects a write failure at worktree's
+-- boundary -- two wrappers on one path is how a restore puts back the wrong
+-- function.
+_restore_create()
 ok("*** the Markdown carries KB_RULES R2 frontmatter ***",
   md:find("^%-%-%-\ntype: review\n") ~= nil, md:sub(1, 80))
 ok("and the inline Tags/Abstract preview lines",
@@ -154,7 +194,7 @@ ok("and the reservation was released after the commit",
 
 io.stdout:write("\n[4] a taken Markdown name ADVANCES the revision\n")
 local d2 = A.draft(repo.slug, SHA)
-d2.comments = { { path = "foo.lua", line = 4, side = "RIGHT", severity = "nit", body = "second" } }
+A.add_finding(d2, { path = "foo.lua", line = 4, side = "RIGHT", severity = "nit", body = "second" })
 -- Pre-create the name r2 would want, so the claim must move on.
 local _, rslug = A.reviewer()
 local taken = review.canonical_document({
@@ -172,7 +212,7 @@ ok("and the JSON it wrote matches the revision it claimed",
 
 io.stdout:write("\n[5] a JSON failure PRESERVES and reports the orphan Markdown\n")
 local d3 = A.draft(repo.slug, SHA)
-d3.comments = { { path = "foo.lua", line = 5, side = "RIGHT", severity = "nit", body = "third" } }
+A.add_finding(d3, { path = "foo.lua", line = 5, side = "RIGHT", severity = "nit", body = "third" })
 -- Fail the CANONICAL JSON create specifically, which is the commit point.
 -- Stubbing `review.save` no longer reaches the writer (A4).
 local guard = store.create_exclusive
@@ -183,7 +223,7 @@ store.create_exclusive = function(path, body)
   return guard(path, body)
 end
 local res3, reason3 = A.submit({ repo = repo, sha = SHA })
-store.create_exclusive = real_create
+store.create_exclusive = guard
 ok("*** submit reports failure rather than claiming success ***", res3 == nil, tostring(res3))
 ok("and names the kept Markdown so the prose is not thought lost",
   reason3 and reason3:find("is not lost", 1, true) ~= nil, tostring(reason3))
@@ -194,7 +234,7 @@ ok("*** no JSON was published for that revision ***", (function()
   return true
 end)(), vim.inspect(review.list_for(repo.slug, SHA)))
 ok("the draft is RETAINED after a failed submit, so the work survives",
-  #A.draft(repo.slug, SHA).comments == 1)
+  #A.anchored(A.draft(repo.slug, SHA)) == 1)
 -- The orphan is the whole point of the ordering: assert it EXISTS and holds the
 -- reviewer's prose, not merely that a path was mentioned in an error string.
 local orphan = reason3 and reason3:match("(/[^%s]+%-review%.md)")
@@ -220,6 +260,113 @@ do
   ok("*** each worktree reports its OWN configured reviewer ***",
     da == "Alice A" and db == "Bob B", ("a=%s b=%s"):format(tostring(da), tostring(db)))
   ok("and they genuinely differ (positive control)", da ~= db)
+
+  -- MF5: THE IDENTITY IS SNAPSHOTTED WHEN THE DRAFT IS BOUND, not resolved at
+  -- write time. lector began a dirty draft as "Alice Reviewer", changed the
+  -- repo config to "Bob Reviewer", submitted, and the review was persisted as
+  -- BOB with the draft metadata empty. Silent authorship corruption: the
+  -- reviewer never sees the name that was written.
+  do
+    local snapdir = tmp .. "/repo_snap"
+    vim.fn.mkdir(snapdir, "p")
+    vim.fn.system({ "git", "-C", snapdir, "init", "-q" })
+    vim.fn.system({ "git", "-C", snapdir, "config", "user.name", "Alice Reviewer" })
+    local ssha = string.rep("a", 40)
+    local sslug = "own__snap"
+
+    local d = A.draft(sslug, ssha, { cwd = snapdir })
+    A.add_finding(d, { path = "x.lua", line = 1, severity = "nit", body = "b" })
+    local snap = A.reviewer_snapshot(sslug, ssha)
+    ok("[6] *** SF2: scope() REFUSES a short sha, per its own contract ***",
+    (function()
+      -- A scope built from an abbreviation is the collision §2.5 exists to
+      -- prevent: two commits sharing a 7-char prefix would merge two
+      -- reviewers' drafts into one. A caller holding only an abbreviation has
+      -- not resolved its identity yet.
+      return A.scope("own__x", string.rep("a", 40)) ~= nil
+        and A.scope("own__x", "abc1234") == nil
+        and A.scope("own__x", "") == nil
+        and A.scope("", string.rep("a", 40)) == nil
+        and A.scope("own__x", string.rep("z", 40)) == nil
+        and A.scope("own__x", string.rep("a", 41)) == nil
+    end)())
+  ok("[6] *** MF5: the draft SNAPSHOTS its reviewer when bound ***",
+      snap ~= nil and snap.display == "Alice Reviewer"
+      and snap.slug == "alice-reviewer", vim.inspect(snap))
+
+    -- The repo's identity changes under the draft.
+    vim.fn.system({ "git", "-C", snapdir, "config", "user.name", "Bob Reviewer" })
+    ok("[6] fixture: the repo now reports Bob",
+      select(1, A.reviewer(snapdir)) == "Bob Reviewer")
+
+    ok("[6] *** MF5: the snapshot does NOT follow the config change ***",
+      (A.reviewer_snapshot(sslug, ssha) or {}).display == "Alice Reviewer",
+      vim.inspect(A.reviewer_snapshot(sslug, ssha)))
+
+    -- And a submit writes ALICE, because Alice wrote it.
+    local res, serr = A.submit({ repo = { slug = sslug, label = "snap",
+      owner = "own", name = "snap", url = "git@github.com:own/snap.git" },
+      sha = ssha, cwd = snapdir })
+    ok("[6] MF5: fixture: the submit succeeded", res ~= nil, tostring(serr))
+    if res then
+      local written = select(1, require("worktree.review").load(sslug, ssha,
+        res.revision))
+      ok("[6] *** MF5: the PERSISTED review is attributed to Alice, not Bob ***",
+        written ~= nil and written.reviewer == "Alice Reviewer"
+        and written.reviewer_slug == "alice-reviewer",
+        vim.inspect(written and { written.reviewer, written.reviewer_slug }))
+      ok("[6] MF5: and its document sits under Alice's reviews directory",
+        written ~= nil and tostring(written.document):find("/alice%-reviewer/"),
+        tostring(written and written.document))
+    end
+
+    -- MF2 (r3): the LEGACY TWO-ARGUMENT call must not snapshot from the
+    -- AMBIENT cwd. It resolved `git config user.name` against whatever
+    -- directory nvim happened to sit in, so a draft for repo B was stamped
+    -- with repo A's reviewer -- and because submit TRUSTS the snapshot, B's
+    -- review was submitted under A's name even though submit was given B's cwd.
+    do
+      local bdir = tmp .. "/repo_b_only"
+      vim.fn.mkdir(bdir, "p")
+      vim.fn.system({ "git", "-C", bdir, "init", "-q" })
+      vim.fn.system({ "git", "-C", bdir, "config", "user.name", "Bee Only" })
+      local bsha, bslug = string.rep("7", 40), "own__bonly"
+
+      -- Two-argument call: no context, so NO snapshot may be taken.
+      local db = A.draft(bslug, bsha)
+      A.add_finding(db, { path = "b.lua", line = 1, severity = "nit", body = "b" })
+      ok("[6] *** MF2: a two-argument draft takes NO reviewer snapshot ***",
+        A.reviewer_snapshot(bslug, bsha) == nil,
+        vim.inspect(A.reviewer_snapshot(bslug, bsha)))
+
+      -- Submit knows the cwd, so it binds correctly at that point.
+      local rb = A.submit({ repo = { slug = bslug, label = "bonly",
+        owner = "own", name = "bonly", url = "git@github.com:own/bonly.git" },
+        sha = bsha, cwd = bdir })
+      ok("[6] MF2: fixture: that submit succeeded", rb ~= nil)
+      if rb then
+        local w = select(1, require("worktree.review").load(bslug, bsha, rb.revision))
+        ok("[6] *** MF2: and it is attributed to THIS repo's reviewer ***",
+          w ~= nil and w.reviewer == "Bee Only", vim.inspect(w and w.reviewer))
+      end
+      ok("[6] MF2: the snapshot is recorded at submit, so it stops being ambiguous",
+        (A.reviewer_snapshot(bslug, bsha) or {}).bound_at_submit == true
+        or A.reviewer_snapshot(bslug, bsha) == nil,
+        vim.inspect(A.reviewer_snapshot(bslug, bsha)))
+    end
+
+    -- CONTROL: a draft bound AFTER the change snapshots Bob, so the assertion
+    -- above is about the snapshot and not about Alice being hard-coded.
+    do
+      local bsha = string.rep("b", 40)
+      A.add_finding(A.draft(sslug, bsha, { cwd = snapdir }),
+        { path = "y.lua", line = 2, severity = "nit", body = "c" })
+      ok("[6] CONTROL — a draft bound after the change snapshots BOB",
+        (A.reviewer_snapshot(sslug, bsha) or {}).display == "Bob Reviewer",
+        vim.inspect(A.reviewer_snapshot(sslug, bsha)))
+      A.discard(sslug, bsha)
+    end
+  end
 end
 
 io.stdout:write("\n[7] a draft is DIRTY on any of its three contents\n")
@@ -229,18 +376,41 @@ do
   -- and summary but not unanchored findings, so a review consisting solely of
   -- "this module has no tests" — exactly what review-json §6 protects — was
   -- refused as "nothing to submit", and the close guard let it go unprompted.
-  ok("an empty draft is not dirty", A.dirty({ comments = {}, unanchored = {} }) == false)
-  ok("a comment makes it dirty", A.dirty({ comments = { {} } }) == true)
+  -- The predicate is auto-core's now (ADR-0081 P5), so these exercise the shape
+  -- it actually reads: `items` plus the explicit `touched` bit. The three
+  -- properties are unchanged -- an anchored comment, an unanchored finding, and
+  -- a summary alone each count as work.
+  ok("an empty draft is not dirty", A.dirty({ items = {} }) == false)
+  ok("a comment makes it dirty",
+    A.dirty({ items = { { line = 1, anchored = true } } }) == true)
   ok("*** an UNANCHORED finding alone makes it dirty ***",
-    A.dirty({ comments = {}, unanchored = { { body = "no tests" } } }) == true)
-  ok("a summary alone makes it dirty",
-    A.dirty({ comments = {}, summary = "looks fine" }) == true)
+    A.dirty({ items = { { anchored = false, body = "no tests" } } }) == true)
+  -- Driven through the SETTER rather than by hand-setting the bit: what must
+  -- hold is that recording a summary makes the draft dirty, and a test that
+  -- sets `touched` itself would pass even if `set_summary` never did.
+  ok("a summary alone makes it dirty", (function()
+    local scope_sha = string.rep("d", 40)
+    local before = A.dirty(A.draft(repo.slug, scope_sha))
+    A.set_summary(repo.slug, scope_sha, "looks fine")
+    local after = A.dirty(A.draft(repo.slug, scope_sha))
+    local d = A.draft(repo.slug, scope_sha)
+    return before == false and after == true and d.summary == "looks fine"
+      and #A.anchored(d) == 0
+  end)())
+  ok("and clearing it stops the draft claiming work", (function()
+    local scope_sha = string.rep("e", 40)
+    A.set_summary(repo.slug, scope_sha, "typed then deleted")
+    local mid = A.dirty(A.draft(repo.slug, scope_sha))
+    A.set_summary(repo.slug, scope_sha, "   ")
+    return mid == true and A.dirty(A.draft(repo.slug, scope_sha)) == false
+      and A.draft(repo.slug, scope_sha).summary == nil
+  end)())
   ok("whitespace is not a summary", A.dirty({ comments = {}, summary = "   " }) == false)
 
   -- And the functional half: an unanchored-only review must actually WRITE.
   A.discard(repo.slug, SHA)
   local du = A.draft(repo.slug, SHA)
-  du.unanchored = { { severity = "nit", body = "this module has no tests" } }
+  A.add_finding(du, { severity = "nit", body = "this module has no tests", anchored = false })
   local resu, whyu = A.submit({ repo = repo, sha = SHA })
   ok("*** an unanchored-only review submits rather than being refused ***",
     resu ~= nil, tostring(whyu))
@@ -249,7 +419,7 @@ do
     ok("its finding is in the Markdown", mdu:find("no tests", 1, true) ~= nil)
     local du2 = review.load(repo.slug, SHA, resu.revision)
     ok("and the JSON carries zero comments, inventing nothing",
-      du2 ~= nil and #du2.comments == 0, vim.inspect(du2 and du2.comments))
+      du2 ~= nil and #A.anchored(du2) == 0, vim.inspect(du2 and du2.items))
   end
 end
 
@@ -266,13 +436,13 @@ do
   vim.o.columns, vim.o.lines = 200, 50
   A.discard(repo.slug, SHA)
   local dr = A.draft(repo.slug, SHA)
-  dr.comments = { { path = "foo.lua", line = 2, side = "RIGHT", severity = "nit", body = "kept" } }
+  A.add_finding(dr, { path = "foo.lua", line = 2, side = "RIGHT", severity = "nit", body = "kept" })
 
   local function open()
     dv.open({ files = files, annotate = {
-      on_add = function(a) table.insert(dr.comments, a) end,
+      on_add = function(a) A.add_finding(dr, a) end,
       on_remove = function() end,
-      pending = function() return dr.comments end,
+      pending = function() return A.anchored(dr) end,
     } })
   end
 
@@ -296,8 +466,8 @@ do
     how(st, st.float:bufnr("preview"))
     vim.wait(50, function() return not dv.is_open() end)
     ok(("*** the draft survives %s ***"):format(name),
-      #dr.comments == 1 and dr.comments[1].body == "kept",
-      ("%d comment(s)"):format(#dr.comments))
+      #A.anchored(dr) == 1 and A.anchored(dr)[1].body == "kept",
+      ("%d comment(s)"):format(#A.anchored(dr)))
   end
   -- ...and reopening REPAINTS it, which is what makes survival useful.
   open()
@@ -322,8 +492,8 @@ do
 
   A.discard(repo.slug, SHA)
   local dz = A.draft(repo.slug, SHA)
-  dz.comments = { { path = "foo.lua", line = 4, side = "RIGHT",
-                    severity = "must-fix", body = "reloaded finding" } }
+  A.add_finding(dz, { path = "foo.lua", line = 4, side = "RIGHT",
+                    severity = "must-fix", body = "reloaded finding" })
   local wrote = select(1, A.submit({ repo = repo, sha = SHA }))
   ok("a review exists to reload (positive control)", wrote ~= nil)
 
@@ -532,7 +702,7 @@ end
                  owner = "own", name = "proj", label = "proj" }
   local sha = string.rep("a", 40)
   local d = A.draft(repo.slug, sha)
-  d.comments = { { path = "x.lua", line = 1, side = "RIGHT", severity = "nit", body = "b" } }
+  A.add_finding(d, { path = "x.lua", line = 1, side = "RIGHT", severity = "nit", body = "b" })
   A.submit({ repo = repo, sha = sha, cwd = nil })
 
   ok("[kb] submit reached save_pair", seen ~= nil)
@@ -548,7 +718,7 @@ end
   ok("[kb] the topic is still forwarded alongside it",
     seen ~= nil and type(seen.topic) == "string" and seen.topic ~= "")
   -- A failed write must leave the draft intact, as before.
-  ok("[kb] a refused write keeps the draft", #A.draft(repo.slug, sha).comments == 1)
+  ok("[kb] a refused write keeps the draft", #A.anchored(A.draft(repo.slug, sha)) == 1)
 
   review.save_pair = real_save_pair
   A.discard(repo.slug, sha)

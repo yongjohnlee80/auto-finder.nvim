@@ -133,9 +133,11 @@ local SEVERITY_HL = {
 ---CLOSE_CHOICES are the answers to the unsent-review prompt, spelled out.
 ---
 ---`keep` is the one that was MISSING, and its absence was the defect. A draft
----lives in `authoring._drafts` — module state, keyed by (slug, sha) — so it
----SURVIVES closing the diff view and repaints on reopen; `open_diff` says so in
----its own comment. The prompt nevertheless offered only submit / discard /
+---lives in **auto-core's draft store** — process memory, keyed by repo slug plus
+---the full commit (ADR-0081 §2.5) — so it SURVIVES closing the diff view and
+---repaints on reopen; `open_diff` says so in its own comment. It moved there
+---from `authoring._drafts` so that every plugin, an agent included, can read a
+---draft without depending on auto-finder. The prompt nevertheless offered only submit / discard /
 ---cancel, which forced a reader who just wanted to look away into either
 ---finishing a multi-prompt submit or destroying work that was never at risk.
 ---Johno hit exactly that: "it keeps bugging out that I have to submit ... I had
@@ -156,8 +158,12 @@ local CLOSE_CHOICES = {
 ---@param d table
 ---@return string
 local function _draft_holds(d)
+  -- Required HERE, not at file scope: this module's other users of `authoring`
+  -- are inside functions, and a file-scope require would load it at a different
+  -- point in the dependency graph than the rest of the file expects.
+  local authoring = require("auto-finder.views.repos.authoring")
   local bits = {}
-  local a, u = #(d.comments or {}), #(d.unanchored or {})
+  local a, u = #authoring.anchored(d), #authoring.unanchored(d)
   if a > 0 then bits[#bits + 1] = a .. (a == 1 and " comment" or " comments") end
   if u > 0 then bits[#bits + 1] = u .. " unanchored" end
   if type(d.summary) == "string" and vim.trim(d.summary) ~= "" then
@@ -165,6 +171,35 @@ local function _draft_holds(d)
   end
   if #bits == 0 then return "nothing" end
   return table.concat(bits, " + ")
+end
+
+---_repo_drafts lists this repo's UNSAVED drafts, newest scope order.
+---
+---From auto-core's store, filtered to scopes that actually hold work. The scope
+---grammar is `<slug>@<full sha>` (ADR-0081 §2.5), so the slug match is exact —
+---a prefix match would let `lab__proj` claim `lab__project`'s drafts.
+---@param repo table
+---@return { sha: string, short: string, holds: string, scope: string, draft: table }[]
+local function _repo_drafts(repo)
+  local ok, drafts = pcall(require, "auto-core.drafts")
+  if not ok or type(drafts) ~= "table" or type(drafts.scopes) ~= "function" then
+    return {}
+  end
+  local out = {}
+  for _, scope in ipairs(drafts.scopes({ dirty_only = true })) do
+    local slug, sha = tostring(scope):match("^(.*)@(%x+)$")
+    if slug == repo.slug and sha then
+      local d = drafts.peek(scope)
+      if d then
+        out[#out + 1] = {
+          sha = sha, short = sha:sub(1, 7), scope = scope, draft = d,
+          holds = "(draft — " .. _draft_holds(d) .. ")",
+        }
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a.scope < b.scope end)
+  return out
 end
 
 ---_review_label renders one review row as a FILENAME plus a bracketed badge
@@ -200,6 +235,60 @@ local function _review_label(meta)
   elseif not meta.err then parts[#parts + 1] = "no comments" end
   if meta.err then parts[#parts + 1] = "malformed" end
   return name .. "  [" .. table.concat(parts, " · ") .. "]"
+end
+
+---_render_review draws one review as an EXPANDABLE row whose children are its
+---two paired files — the Markdown primary and the JSON projection (ADR-0067).
+---
+---Johno, 2026-09-03: a review is a 1:1 pair, and the tree should show it as one:
+---`reviews → <repo>@<sha> [severity] → [markdown, json]`. `<CR>` on the review
+---toggles the pair; `<CR>` on either child opens that file — so the Markdown can
+---be OPENED AND EDITED for more context, not just the JSON read. Both the
+---per-commit review rows and the repo-wide section render through here, so the
+---same review reads identically wherever it appears.
+---
+---Keyed on the review's own path, which is unique per (repo, commit, revision),
+---so a review expanded in the section and under its commit share one state.
+---@param rows table[]
+---@param lines string[]
+---@param hls table[]
+---@param depth integer
+---@param meta table   a `worktree.review.describe` record (has .path, .document)
+---@param extra table  { repo, worktree?, node? } carried onto every emitted row
+local function _render_review(rows, lines, hls, depth, meta, extra)
+  local IND = "  "
+  local id = "review:" .. tostring(meta.path)
+  local open = M._expanded[id] == true
+  _row(rows, lines, hls, {
+    kind = "review", id = id, expandable = true,
+    repo = extra.repo, worktree = extra.worktree, node = extra.node, review = meta,
+    hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
+    text = string.rep(IND, depth) .. _chevron(open) .. " " .. _review_label(meta),
+  })
+  if not open then return end
+  -- The pair, newest-primary first: Markdown, then JSON. A review whose document
+  -- field is absent (a malformed or legacy JSON) shows only the JSON and says
+  -- the Markdown is missing rather than drawing a row that opens nothing.
+  if type(meta.document) == "string" and meta.document ~= "" then
+    _row(rows, lines, hls, {
+      kind = "review_file", repo = extra.repo, worktree = extra.worktree,
+      node = extra.node, review = meta, path = meta.document,
+      hl = "AutoCoreReviewBody",
+      text = string.rep(IND, depth + 1) .. "md   "
+        .. (vim.fn.fnamemodify(meta.document, ":t")),
+    })
+  else
+    _row(rows, lines, hls, {
+      kind = "message", hl = "AutoCoreDimmed",
+      text = string.rep(IND, depth + 1) .. "md   (no Markdown recorded)",
+    })
+  end
+  _row(rows, lines, hls, {
+    kind = "review_file", repo = extra.repo, worktree = extra.worktree,
+    node = extra.node, review = meta, path = meta.path,
+    hl = "AutoCoreReviewFrame",
+    text = string.rep(IND, depth + 1) .. "json " .. (vim.fn.fnamemodify(meta.path, ":t")),
+  })
 end
 
 -- Fallback marker for items with no index side (a commit's files).
@@ -242,13 +331,20 @@ local function _render(bufnr)
 
   local function container(depth, opts)
     local open = M._expanded[opts.id] == true
+    local prefix = string.rep(IND, depth) .. _chevron(open) .. " "
     _row(rows, lines, hls, {
       kind = opts.kind, id = opts.id, expandable = true,
       repo = opts.repo, worktree = opts.worktree, node = opts.node,
       hl = opts.hl,
-      text = string.rep(IND, depth) .. _chevron(open) .. " "
-        .. opts.label .. (opts.suffix or ""),
+      text = prefix .. opts.label .. (opts.suffix or ""),
     })
+    -- `spans` are offsets into the LABEL, so a caller never has to know how
+    -- wide the indent or the chevron is -- which is exactly the kind of
+    -- duplicated layout arithmetic that drifts when the glyph changes.
+    for _, sp in ipairs(opts.spans or {}) do
+      hls[#hls + 1] = { lnum = #lines - 1, hl = sp.hl,
+                        col = #prefix + sp.from, end_col = #prefix + sp.to }
+    end
     return open
   end
 
@@ -335,11 +431,24 @@ local function _render(bufnr)
               for _, node in ipairs(cc.items) do
                 local nid = node.kind == "uncommitted"
                   and ("unc:" .. wt.path) or ("commit:" .. node.sha)
+                -- PUSH STATE on the hash (Johno, 2026-09-03: "pushed commit
+                -- hash be in purple color, and none pushed on to be orange",
+                -- with the title left plain). `pushed` is nil when the read
+                -- FAILED, and nil paints nothing: a panel that renders every
+                -- hash purple because git errored is worse than one that
+                -- renders none, because the reader cannot tell.
+                local spans
+                if node.kind == "commit" and node.pushed ~= nil and node.short then
+                  spans = { { from = 0, to = #node.short,
+                              hl = node.pushed and "AutoCoreGitPushed"
+                                or "AutoCoreGitUnpushed" } }
+                end
                 local nopen = container(2, {
                   kind = node.kind, id = nid, repo = repo, worktree = wt,
                   node = node,
                   hl = node.kind == "uncommitted" and "AutoCoreGitModified" or nil,
                   label = node.label,
+                  spans = spans,
                 })
                 if nopen then
                   local fc = _cache(nid)
@@ -399,12 +508,8 @@ local function _render(bufnr)
                   -- reading two different ways is how a reader stops trusting
                   -- either.
                   for _, rv in ipairs(fc.reviews or {}) do
-                    _row(rows, lines, hls, {
-                      kind = "review", repo = repo, worktree = wt, node = node,
-                      review = rv,
-                      hl = (rv.worst and SEVERITY_HL[rv.worst]) or "AutoCoreReviewFrame",
-                      text = string.rep(IND, 3) .. "R " .. _review_label(rv),
-                    })
+                    _render_review(rows, lines, hls, 3, rv,
+                      { repo = repo, worktree = wt, node = node })
                   end
                 end
               end
@@ -459,11 +564,20 @@ local function _render(bufnr)
           local vid = "reviews:" .. repo.common_dir
           local vc = _cache(vid)
           if not vc.index then vc.index = backend.reviews_index(repo) or {} end
+          -- The count includes UNSAVED drafts: a section that says "(2)" while
+          -- holding two reviews and a draft is lying about what is inside it,
+          -- and the draft is the row a reader is most likely looking for.
+          local ndrafts = #_repo_drafts(repo)
+          local ntotal = #vc.index + ndrafts
           local vopen = container(1, {
             kind = "reviews", id = vid, repo = repo,
             hl = "AutoCoreSectionInactive",
             label = "reviews",
-            suffix = #vc.index > 0 and ("  (" .. #vc.index .. ")") or "",
+            suffix = ntotal > 0
+              and ("  (" .. ntotal .. (ndrafts > 0
+                and (", " .. ndrafts .. " draft" .. (ndrafts == 1 and "" or "s"))
+                or "") .. ")")
+              or "",
           })
           if vopen then
             if not vc.items then vc.items = backend.reviews_all(repo) or {} end
@@ -471,11 +585,32 @@ local function _render(bufnr)
               msg(2, "(no reviews recorded for this repository)")
             end
             for _, meta in ipairs(vc.items) do
-              _row(rows, lines, hls, {
-                kind = "review", repo = repo, review = meta,
-                hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
-                text = string.rep(IND, 2) .. "R " .. _review_label(meta),
-              })
+              _render_review(rows, lines, hls, 2, meta, { repo = repo })
+            end
+            -- UNSAVED DRAFTS, beside the saved reviews (Johno, 2026-09-03:
+            -- "I would like to see the draft feedback also listed on the
+            -- reviews section. So that I can pass that draft to agent to work
+            -- with before making the commits").
+            --
+            -- Readable here at all only because ADR-0081 P5 moved the draft
+            -- store into auto-core: while it was auto-finder's module state,
+            -- this panel could see it but nothing else could, which defeated
+            -- the purpose of showing it.
+            --
+            -- `dirty_only` is load-bearing: reading a draft materialises an
+            -- empty shell, so an unfiltered listing would show a row for every
+            -- commit anyone ever pressed `s` on.
+            for _, d in ipairs(_repo_drafts(repo)) do
+              local n = #lines
+              lines[n + 1] = ("      %s  %s"):format(d.short, d.holds)
+              hls[#hls + 1] = { lnum = n, col = 6, end_col = 6 + #d.short,
+                                hl = "AutoCoreGitModified" }
+              rows[n + 1] = { kind = "draft", depth = 2, repo = repo,
+                              sha = d.sha, scope = d.scope, draft = d.draft,
+                              -- `text` is what every other row carries, and it
+                              -- is how the suites identify a row without
+                              -- re-deriving its label.
+                              text = lines[n + 1] }
             end
           end
         end
@@ -493,8 +628,18 @@ local function _render(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   for _, h in ipairs(hls) do
-    pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, 0,
-      { end_line = h.lnum + 1, hl_group = h.hl })
+    if h.col then
+      -- A COLUMN SPAN: only part of the row is painted. Needed because a
+      -- commit's push state is a property of its HASH, not of the row -- a
+      -- whole row in purple reads as a category, and the subject line is the
+      -- reader's text, not a status field. Whole-row entries (no `col`) keep
+      -- the original behaviour, so nothing else changes.
+      pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, h.col,
+        { end_row = h.lnum, end_col = h.end_col, hl_group = h.hl })
+    else
+      pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, 0,
+        { end_line = h.lnum + 1, hl_group = h.hl })
+    end
   end
   vim.bo[bufnr].modifiable = false
 
@@ -572,8 +717,21 @@ local function _activate(row)
       { level = vim.log.levels.WARN })
     return
   end
-  if row.kind == "review" then return _open_path(row.review.path) end
+  if row.kind == "review_file" then return _open_path(row.path) end
+  if row.kind == "draft" then
+    -- A draft has no file to open, so `<CR>` reopens the DIFF for its commit,
+    -- which is where the work continues and where the draft repaints. The row
+    -- shape `open_diff` needs is the commit row's, rebuilt from what the scope
+    -- already carries.
+    return M.open_diff({
+      kind = "commit", repo = row.repo, worktree = row.worktree,
+      node = { kind = "commit", sha = row.sha, short = row.sha:sub(1, 7) },
+    })
+  end
   if row.kind == "more" then return M.load_more(row) end
+  -- A review row now EXPANDS into its [markdown, json] pair rather than opening
+  -- the JSON directly — the Markdown is openable and editable from the child
+  -- row (Johno, 2026-09-03). `_toggle` handles it via id/expandable.
   _toggle(row)
 end
 
@@ -720,19 +878,29 @@ function M.open_diff(row, opts)
       disabled_reason = "UNCOMMITTED has no commit to anchor a review to — commit or stash first",
     }
   else
-    local draft = authoring.draft(row.repo.slug, sha)
+    -- The repo's worktree path, so the reviewer SNAPSHOT this binds resolves
+    -- against the right repository's `git config user.name` (ADR-0081 §2.5).
+    local draft = authoring.draft(row.repo.slug, sha,
+      { cwd = row.worktree and row.worktree.path or nil })
     annotate = {
-      on_add = function(a) table.insert(draft.comments, a) end,
+      -- Findings go in through ONE entry point (ADR-0081 P5), so "is there
+      -- unsaved work?" has exactly one answer. An anchored annotation carries a
+      -- line, which is what makes it anchored -- not a flag a caller must
+      -- remember to set.
+      on_add = function(a) authoring.add_finding(draft, a) end,
       on_remove = function(a)
-        for i = #draft.comments, 1, -1 do
-          local c = draft.comments[i]
-          if c.path == a.path and c.line == a.line and (c.side or "RIGHT") == (a.side or "RIGHT") then
-            table.remove(draft.comments, i)
+        for i = #draft.items, 1, -1 do
+          local c = draft.items[i]
+          if c.anchored and c.path == a.path and c.line == a.line
+            and (c.side or "RIGHT") == (a.side or "RIGHT") then
+            table.remove(draft.items, i)
             break
           end
         end
       end,
-      pending = function() return draft.comments end,
+      -- The ANCHORED findings only: this is what the diff view repaints as
+      -- marks, and an unanchored finding has no line to paint.
+      pending = function() return authoring.anchored(draft) end,
       before_close = function(reason)
         -- The SAME predicate `submit` uses. A summary-only or unanchored-only
         -- draft is real work, and checking `#comments` here let it close
@@ -802,8 +970,8 @@ function M.open_diff(row, opts)
                   { level = vim.log.levels.INFO })
                 return
               end
-              draft.unanchored = draft.unanchored or {}
-              table.insert(draft.unanchored, { severity = sev, body = vim.trim(body) })
+              authoring.add_finding(draft,
+                { severity = sev, body = vim.trim(body), anchored = false })
               logger.notify(("repos: %s on this review — s submits")
                 :format(_draft_holds(draft)), { level = vim.log.levels.INFO })
             end)
@@ -893,12 +1061,21 @@ function M._submit_review(row, sha)
     logger.notify("repos: worktree.review is unavailable", { level = vim.log.levels.ERROR })
     return
   end
-  local draft = authoring.draft(row.repo.slug, sha)
+  -- PEEK, not get: this is a question ("is there anything to submit?"), and
+  -- asking it must not create the thing it asks about. A `get` here left an
+  -- empty shell in the store for every commit a reader merely pressed `s` on,
+  -- and those shells are what a draft LISTER would have to filter back out.
+  -- PEEK ONLY. `peek(...) or draft(...)` was the first attempt and it defeated
+  -- itself: the fallback created the very shell peeking was meant to avoid, so
+  -- every commit a reader merely pressed `s` on left an entry behind — and
+  -- those entries are what the draft listing in the reviews section then has
+  -- to filter back out. A question must not create what it asks about.
+  local draft = authoring.peek(row.repo.slug, sha)
   -- Refuse EARLY and say what would make it submittable. `authoring.submit`
   -- refuses an empty draft too, but only after the reader has answered a
   -- verdict and a summary — two prompts spent to be told there was nothing to
   -- write.
-  if not authoring.dirty(draft) then
+  if not (draft and authoring.dirty(draft)) then
     logger.notify("repos: nothing to submit yet — c annotates a line, u records a finding without one",
       { level = vim.log.levels.WARN })
     return
@@ -918,8 +1095,10 @@ function M._submit_review(row, sha)
       -- An empty or dismissed summary is NOT an abort — a review may be all
       -- comments — but it must not be stored as "" either, which is neither a
       -- summary nor absent. The verdict is the only thing `s` insists on.
-      draft.summary = (type(summary) == "string" and vim.trim(summary) ~= "")
-        and vim.trim(summary) or nil
+      -- Through `set_summary`, which also DECLARES the summary as content:
+      -- auto-core's store is domain-agnostic and cannot know that a field
+      -- called `summary` is work rather than context (ADR-0081 §2.5).
+      authoring.set_summary(row.repo.slug, sha, summary)
       M._finish_submit(row, sha)
     end)
   end)
@@ -940,6 +1119,15 @@ function M._finish_submit(row, sha)
       logger.notify(("repos: wrote review r%d — %s + %s")
         :format(res.revision, vim.fn.fnamemodify(res.md_path, ":t"),
                 vim.fn.fnamemodify(res.json_path, ":t")))
+      -- The TREE is now stale: a new review means the commit's changed files
+      -- gain a [feedback] badge, the commit gains a review row, and the repo's
+      -- reviews section gains an entry — but the write happens outside the
+      -- topic the view subscribes to, so nothing invalidated the cached nodes.
+      -- Before this, a badge appeared only after a manual R or a panel reopen
+      -- (Johno, 2026-09-03: the badge "must be visible from that tree").
+      -- A submit is infrequent; a whole-tree invalidation is the honest cost.
+      M.invalidate(nil)
+      _rerender()
       -- Reopen so the freshly-written review renders from DISK: the round trip
       -- is the confirmation, not the notification.
       local dv_ok, dv2 = pcall(require, "auto-core.ui.diffview")
@@ -1006,6 +1194,37 @@ local function _info(row)
       "",
       "<CR> on a review opens its JSON · i describes it",
     }
+  elseif row.kind == "draft" then
+    -- A draft has no document to read: everything known about it is in the
+    -- store, and this is the view that lets a reader decide whether to finish
+    -- it, hand it to an agent, or drop it.
+    local authoring = require("auto-finder.views.repos.authoring")
+    local d = row.draft or {}
+    lines = {
+      "Unsaved draft (nothing on disk yet)",
+      "  repo:    " .. tostring(row.repo.label),
+      "  commit:  " .. tostring(row.sha),
+      "  scope:   " .. tostring(row.scope),
+      "  holds:   " .. _draft_holds(d),
+      "  verdict: " .. tostring(d.verdict or "comment"),
+      "",
+    }
+    for _, c in ipairs(authoring.anchored(d)) do
+      lines[#lines + 1] = ("  [%s] %s:%s  %s")
+        :format(tostring(c.severity), tostring(c.path), tostring(c.line),
+                tostring(c.body))
+    end
+    for _, u in ipairs(authoring.unanchored(d)) do
+      lines[#lines + 1] = ("  [%s] (no line)  %s")
+        :format(tostring(u.severity), tostring(u.body))
+    end
+    if type(d.summary) == "string" and d.summary ~= "" then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  summary: " .. d.summary
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "It lives in auto-core's draft store, so an agent can read"
+    lines[#lines + 1] = "it without going through this panel. <CR> opens the diff."
   elseif row.kind == "review" then
     -- Both kinds of review row land here — the ones under a commit and the
     -- ones in the repo's `reviews` section — and only the second arrives
@@ -1281,7 +1500,10 @@ end
 ---written, and using one key for "discard an unsaved draft" and "delete a file
 ---from disk" would blur the only distinction that matters here.
 function M.remove_review(row)
-  if not (row and row.kind == "review" and row.review and row.review.path) then
+  -- Accept the review row OR either of its pair leaves: `d` on the Markdown or
+  -- the JSON removes the whole review, since the two files are one thing.
+  if not (row and (row.kind == "review" or row.kind == "review_file")
+      and row.review and row.review.path) then
     logger.notify("repos: put the cursor on a review to remove it",
       { level = vim.log.levels.WARN })
     return
@@ -1296,7 +1518,7 @@ function M.remove_review(row)
   -- The RAW filename, not the elided row label: a prompt that is about to
   -- delete something names it exactly as the filesystem does.
   local label = tostring(meta.name or meta.path)
-  local prompt = ("Delete review %s from %s?  Its canonical Markdown is kept."):format(
+  local prompt = ("Delete review %s from %s?  Both the JSON and its Markdown are removed."):format(
     label, tostring(row.repo and row.repo.label or "this repository"))
 
   local function go(choice)
@@ -1317,10 +1539,21 @@ function M.remove_review(row)
     -- no longer there.
     M.invalidate(nil)
     _rerender()
-    local kept = detail and detail.document
-    logger.notify("repos: removed " .. label
-      .. (kept and ("  — the Markdown is kept at " .. tostring(kept)) or ""),
-      { level = vim.log.levels.INFO })
+    -- Report what was removed. Both halves go now (Johno, 2026-09-03 — the two
+    -- files are one review); a Markdown that could not be deleted is surfaced so
+    -- an orphan does not linger unseen.
+    local doc = detail and detail.document
+    local msg
+    if doc and detail.document_removed == false and not detail.document_absent then
+      msg = "repos: removed " .. label .. " (JSON gone; its Markdown could NOT be "
+        .. "deleted — " .. tostring(detail.document_error or "unknown")
+        .. ", left at " .. tostring(doc) .. ")"
+    elseif doc and detail.document_removed then
+      msg = "repos: removed " .. label .. " and its Markdown"
+    else
+      msg = "repos: removed " .. label
+    end
+    logger.notify(msg, { level = vim.log.levels.INFO })
   end
 
   local okc, float = pcall(require, "auto-core.ui.float")

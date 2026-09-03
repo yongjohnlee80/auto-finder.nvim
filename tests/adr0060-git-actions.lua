@@ -329,7 +329,8 @@ end)()
     available = function() return true end,
     remove_review = function(repo, path)
       removed[#removed + 1] = { repo = repo, path = path }
-      return true, nil, { path = path, document = "/kb/agents/lector/reviews/doc-r1-review.md" }
+      return true, nil, { path = path, document = "/kb/agents/lector/reviews/doc-r1-review.md",
+        document_removed = true, tombstoned = true }
     end,
   }
   local asked = nil
@@ -352,8 +353,9 @@ end)()
     asked and asked:find("own__myrepo@1cfe731.r1.review.json", 1, true) ~= nil, tostring(asked))
   ok("[9] and the repository it belongs to",
     asked and asked:find("myrepo", 1, true) ~= nil, tostring(asked))
-  ok("[9] *** and says the Markdown is KEPT — 'remove the review' is ambiguous ***",
-    asked and asked:lower():find("markdown is kept", 1, true) ~= nil, tostring(asked))
+  ok("[9] *** and says BOTH the JSON and its Markdown are removed ***",
+    asked and asked:lower():find("both the json and its markdown are removed", 1, true) ~= nil,
+    tostring(asked))
   ok("[9] *** answering no deletes NOTHING ***", #removed == 0, tostring(#removed))
 
   vim.ui.select = function(_, _, cb) cb("yes") end
@@ -362,6 +364,7 @@ end)()
     #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
   ok("[9] and it goes through the repo that owns the store",
     removed[1].repo and removed[1].repo.slug == "own__myrepo")
+
 
   -- No answer at all is not a yes.
   local prompted = false
@@ -424,6 +427,49 @@ end)()
   logger.notify = prev_notify
   ok("[9] against an older worktree.nvim it explains itself",
     said ~= nil and said:find("newer worktree.nvim", 1, true) ~= nil, tostring(said))
+
+  -- Pair-aware removal (Johno, 2026-09-03), self-contained so it neither
+  -- depends on nor perturbs the shared stub and counters above.
+  do
+    local rmd = {}
+    local msgs = {}
+    package.loaded["worktree.repos"] = {
+      available = function() return true end,
+      remove_review = function(repo, path)
+        rmd[#rmd + 1] = { repo = repo, path = path }
+        return true, nil, { path = path, document_removed = true,
+          document = "/kb/agents/lector/reviews/doc-r1-review.md", tombstoned = true }
+      end,
+    }
+    local prev = logger.notify
+    logger.notify = function(m, o) msgs[#msgs + 1] = tostring(m); return prev(m, o) end
+    vim.ui.select = function(_, _, cb) cb("yes") end
+
+    local rrow = {
+      kind = "review",
+      repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+      review = { name = "own__myrepo@1cfe731.r1.review.json",
+                 path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+                 document = "/kb/agents/lector/reviews/doc-r1-review.md",
+                 short = "1cfe731", revision = 1, severities = {} },
+    }
+    tree.remove_review(rrow)
+    ok("[9] *** the removal message says the Markdown went too ***",
+      (function() for _, n in ipairs(msgs) do
+        if n:find("and its Markdown", 1, true) then return true end end return false end)(),
+      vim.inspect(msgs))
+
+    -- `d` on a review_file LEAF removes the whole review, not just that file.
+    local leaf = { kind = "review_file", repo = rrow.repo, review = rrow.review,
+                   path = rrow.review.document }
+    local before_leaf = #rmd
+    tree.remove_review(leaf)
+    ok("[9] *** d on a pair LEAF removes the whole review (keyed on the JSON) ***",
+      #rmd == before_leaf + 1 and rmd[#rmd].path == rrow.review.path,
+      vim.inspect(rmd[#rmd]))
+
+    logger.notify = prev
+  end
 
   vim.ui.select = orig_select
   package.loaded["auto-core.ui.float"] = orig_float
