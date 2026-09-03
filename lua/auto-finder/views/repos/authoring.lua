@@ -59,8 +59,11 @@ function M.scope(slug, sha)
   -- reviewers' drafts into one (lector SF2). Refusing is right — a caller with
   -- only an abbreviation has not resolved its identity yet, and silently
   -- accepting it hides that until two drafts merge.
-  -- Lua has no `%x{40}`: the repetition is built explicitly, once.
-  if s == "" or not h:match("^" .. ("%x"):rep(40) .. "$") then return nil end
+  -- Lua has no `%x{40}`: the repetition is built explicitly, once. The slug
+  -- must be `@`-free, or it could forge the `@<sha>` / `@working:` delimiter
+  -- the whole grammar rests on (lector, §2.5 amendment review).
+  if s == "" or s:find("@", 1, true)
+    or not h:match("^" .. ("%x"):rep(40) .. "$") then return nil end
   return s .. "@" .. h
 end
 
@@ -73,37 +76,101 @@ end
 ---checkout resolves to the same draft.
 M.WORKING_MARK = "@working:"
 
----scope_working is the opaque draft key for uncommitted work in one worktree.
+---worktree_id resolves a DURABLE identity for a worktree — NOT its path.
 ---
----Deliberately NOT `scope()` with a fake sha: a saved review still cannot anchor
----to the working tree (that gate stays), so this key exists only for the DRAFT,
----and keeping it a distinct shape is what lets `submit` refuse it by inspection
----rather than by guessing.
----@param slug string
+---A raw path is not identity (lector, §2.5 amendment review): a checkout can be
+---moved, and a removed-then-recreated worktree at the same path would inherit an
+---unrelated draft. Git's own registration is the durable key: for a linked
+---worktree `<path>/.git` is a FILE reading `gitdir: <common>/worktrees/<name>`,
+---and that registration directory is stable across a `git worktree move`; for
+---the main worktree `<path>/.git` is the git directory itself. So the id is the
+---absolute registration git directory, read through auto-core (the family's
+---file owner) rather than by shelling git — which keeps auto-finder from
+---learning git and honours the dependency rule.
 ---@param worktree_path string
----@return string?
-function M.scope_working(slug, worktree_path)
-  local s, p = tostring(slug or ""), tostring(worktree_path or "")
-  if s == "" or p == "" then return nil end
-  return s .. M.WORKING_MARK .. p
+---@return string?  absolute registration gitdir, or nil if it cannot be resolved
+function M.worktree_id(worktree_path)
+  if type(worktree_path) ~= "string" or worktree_path == "" then return nil end
+  local ok, ds = pcall(require, "auto-core.docstore")
+  if not ok or type(ds) ~= "table" then return nil end
+  local dotgit = worktree_path .. "/.git"
+  local kind = ds.kind and ds.kind(dotgit) or nil
+  if kind == "directory" then
+    return vim.fs and vim.fs.normalize(dotgit) or dotgit
+  elseif kind == "file" then
+    local content = ds.read and select(1, ds.read(dotgit)) or nil
+    local target = type(content) == "string"
+      and content:match("gitdir:%s*(.-)%s*$") or nil
+    if not target or target == "" then return nil end
+    -- The recorded gitdir may be relative to the worktree.
+    if not target:match("^/") then target = worktree_path .. "/" .. target end
+    return vim.fs and vim.fs.normalize(target) or target
+  end
+  return nil
 end
 
----is_working reports whether a scope is an uncommitted-work draft.
+---_slug_ok rejects a slug that could inject a scope delimiter. A committed
+---scope ends in `@<40-hex>` and a working one carries `@working:`; a slug that
+---contained `@` could forge either, so the whole grammar rests on the slug
+---being `@`-free (sanitised slugs are `owner__repo`, which cannot contain one).
+local function _slug_ok(s)
+  return type(s) == "string" and s ~= "" and not s:find("@", 1, true)
+end
+
+---scope_working is the opaque draft key for uncommitted work in one worktree.
+---
+---Keyed by the worktree's durable IDENTITY, never its display path, so a moved
+---worktree keeps its draft and a recreated one does not inherit an old draft.
+---`submit` refuses this by inspection — the committed grammar it accepts cannot
+---match a `@working:` scope — rather than by guessing.
+---@param slug string
+---@param worktree_id string   from `worktree_id`, not a raw path
+---@return string?
+function M.scope_working(slug, worktree_id)
+  local s, id = tostring(slug or ""), tostring(worktree_id or "")
+  if not _slug_ok(s) or id == "" then return nil end
+  return s .. M.WORKING_MARK .. id
+end
+
+---is_working reports whether a scope is an uncommitted-work draft, by an
+---ANCHORED parse — NOT a substring search (lector): the discriminator is the
+---`@working:` segment at a real boundary, and the slug part must itself be
+---delimiter-free, so a committed scope whose path metadata happened to contain
+---the token cannot be misread as working.
+---@param scope string
+---@return boolean, string? slug, string? worktree_id
+function M.is_working(scope)
+  if type(scope) ~= "string" then return false end
+  local s, id = scope:match("^(.-)" .. vim.pesc(M.WORKING_MARK) .. "(.+)$")
+  if not s or not _slug_ok(s) or id == "" then return false end
+  return true, s, id
+end
+
+---is_committed_scope reports whether a scope is EXACTLY the committed
+---production `<slug>@<40-lowercase-hex>` — the only shape `submit` may save.
+---FAIL-CLOSED: anything else (a working scope, a malformed one) is rejected here
+---before it can reach the store.
 ---@param scope string
 ---@return boolean
-function M.is_working(scope)
-  return type(scope) == "string" and scope:find(M.WORKING_MARK, 1, true) ~= nil
+function M.is_committed_scope(scope)
+  if type(scope) ~= "string" then return false end
+  local s, sha = scope:match("^(.-)@(" .. ("%x"):rep(40) .. ")$")
+  return s ~= nil and _slug_ok(s) and sha ~= nil and sha == sha:lower()
 end
 
 ---draft_working returns (and lazily creates) the draft for a worktree's
 ---uncommitted changes. The reviewer is snapshotted from that worktree, exactly
----as the committed path does (§2.5) — authorship is bound the same way whether
----or not there is a commit yet.
+---as the committed path does (§2.5). The draft is keyed by the worktree's
+---durable IDENTITY; the path is recorded as DISPLAY/RECOVERY metadata and is
+---REFRESHED on every bind, which is precisely the move behaviour §2.5 asks for:
+---a moved worktree rebinds to its own draft by identity and its display path
+---catches up, rather than being silently conflated with anything else.
 ---@param slug string
 ---@param worktree_path string
 ---@return table?
 function M.draft_working(slug, worktree_path)
-  local scope = M.scope_working(slug, worktree_path)
+  local id = M.worktree_id(worktree_path)
+  local scope = id and M.scope_working(slug, id) or nil
   if not scope then return nil end
   local d = _drafts().get(scope)
   if d.verdict == nil then d.verdict = "comment" end
@@ -113,7 +180,8 @@ function M.draft_working(slug, worktree_path)
     d.meta.reviewer = { display = display, slug = rslug,
                         bound_at = os.time(), cwd = worktree_path }
   end
-  -- The working tree it belongs to, so a lister can reopen the right diff.
+  -- Identity keys the draft; path is metadata, refreshed each bind (move).
+  d.meta.worktree_id = id
   d.meta.worktree = worktree_path
   return d
 end
@@ -123,7 +191,8 @@ end
 ---@param worktree_path string
 ---@return table?
 function M.peek_working(slug, worktree_path)
-  local scope = M.scope_working(slug, worktree_path)
+  local id = M.worktree_id(worktree_path)
+  local scope = id and M.scope_working(slug, id) or nil
   return scope and _drafts().peek(scope) or nil
 end
 
@@ -446,6 +515,16 @@ function M.submit(opts)
   local repo, sha = opts.repo, opts.sha
   local slug = repo and repo.slug
   if not (slug and sha) then return nil, "no repo/commit to attach a review to" end
+
+  -- FAIL CLOSED (lector, §2.5 amendment review): the ONLY scope that may reach
+  -- the store is the committed production `<slug>@<40-hex>`. A working scope, or
+  -- any malformed one, is rejected here before `save_pair` — so an uncommitted
+  -- draft can never be written as a saved review by any path, even a mistaken
+  -- caller passing `sha = "working"`.
+  if not M.is_committed_scope(M.scope(slug, sha) or "") then
+    return nil, "refusing to save: a review must anchor to a full commit sha "
+      .. "(a draft on uncommitted work stays a draft — commit first)"
+  end
 
   -- `cwd` is passed so a first-touch snapshot resolves against the RIGHT repo;
   -- a dirty draft will already carry one from the composer.

@@ -207,9 +207,11 @@ local function _repo_drafts(repo)
         sha = sha, short = sha:sub(1, 7), scope = scope, draft = d,
         holds = "(draft — " .. _draft_holds(d) .. ")",
       }
-    elseif d and authoring.is_working(scope) then
-      local wslug = tostring(scope):match("^(.*)" .. vim.pesc(authoring.WORKING_MARK))
-      if wslug == repo.slug then
+    else
+      -- ANCHORED parse (lector): `is_working` returns the slug + worktree id
+      -- from a real `@working:` boundary, not a substring search.
+      local ok_w, wslug = authoring.is_working(scope)
+      if d and ok_w and wslug == repo.slug then
         out[#out + 1] = {
           working = true, worktree = d.meta and d.meta.worktree or nil,
           short = "UNCOMMITTED", scope = scope, draft = d,

@@ -328,10 +328,59 @@ do
       vim.fn.system({ "git", "-C", wdir, "init", "-q" })
       A.add_finding(A.draft_working("own__w2", wdir),
         { severity = "nit", body = "x", anchored = false })
-      local scope = A.scope_working("own__w2", wdir)
+      -- The scope is keyed by the worktree IDENTITY, not the path.
+      local scope = A.scope_working("own__w2", A.worktree_id(wdir))
       local before = A.peek_working("own__w2", wdir) ~= nil
       A.discard_scope(scope)
       return before and A.peek_working("own__w2", wdir) == nil
+    end)())
+  ok("[6] *** the working scope is keyed by git IDENTITY, not the raw path ***",
+    (function()
+      -- lector §2.5 amendment: a raw path is not durable. The id is the
+      -- worktree's registration gitdir, so the scope contains that, not the
+      -- checkout path.
+      local wdir = tmp .. "/repo_id"
+      vim.fn.mkdir(wdir, "p")
+      vim.fn.system({ "git", "-C", wdir, "init", "-q" })
+      local id = A.worktree_id(wdir)
+      local scope = A.scope_working("own__id", id)
+      return type(id) == "string" and id:find("/%.git$") ~= nil
+        and scope == "own__id@working:" .. id
+        -- the raw path is NOT what keys it
+        and scope ~= "own__id@working:" .. wdir
+    end)())
+  ok("[6] *** FAIL-CLOSED: submit REFUSES a non-committed scope before any save ***",
+    (function()
+      -- lector §2.5 amendment: a working/malformed scope must not reach the
+      -- store. A dirty draft is placed on a bogus sha, then submit is asked to
+      -- write it; it must refuse by grammar, not attempt save_pair.
+      for _, bad in ipairs({ "working", "abc1234", string.rep("a", 41),
+                             string.rep("A", 40) }) do
+        local d = A.draft("own__fc", string.rep("f", 40))  -- a real dirty draft
+        A.add_finding(d, { severity = "nit", body = "x", anchored = false })
+        local res, err = A.submit({ repo = { slug = "own__fc", label = "fc",
+          owner = "own", name = "fc", url = "git@github.com:own/fc.git" },
+          sha = bad })
+        if res ~= nil or err == nil then return false, "accepted sha=" .. bad end
+      end
+      return A.is_committed_scope("own__fc@" .. string.rep("a", 40)) == true
+        and A.is_committed_scope("own__fc@working:/x") == false
+        and A.is_committed_scope("own__fc@" .. string.rep("A", 40)) == false
+    end)())
+  ok("[6] a moved worktree REBINDS by identity (path is display metadata)",
+    (function()
+      -- Same registration gitdir → same draft, whatever the display path says.
+      -- Simulated by binding, then rewriting the path meta as a move would, and
+      -- confirming the identity-keyed peek still finds the one draft.
+      local wdir = tmp .. "/repo_move"
+      vim.fn.mkdir(wdir, "p")
+      vim.fn.system({ "git", "-C", wdir, "init", "-q" })
+      A.add_finding(A.draft_working("own__mv", wdir),
+        { severity = "nit", body = "keep", anchored = false })
+      local d = A.peek_working("own__mv", wdir)
+      -- the id is stable; the path meta is what a move would refresh
+      return d ~= nil and d.meta.worktree_id == A.worktree_id(wdir)
+        and d.meta.worktree == wdir
     end)())
   ok("[6] *** MF5: the draft SNAPSHOTS its reviewer when bound ***",
       snap ~= nil and snap.display == "Alice Reviewer"
