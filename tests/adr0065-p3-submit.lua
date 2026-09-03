@@ -504,5 +504,55 @@ do
   vim.fn.delete(wt, "rf")
 end
 
+-- ── submit must FORWARD the resolved KB root to save_pair ──────────────────
+-- The defect that made the repos panel's review submit impossible for three
+-- fix rounds. `_kb_root()` has resolved the KB correctly (through auto-core's
+-- variable resolver) since ADR-0067 A4 deleted `markdown_path`, its only
+-- consumer — and the value was never passed on. `save_pair` then fell back to
+-- reading `$AUTO_AGENTS_KB_ROOT`, a variable injected into AGENT spawns only,
+-- so every submit from the editor died at the preflight with "cannot resolve
+-- $KB_ROOT for the review document" while every agent and every test passed.
+--
+-- This asserts the HANDOFF rather than the outcome, deliberately. worktree.nvim
+-- now also resolves the root when a caller omits it, so an end-to-end submit
+-- succeeds whichever of the two fixes is present — which makes an outcome test
+-- unable to discriminate this one. Stubbing `save_pair` and reading the opts it
+-- receives pins exactly the line under test.
+;(function()
+  local A = require("auto-finder.views.repos.authoring")
+  local review = require("worktree.review")
+  local real_save_pair = review.save_pair
+  local seen
+  review.save_pair = function(_slug, _doc, _md, opts)
+    seen = opts
+    return nil, "stubbed — not writing"
+  end
+
+  local repo = { slug = "own__proj", url = "git@github.com:own/proj.git",
+                 owner = "own", name = "proj", label = "proj" }
+  local sha = string.rep("a", 40)
+  local d = A.draft(repo.slug, sha)
+  d.comments = { { path = "x.lua", line = 1, side = "RIGHT", severity = "nit", body = "b" } }
+  A.submit({ repo = repo, sha = sha, cwd = nil })
+
+  ok("[kb] submit reached save_pair", seen ~= nil)
+  ok("[kb] *** and FORWARDED a kb_root — the line the panel needed ***",
+    seen ~= nil and type(seen.kb_root) == "string" and seen.kb_root ~= "",
+    seen and vim.inspect(seen))
+  -- It must be the resolver's answer, not something invented here.
+  local vok, vars = pcall(require, "auto-core.todo.vars")
+  local resolved = vok and select(2, pcall(vars.get, "KB_ROOT")) or nil
+  ok("[kb] *** and it is auto-core's resolved value, not a guess ***",
+    seen ~= nil and resolved ~= nil and seen.kb_root == resolved,
+    ("forwarded=%s resolved=%s"):format(tostring(seen and seen.kb_root), tostring(resolved)))
+  ok("[kb] the topic is still forwarded alongside it",
+    seen ~= nil and type(seen.topic) == "string" and seen.topic ~= "")
+  -- A failed write must leave the draft intact, as before.
+  ok("[kb] a refused write keeps the draft", #A.draft(repo.slug, sha).comments == 1)
+
+  review.save_pair = real_save_pair
+  A.discard(repo.slug, sha)
+end)()
+
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))
 os.exit(fail > 0 and 1 or 0)
