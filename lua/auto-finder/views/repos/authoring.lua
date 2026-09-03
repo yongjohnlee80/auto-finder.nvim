@@ -25,17 +25,115 @@ local M = {}
 ---offers the same ladder the anchored one does.
 M.SEVERITIES = { "must-fix", "should-fix", "nit", "question" }
 
--- Drafts, keyed by `<slug>@<sha>`. One per commit under review.
-M._drafts = {}
+---### P5 — the draft lives in auto-core (ADR-0081 §2.2/§2.5)
+---
+---It used to be `M._drafts` here, which meant the plugin holding it was the one
+---no other plugin may depend on: an agent could not read a draft, and the
+---composer that FILLS a draft (auto-core's diff view) sat one plugin away from
+---the store it appended to. Both are fixed by the store living in auto-core.
+---
+---What stays here is what auto-finder owns: the reviewer's identity, the render,
+---and the submit.
+local function _drafts()
+  local ok, d = pcall(require, "auto-core.drafts")
+  if not ok or type(d) ~= "table" or type(d.get) ~= "function" then
+    error("auto-finder.repos.authoring: auto-core.drafts is required"
+      .. " (auto-core >= v0.2.12)", 0)
+  end
+  return d
+end
 
-local function _key(slug, sha) return tostring(slug) .. "@" .. tostring(sha) end
+---scope is the draft's opaque key: repo slug plus the FULL commit.
+---
+---The full sha, never the abbreviation (§2.5). Two commits can share a short
+---sha, and a scope that collides merges two reviewers' work silently; a scope
+---derived from a window id would split one reviewer's work instead.
+---@param slug string
+---@param sha string
+---@return string
+function M.scope(slug, sha)
+  return tostring(slug) .. "@" .. tostring(sha)
+end
 
 ---draft returns (and lazily creates) the draft for a commit.
+---
+---The table is auto-core's and LIVE: findings go in `items` (the generic list
+---auto-core's dirty predicate reads), while `verdict` and `summary` are this
+---module's own fields on the same table.
 ---@return table
 function M.draft(slug, sha)
-  local k = _key(slug, sha)
-  M._drafts[k] = M._drafts[k] or { comments = {}, summary = nil, verdict = "comment" }
-  return M._drafts[k]
+  local d = _drafts().get(M.scope(slug, sha))
+  if d.verdict == nil then d.verdict = "comment" end
+  return d
+end
+
+---peek returns the draft for a commit WITHOUT creating one.
+---
+---The read a question needs. `draft()` materialises an empty shell for every
+---scope it is asked about, and those shells then have to be filtered back out of
+---any listing of unsaved work.
+---@param slug string
+---@param sha string
+---@return table?
+function M.peek(slug, sha)
+  return _drafts().peek(M.scope(slug, sha))
+end
+
+---add_finding appends one finding to the draft.
+---
+---THE only way content enters a draft, so "is there unsaved work?" has exactly
+---one answer. `anchored` is inferred from the presence of a line, because that
+---is what makes a finding anchored -- a separate flag the caller had to
+---remember to set is a flag the caller eventually forgets.
+---@param d table
+---@param item table
+---@return table item
+function M.add_finding(d, item)
+  item = item or {}
+  if item.anchored == nil then item.anchored = item.line ~= nil end
+  table.insert(d.items, item)
+  return item
+end
+
+---anchored / unanchored are the two views the composer and the renderer need.
+---
+---Derived from `items` rather than kept as two lists: two lists is two places
+---for a finding to be missing from, and the count that drives "nothing to
+---submit" was once computed from one of them.
+---@param d table
+---@return table[]
+function M.anchored(d)
+  local out = {}
+  for _, i in ipairs((d or {}).items or {}) do
+    if i.anchored then out[#out + 1] = i end
+  end
+  return out
+end
+
+---@param d table
+---@return table[]
+function M.unanchored(d)
+  local out = {}
+  for _, i in ipairs((d or {}).items or {}) do
+    if not i.anchored then out[#out + 1] = i end
+  end
+  return out
+end
+
+---set_summary records a summary and declares it as content.
+---
+---A summary with no findings is still work (review-json §6), and auto-core's
+---store is domain-agnostic so it cannot know that a field called `summary`
+---counts -- the caller says so, once, here.
+---@param slug string
+---@param sha string
+---@param text string?
+function M.set_summary(slug, sha, text)
+  local d = M.draft(slug, sha)
+  local has = type(text) == "string" and vim.trim(text) ~= ""
+  d.summary = has and vim.trim(text) or nil
+  _drafts().touch(M.scope(slug, sha), has)
+  return d.summary
 end
 
 ---dirty reports whether a draft holds anything worth keeping.
@@ -52,14 +150,15 @@ end
 ---@param d table
 ---@return boolean
 function M.dirty(d)
-  if type(d) ~= "table" then return false end
-  return #(d.comments or {}) > 0
-    or #(d.unanchored or {}) > 0
-    or (type(d.summary) == "string" and vim.trim(d.summary) ~= "")
+  -- auto-core's predicate, not a second one. It reads `items` plus the explicit
+  -- `touched` bit that `set_summary` sets -- so a summary-only review still
+  -- counts, which is the exact case the old three-inline-checks defect refused
+  -- with "nothing to submit" while the close guard let it go unprompted.
+  return _drafts().dirty(d)
 end
 
 ---discard drops a draft outright.
-function M.discard(slug, sha) M._drafts[_key(slug, sha)] = nil end
+function M.discard(slug, sha) return _drafts().discard(M.scope(slug, sha)) end
 
 ---slugify turns a display name into a safe PATH SEGMENT.
 ---
@@ -143,7 +242,7 @@ end
 function M.render_markdown(opts)
   local d = opts.draft
   local date = os.date("!%Y-%m-%d")
-  local n_anchored, n_unanchored = #(d.comments or {}), #(d.unanchored or {})
+  local n_anchored, n_unanchored = #M.anchored(d), #M.unanchored(d)
   -- KB_RULES R2: every new doc under `agents/<name>/` carries BOTH YAML
   -- frontmatter (for tools — kb.frontmatter, obsidian, the cost analyzer) and
   -- the inline Tags/Abstract preview lines (for LLMs skimming before load).
@@ -180,10 +279,10 @@ function M.render_markdown(opts)
     for _, l in ipairs(vim.split(d.summary, "\n", { plain = true })) do lines[#lines + 1] = l end
     lines[#lines + 1] = ""
   end
-  if #(d.comments or {}) > 0 then
+  if #M.anchored(d) > 0 then
     lines[#lines + 1] = "## Anchored findings"
     lines[#lines + 1] = ""
-    for _, c in ipairs(d.comments) do
+    for _, c in ipairs(M.anchored(d)) do
       local where = ("`%s:%d`"):format(c.path, c.line)
       if c.start_line and c.start_line ~= c.line then
         where = ("`%s:%d-%d`"):format(c.path, c.start_line, c.line)
@@ -194,12 +293,12 @@ function M.render_markdown(opts)
       lines[#lines + 1] = ""
     end
   end
-  if #(d.unanchored or {}) > 0 then
+  if #M.unanchored(d) > 0 then
     -- §6: "a finding that is not anchored to a line has nowhere to go in the
     -- JSON and must not be dropped to fit the schema."
     lines[#lines + 1] = "## Unanchored findings"
     lines[#lines + 1] = ""
-    for _, u in ipairs(d.unanchored) do
+    for _, u in ipairs(M.unanchored(d)) do
       lines[#lines + 1] = ("- **%s** — %s"):format(u.severity or "comment", u.body or "")
     end
     lines[#lines + 1] = ""
@@ -251,7 +350,7 @@ function M.submit(opts)
   -- Carried so a later `validate_pair` can check the document really sits in
   -- THIS reviewer's directory rather than merely somewhere under the KB.
   doc.reviewer_slug = rslug
-  doc.comments = vim.deepcopy(d.comments or {})
+  doc.comments = vim.deepcopy(M.anchored(d))
 
   -- The generator runs only once the revision is WON, so the rendered document
   -- can name it. It returns a BODY only — and it must not raise: an `error()`

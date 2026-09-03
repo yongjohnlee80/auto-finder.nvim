@@ -449,7 +449,7 @@ ok("p9: the file rows keep their own status colour",
 -- ── p10: the submit flow — no silent aborts, and `q` can KEEP a draft ──
 -- Johno, 2026-09-02: "it keeps bugging out that I have to submit due to
 -- unanchored ... I had to discard at the end. not usable still". The draft
--- lives in `authoring._drafts` and SURVIVES closing the view, yet the unsent-
+-- lives in auto-core's draft store and SURVIVES closing the view, yet the unsent-
 -- review prompt offered only submit / discard / cancel — so a reader who
 -- changed their mind had to either finish a multi-prompt submit or destroy work
 -- that was never at risk, and every abort in the chain returned silently.
@@ -484,7 +484,7 @@ do
 
   -- 2. Cancelling the verdict must SAY the draft survived.
   local draft = A.draft(repo.slug, commit.sha)
-  table.insert(draft.comments, { path = "newfile.txt", line = 1, side = "RIGHT",
+  A.add_finding(draft, { path = "newfile.txt", line = 1, side = "RIGHT",
     severity = "must-fix", body = "sample review fix this!" })
   notes, asked = {}, {}
   vim.ui.select = function(_, o, cb) asked[#asked + 1] = o and o.prompt; cb(nil) end
@@ -494,7 +494,7 @@ do
   ok("p10: and the message counts what was kept",
     (said("submit cancelled") or ""):find("1 comment kept", 1, true) ~= nil,
     said("submit cancelled"))
-  ok("p10: the draft really is intact", #A.draft(repo.slug, commit.sha).comments == 1)
+  ok("p10: the draft really is intact", #A.anchored(A.draft(repo.slug, commit.sha)) == 1)
 
   -- 3. An empty summary is stored as ABSENT, not as "".
   notes = {}
@@ -504,15 +504,31 @@ do
   vim.wait(200, function() return false end, 20)
   ok("p10: a blank summary submits and is not stored as an empty string",
     said("wrote review") ~= nil, vim.inspect(notes))
-  local written = A.draft(repo.slug, commit.sha)
-  ok("p10: and the draft is cleared by a successful submit", #written.comments == 0)
+  -- A cleared draft is one auto-core no longer holds. Re-reading through
+  -- `draft()` MATERIALISES a fresh empty one (that is `get`'s contract), so the
+  -- assertion is that it holds nothing -- and `peek` proves the store itself is
+  -- empty, which is the stronger statement.
+  local drafts = require("auto-core.drafts")
+  -- CLEARED means "holds no work", not "the key is absent". Reading a draft
+  -- MATERIALISES an empty shell -- that is `get`'s contract -- so the property
+  -- is dirtiness, and the shell must not appear as work to a lister. That
+  -- distinction is why auto-core has `scopes({ dirty_only = true })`.
+  ok("p10: and the draft is cleared by a successful submit", (function()
+    local scope = A.scope(repo.slug, commit.sha)
+    local listed = false
+    for _, sc in ipairs(drafts.scopes({ dirty_only = true })) do
+      if sc == scope then listed = true end
+    end
+    return drafts.dirty(scope) == false and listed == false
+      and #A.anchored(A.draft(repo.slug, commit.sha)) == 0
+  end)())
 
   -- 4. The close guard: four answers, and KEEP is one of them.
   tree.open_diff(crow)
   local st = dv._state_for_tests()
   ok("p10: the view exposes its annotate wiring", st and st.annotate ~= nil)
   local draft2 = A.draft(repo.slug, commit.sha)
-  table.insert(draft2.comments, { path = "newfile.txt", line = 1, side = "RIGHT",
+  A.add_finding(draft2, { path = "newfile.txt", line = 1, side = "RIGHT",
     severity = "nit", body = "second pass" })
   local offered
   notes = {}
@@ -539,7 +555,7 @@ do
   vim.wait(300, function() return said("closed") ~= nil end, 20)
   ok("p10: *** keep closes the view ***", dv.is_open() == false, tostring(dv.is_open()))
   ok("p10: *** and the draft survives it ***",
-    #A.draft(repo.slug, commit.sha).comments == 1)
+    #A.anchored(A.draft(repo.slug, commit.sha)) == 1)
   ok("p10: and the message says so", said("kept") ~= nil, vim.inspect(notes))
 
   tree.open_diff(crow)
@@ -552,7 +568,7 @@ do
   vim.wait(300, function() return said("discarded") ~= nil end, 20)
   ok("p10: *** discard reports WHAT it destroyed ***",
     (said("discarded") or ""):find("1 comment", 1, true) ~= nil, vim.inspect(notes))
-  ok("p10: and the draft is gone", #A.draft(repo.slug, commit.sha).comments == 0)
+  ok("p10: and the draft is gone", #A.anchored(A.draft(repo.slug, commit.sha)) == 0)
   pcall(dv.close, "resume")
 
   -- 6. `u` is its own key, so submit no longer walks an unanchored loop.
@@ -567,21 +583,21 @@ do
   vim.ui.input = function(_, cb) cb("this module has no tests") end
   vim.ui.select = function(items, _, cb) cb(items[1]) end
   ukey.fn()
-  ok("p10: u records the finding", #A.draft(repo.slug, commit.sha).unanchored == 1,
-    vim.inspect(A.draft(repo.slug, commit.sha).unanchored))
+  ok("p10: u records the finding", #A.unanchored(A.draft(repo.slug, commit.sha)) == 1,
+    vim.inspect(A.unanchored(A.draft(repo.slug, commit.sha))))
   -- Cancelling the severity must add NOTHING; it used to store "comment".
   notes = {}
   vim.ui.select = function(_, _, cb) cb(nil) end
   ukey.fn()
   ok("p10: *** cancelling the severity adds nothing (it used to store one) ***",
-    #A.draft(repo.slug, commit.sha).unanchored == 1 and said("nothing added") ~= nil,
+    #A.unanchored(A.draft(repo.slug, commit.sha)) == 1 and said("nothing added") ~= nil,
     vim.inspect(notes))
   -- And an empty body adds nothing either.
   notes = {}
   vim.ui.input = function(_, cb) cb("  ") end
   ukey.fn()
   ok("p10: an empty finding adds nothing",
-    #A.draft(repo.slug, commit.sha).unanchored == 1 and said("nothing added") ~= nil)
+    #A.unanchored(A.draft(repo.slug, commit.sha)) == 1 and said("nothing added") ~= nil)
   -- CONTROL: submit no longer asks for unanchored findings at all.
   notes, asked = {}, {}
   local prompts = {}

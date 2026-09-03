@@ -133,9 +133,11 @@ local SEVERITY_HL = {
 ---CLOSE_CHOICES are the answers to the unsent-review prompt, spelled out.
 ---
 ---`keep` is the one that was MISSING, and its absence was the defect. A draft
----lives in `authoring._drafts` — module state, keyed by (slug, sha) — so it
----SURVIVES closing the diff view and repaints on reopen; `open_diff` says so in
----its own comment. The prompt nevertheless offered only submit / discard /
+---lives in **auto-core's draft store** — process memory, keyed by repo slug plus
+---the full commit (ADR-0081 §2.5) — so it SURVIVES closing the diff view and
+---repaints on reopen; `open_diff` says so in its own comment. It moved there
+---from `authoring._drafts` so that every plugin, an agent included, can read a
+---draft without depending on auto-finder. The prompt nevertheless offered only submit / discard /
 ---cancel, which forced a reader who just wanted to look away into either
 ---finishing a multi-prompt submit or destroying work that was never at risk.
 ---Johno hit exactly that: "it keeps bugging out that I have to submit ... I had
@@ -156,8 +158,12 @@ local CLOSE_CHOICES = {
 ---@param d table
 ---@return string
 local function _draft_holds(d)
+  -- Required HERE, not at file scope: this module's other users of `authoring`
+  -- are inside functions, and a file-scope require would load it at a different
+  -- point in the dependency graph than the rest of the file expects.
+  local authoring = require("auto-finder.views.repos.authoring")
   local bits = {}
-  local a, u = #(d.comments or {}), #(d.unanchored or {})
+  local a, u = #authoring.anchored(d), #authoring.unanchored(d)
   if a > 0 then bits[#bits + 1] = a .. (a == 1 and " comment" or " comments") end
   if u > 0 then bits[#bits + 1] = u .. " unanchored" end
   if type(d.summary) == "string" and vim.trim(d.summary) ~= "" then
@@ -200,6 +206,60 @@ local function _review_label(meta)
   elseif not meta.err then parts[#parts + 1] = "no comments" end
   if meta.err then parts[#parts + 1] = "malformed" end
   return name .. "  [" .. table.concat(parts, " · ") .. "]"
+end
+
+---_render_review draws one review as an EXPANDABLE row whose children are its
+---two paired files — the Markdown primary and the JSON projection (ADR-0067).
+---
+---Johno, 2026-09-03: a review is a 1:1 pair, and the tree should show it as one:
+---`reviews → <repo>@<sha> [severity] → [markdown, json]`. `<CR>` on the review
+---toggles the pair; `<CR>` on either child opens that file — so the Markdown can
+---be OPENED AND EDITED for more context, not just the JSON read. Both the
+---per-commit review rows and the repo-wide section render through here, so the
+---same review reads identically wherever it appears.
+---
+---Keyed on the review's own path, which is unique per (repo, commit, revision),
+---so a review expanded in the section and under its commit share one state.
+---@param rows table[]
+---@param lines string[]
+---@param hls table[]
+---@param depth integer
+---@param meta table   a `worktree.review.describe` record (has .path, .document)
+---@param extra table  { repo, worktree?, node? } carried onto every emitted row
+local function _render_review(rows, lines, hls, depth, meta, extra)
+  local IND = "  "
+  local id = "review:" .. tostring(meta.path)
+  local open = M._expanded[id] == true
+  _row(rows, lines, hls, {
+    kind = "review", id = id, expandable = true,
+    repo = extra.repo, worktree = extra.worktree, node = extra.node, review = meta,
+    hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
+    text = string.rep(IND, depth) .. _chevron(open) .. " " .. _review_label(meta),
+  })
+  if not open then return end
+  -- The pair, newest-primary first: Markdown, then JSON. A review whose document
+  -- field is absent (a malformed or legacy JSON) shows only the JSON and says
+  -- the Markdown is missing rather than drawing a row that opens nothing.
+  if type(meta.document) == "string" and meta.document ~= "" then
+    _row(rows, lines, hls, {
+      kind = "review_file", repo = extra.repo, worktree = extra.worktree,
+      node = extra.node, review = meta, path = meta.document,
+      hl = "AutoCoreReviewBody",
+      text = string.rep(IND, depth + 1) .. "md   "
+        .. (vim.fn.fnamemodify(meta.document, ":t")),
+    })
+  else
+    _row(rows, lines, hls, {
+      kind = "message", hl = "AutoCoreDimmed",
+      text = string.rep(IND, depth + 1) .. "md   (no Markdown recorded)",
+    })
+  end
+  _row(rows, lines, hls, {
+    kind = "review_file", repo = extra.repo, worktree = extra.worktree,
+    node = extra.node, review = meta, path = meta.path,
+    hl = "AutoCoreReviewFrame",
+    text = string.rep(IND, depth + 1) .. "json " .. (vim.fn.fnamemodify(meta.path, ":t")),
+  })
 end
 
 -- Fallback marker for items with no index side (a commit's files).
@@ -399,12 +459,8 @@ local function _render(bufnr)
                   -- reading two different ways is how a reader stops trusting
                   -- either.
                   for _, rv in ipairs(fc.reviews or {}) do
-                    _row(rows, lines, hls, {
-                      kind = "review", repo = repo, worktree = wt, node = node,
-                      review = rv,
-                      hl = (rv.worst and SEVERITY_HL[rv.worst]) or "AutoCoreReviewFrame",
-                      text = string.rep(IND, 3) .. "R " .. _review_label(rv),
-                    })
+                    _render_review(rows, lines, hls, 3, rv,
+                      { repo = repo, worktree = wt, node = node })
                   end
                 end
               end
@@ -471,11 +527,7 @@ local function _render(bufnr)
               msg(2, "(no reviews recorded for this repository)")
             end
             for _, meta in ipairs(vc.items) do
-              _row(rows, lines, hls, {
-                kind = "review", repo = repo, review = meta,
-                hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
-                text = string.rep(IND, 2) .. "R " .. _review_label(meta),
-              })
+              _render_review(rows, lines, hls, 2, meta, { repo = repo })
             end
           end
         end
@@ -572,8 +624,11 @@ local function _activate(row)
       { level = vim.log.levels.WARN })
     return
   end
-  if row.kind == "review" then return _open_path(row.review.path) end
+  if row.kind == "review_file" then return _open_path(row.path) end
   if row.kind == "more" then return M.load_more(row) end
+  -- A review row now EXPANDS into its [markdown, json] pair rather than opening
+  -- the JSON directly — the Markdown is openable and editable from the child
+  -- row (Johno, 2026-09-03). `_toggle` handles it via id/expandable.
   _toggle(row)
 end
 
@@ -722,17 +777,24 @@ function M.open_diff(row, opts)
   else
     local draft = authoring.draft(row.repo.slug, sha)
     annotate = {
-      on_add = function(a) table.insert(draft.comments, a) end,
+      -- Findings go in through ONE entry point (ADR-0081 P5), so "is there
+      -- unsaved work?" has exactly one answer. An anchored annotation carries a
+      -- line, which is what makes it anchored -- not a flag a caller must
+      -- remember to set.
+      on_add = function(a) authoring.add_finding(draft, a) end,
       on_remove = function(a)
-        for i = #draft.comments, 1, -1 do
-          local c = draft.comments[i]
-          if c.path == a.path and c.line == a.line and (c.side or "RIGHT") == (a.side or "RIGHT") then
-            table.remove(draft.comments, i)
+        for i = #draft.items, 1, -1 do
+          local c = draft.items[i]
+          if c.anchored and c.path == a.path and c.line == a.line
+            and (c.side or "RIGHT") == (a.side or "RIGHT") then
+            table.remove(draft.items, i)
             break
           end
         end
       end,
-      pending = function() return draft.comments end,
+      -- The ANCHORED findings only: this is what the diff view repaints as
+      -- marks, and an unanchored finding has no line to paint.
+      pending = function() return authoring.anchored(draft) end,
       before_close = function(reason)
         -- The SAME predicate `submit` uses. A summary-only or unanchored-only
         -- draft is real work, and checking `#comments` here let it close
@@ -802,8 +864,8 @@ function M.open_diff(row, opts)
                   { level = vim.log.levels.INFO })
                 return
               end
-              draft.unanchored = draft.unanchored or {}
-              table.insert(draft.unanchored, { severity = sev, body = vim.trim(body) })
+              authoring.add_finding(draft,
+                { severity = sev, body = vim.trim(body), anchored = false })
               logger.notify(("repos: %s on this review — s submits")
                 :format(_draft_holds(draft)), { level = vim.log.levels.INFO })
             end)
@@ -893,7 +955,11 @@ function M._submit_review(row, sha)
     logger.notify("repos: worktree.review is unavailable", { level = vim.log.levels.ERROR })
     return
   end
-  local draft = authoring.draft(row.repo.slug, sha)
+  -- PEEK, not get: this is a question ("is there anything to submit?"), and
+  -- asking it must not create the thing it asks about. A `get` here left an
+  -- empty shell in the store for every commit a reader merely pressed `s` on,
+  -- and those shells are what a draft LISTER would have to filter back out.
+  local draft = authoring.peek(row.repo.slug, sha) or authoring.draft(row.repo.slug, sha)
   -- Refuse EARLY and say what would make it submittable. `authoring.submit`
   -- refuses an empty draft too, but only after the reader has answered a
   -- verdict and a summary — two prompts spent to be told there was nothing to
@@ -918,8 +984,10 @@ function M._submit_review(row, sha)
       -- An empty or dismissed summary is NOT an abort — a review may be all
       -- comments — but it must not be stored as "" either, which is neither a
       -- summary nor absent. The verdict is the only thing `s` insists on.
-      draft.summary = (type(summary) == "string" and vim.trim(summary) ~= "")
-        and vim.trim(summary) or nil
+      -- Through `set_summary`, which also DECLARES the summary as content:
+      -- auto-core's store is domain-agnostic and cannot know that a field
+      -- called `summary` is work rather than context (ADR-0081 §2.5).
+      authoring.set_summary(row.repo.slug, sha, summary)
       M._finish_submit(row, sha)
     end)
   end)
@@ -940,6 +1008,15 @@ function M._finish_submit(row, sha)
       logger.notify(("repos: wrote review r%d — %s + %s")
         :format(res.revision, vim.fn.fnamemodify(res.md_path, ":t"),
                 vim.fn.fnamemodify(res.json_path, ":t")))
+      -- The TREE is now stale: a new review means the commit's changed files
+      -- gain a [feedback] badge, the commit gains a review row, and the repo's
+      -- reviews section gains an entry — but the write happens outside the
+      -- topic the view subscribes to, so nothing invalidated the cached nodes.
+      -- Before this, a badge appeared only after a manual R or a panel reopen
+      -- (Johno, 2026-09-03: the badge "must be visible from that tree").
+      -- A submit is infrequent; a whole-tree invalidation is the honest cost.
+      M.invalidate(nil)
+      _rerender()
       -- Reopen so the freshly-written review renders from DISK: the round trip
       -- is the confirmation, not the notification.
       local dv_ok, dv2 = pcall(require, "auto-core.ui.diffview")
@@ -1281,7 +1358,10 @@ end
 ---written, and using one key for "discard an unsaved draft" and "delete a file
 ---from disk" would blur the only distinction that matters here.
 function M.remove_review(row)
-  if not (row and row.kind == "review" and row.review and row.review.path) then
+  -- Accept the review row OR either of its pair leaves: `d` on the Markdown or
+  -- the JSON removes the whole review, since the two files are one thing.
+  if not (row and (row.kind == "review" or row.kind == "review_file")
+      and row.review and row.review.path) then
     logger.notify("repos: put the cursor on a review to remove it",
       { level = vim.log.levels.WARN })
     return
@@ -1296,7 +1376,7 @@ function M.remove_review(row)
   -- The RAW filename, not the elided row label: a prompt that is about to
   -- delete something names it exactly as the filesystem does.
   local label = tostring(meta.name or meta.path)
-  local prompt = ("Delete review %s from %s?  Its canonical Markdown is kept."):format(
+  local prompt = ("Delete review %s from %s?  Both the JSON and its Markdown are removed."):format(
     label, tostring(row.repo and row.repo.label or "this repository"))
 
   local function go(choice)
@@ -1317,10 +1397,21 @@ function M.remove_review(row)
     -- no longer there.
     M.invalidate(nil)
     _rerender()
-    local kept = detail and detail.document
-    logger.notify("repos: removed " .. label
-      .. (kept and ("  — the Markdown is kept at " .. tostring(kept)) or ""),
-      { level = vim.log.levels.INFO })
+    -- Report what was removed. Both halves go now (Johno, 2026-09-03 — the two
+    -- files are one review); a Markdown that could not be deleted is surfaced so
+    -- an orphan does not linger unseen.
+    local doc = detail and detail.document
+    local msg
+    if doc and detail.document_removed == false and not detail.document_absent then
+      msg = "repos: removed " .. label .. " (JSON gone; its Markdown could NOT be "
+        .. "deleted — " .. tostring(detail.document_error or "unknown")
+        .. ", left at " .. tostring(doc) .. ")"
+    elseif doc and detail.document_removed then
+      msg = "repos: removed " .. label .. " and its Markdown"
+    else
+      msg = "repos: removed " .. label
+    end
+    logger.notify(msg, { level = vim.log.levels.INFO })
   end
 
   local okc, float = pcall(require, "auto-core.ui.float")

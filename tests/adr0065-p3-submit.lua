@@ -101,9 +101,9 @@ store.create_exclusive = function(path, body)
   return real_create(path, body)
 end
 local d = A.draft(repo.slug, SHA)
-d.comments = { { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" } }
-d.unanchored = { { severity = "nit", body = "this module has no tests" } }
-d.summary = "overall fine"
+A.add_finding(d, { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" })
+A.add_finding(d, { severity = "nit", body = "this module has no tests", anchored = false })
+A.set_summary(repo.slug, SHA, "overall fine")
 local res, reason = A.submit({ repo = repo, sha = SHA })
 ok("*** submit succeeds ***", res ~= nil, tostring(reason))
 ok("it wrote a Markdown review", res and vim.fn.filereadable(res.md_path) == 1, res and res.md_path)
@@ -118,7 +118,7 @@ ok("*** the UNANCHORED finding lives in the Markdown ***",
 ok("*** and is absent from the JSON — nothing was invented to place it ***",
   not vim.inspect(doc.comments):find("no tests", 1, true))
 ok("the draft is cleared after a successful submit",
-  #A.draft(repo.slug, SHA).comments == 0)
+  #A.anchored(A.draft(repo.slug, SHA)) == 0)
 do
   local imd, ijson, ireserve
   for i, ev in ipairs(order) do
@@ -154,7 +154,7 @@ ok("and the reservation was released after the commit",
 
 io.stdout:write("\n[4] a taken Markdown name ADVANCES the revision\n")
 local d2 = A.draft(repo.slug, SHA)
-d2.comments = { { path = "foo.lua", line = 4, side = "RIGHT", severity = "nit", body = "second" } }
+A.add_finding(d2, { path = "foo.lua", line = 4, side = "RIGHT", severity = "nit", body = "second" })
 -- Pre-create the name r2 would want, so the claim must move on.
 local _, rslug = A.reviewer()
 local taken = review.canonical_document({
@@ -172,7 +172,7 @@ ok("and the JSON it wrote matches the revision it claimed",
 
 io.stdout:write("\n[5] a JSON failure PRESERVES and reports the orphan Markdown\n")
 local d3 = A.draft(repo.slug, SHA)
-d3.comments = { { path = "foo.lua", line = 5, side = "RIGHT", severity = "nit", body = "third" } }
+A.add_finding(d3, { path = "foo.lua", line = 5, side = "RIGHT", severity = "nit", body = "third" })
 -- Fail the CANONICAL JSON create specifically, which is the commit point.
 -- Stubbing `review.save` no longer reaches the writer (A4).
 local guard = store.create_exclusive
@@ -194,7 +194,7 @@ ok("*** no JSON was published for that revision ***", (function()
   return true
 end)(), vim.inspect(review.list_for(repo.slug, SHA)))
 ok("the draft is RETAINED after a failed submit, so the work survives",
-  #A.draft(repo.slug, SHA).comments == 1)
+  #A.anchored(A.draft(repo.slug, SHA)) == 1)
 -- The orphan is the whole point of the ordering: assert it EXISTS and holds the
 -- reviewer's prose, not merely that a path was mentioned in an error string.
 local orphan = reason3 and reason3:match("(/[^%s]+%-review%.md)")
@@ -229,18 +229,41 @@ do
   -- and summary but not unanchored findings, so a review consisting solely of
   -- "this module has no tests" — exactly what review-json §6 protects — was
   -- refused as "nothing to submit", and the close guard let it go unprompted.
-  ok("an empty draft is not dirty", A.dirty({ comments = {}, unanchored = {} }) == false)
-  ok("a comment makes it dirty", A.dirty({ comments = { {} } }) == true)
+  -- The predicate is auto-core's now (ADR-0081 P5), so these exercise the shape
+  -- it actually reads: `items` plus the explicit `touched` bit. The three
+  -- properties are unchanged -- an anchored comment, an unanchored finding, and
+  -- a summary alone each count as work.
+  ok("an empty draft is not dirty", A.dirty({ items = {} }) == false)
+  ok("a comment makes it dirty",
+    A.dirty({ items = { { line = 1, anchored = true } } }) == true)
   ok("*** an UNANCHORED finding alone makes it dirty ***",
-    A.dirty({ comments = {}, unanchored = { { body = "no tests" } } }) == true)
-  ok("a summary alone makes it dirty",
-    A.dirty({ comments = {}, summary = "looks fine" }) == true)
+    A.dirty({ items = { { anchored = false, body = "no tests" } } }) == true)
+  -- Driven through the SETTER rather than by hand-setting the bit: what must
+  -- hold is that recording a summary makes the draft dirty, and a test that
+  -- sets `touched` itself would pass even if `set_summary` never did.
+  ok("a summary alone makes it dirty", (function()
+    local scope_sha = string.rep("d", 40)
+    local before = A.dirty(A.draft(repo.slug, scope_sha))
+    A.set_summary(repo.slug, scope_sha, "looks fine")
+    local after = A.dirty(A.draft(repo.slug, scope_sha))
+    local d = A.draft(repo.slug, scope_sha)
+    return before == false and after == true and d.summary == "looks fine"
+      and #A.anchored(d) == 0
+  end)())
+  ok("and clearing it stops the draft claiming work", (function()
+    local scope_sha = string.rep("e", 40)
+    A.set_summary(repo.slug, scope_sha, "typed then deleted")
+    local mid = A.dirty(A.draft(repo.slug, scope_sha))
+    A.set_summary(repo.slug, scope_sha, "   ")
+    return mid == true and A.dirty(A.draft(repo.slug, scope_sha)) == false
+      and A.draft(repo.slug, scope_sha).summary == nil
+  end)())
   ok("whitespace is not a summary", A.dirty({ comments = {}, summary = "   " }) == false)
 
   -- And the functional half: an unanchored-only review must actually WRITE.
   A.discard(repo.slug, SHA)
   local du = A.draft(repo.slug, SHA)
-  du.unanchored = { { severity = "nit", body = "this module has no tests" } }
+  A.add_finding(du, { severity = "nit", body = "this module has no tests", anchored = false })
   local resu, whyu = A.submit({ repo = repo, sha = SHA })
   ok("*** an unanchored-only review submits rather than being refused ***",
     resu ~= nil, tostring(whyu))
@@ -249,7 +272,7 @@ do
     ok("its finding is in the Markdown", mdu:find("no tests", 1, true) ~= nil)
     local du2 = review.load(repo.slug, SHA, resu.revision)
     ok("and the JSON carries zero comments, inventing nothing",
-      du2 ~= nil and #du2.comments == 0, vim.inspect(du2 and du2.comments))
+      du2 ~= nil and #A.anchored(du2) == 0, vim.inspect(du2 and du2.items))
   end
 end
 
@@ -266,13 +289,13 @@ do
   vim.o.columns, vim.o.lines = 200, 50
   A.discard(repo.slug, SHA)
   local dr = A.draft(repo.slug, SHA)
-  dr.comments = { { path = "foo.lua", line = 2, side = "RIGHT", severity = "nit", body = "kept" } }
+  A.add_finding(dr, { path = "foo.lua", line = 2, side = "RIGHT", severity = "nit", body = "kept" })
 
   local function open()
     dv.open({ files = files, annotate = {
-      on_add = function(a) table.insert(dr.comments, a) end,
+      on_add = function(a) A.add_finding(dr, a) end,
       on_remove = function() end,
-      pending = function() return dr.comments end,
+      pending = function() return A.anchored(dr) end,
     } })
   end
 
@@ -296,8 +319,8 @@ do
     how(st, st.float:bufnr("preview"))
     vim.wait(50, function() return not dv.is_open() end)
     ok(("*** the draft survives %s ***"):format(name),
-      #dr.comments == 1 and dr.comments[1].body == "kept",
-      ("%d comment(s)"):format(#dr.comments))
+      #A.anchored(dr) == 1 and A.anchored(dr)[1].body == "kept",
+      ("%d comment(s)"):format(#A.anchored(dr)))
   end
   -- ...and reopening REPAINTS it, which is what makes survival useful.
   open()
@@ -322,8 +345,8 @@ do
 
   A.discard(repo.slug, SHA)
   local dz = A.draft(repo.slug, SHA)
-  dz.comments = { { path = "foo.lua", line = 4, side = "RIGHT",
-                    severity = "must-fix", body = "reloaded finding" } }
+  A.add_finding(dz, { path = "foo.lua", line = 4, side = "RIGHT",
+                    severity = "must-fix", body = "reloaded finding" })
   local wrote = select(1, A.submit({ repo = repo, sha = SHA }))
   ok("a review exists to reload (positive control)", wrote ~= nil)
 
@@ -532,7 +555,7 @@ end
                  owner = "own", name = "proj", label = "proj" }
   local sha = string.rep("a", 40)
   local d = A.draft(repo.slug, sha)
-  d.comments = { { path = "x.lua", line = 1, side = "RIGHT", severity = "nit", body = "b" } }
+  A.add_finding(d, { path = "x.lua", line = 1, side = "RIGHT", severity = "nit", body = "b" })
   A.submit({ repo = repo, sha = sha, cwd = nil })
 
   ok("[kb] submit reached save_pair", seen ~= nil)
@@ -548,7 +571,7 @@ end
   ok("[kb] the topic is still forwarded alongside it",
     seen ~= nil and type(seen.topic) == "string" and seen.topic ~= "")
   -- A failed write must leave the draft intact, as before.
-  ok("[kb] a refused write keeps the draft", #A.draft(repo.slug, sha).comments == 1)
+  ok("[kb] a refused write keeps the draft", #A.anchored(A.draft(repo.slug, sha)) == 1)
 
   review.save_pair = real_save_pair
   A.discard(repo.slug, sha)

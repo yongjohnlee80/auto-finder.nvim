@@ -37,6 +37,12 @@ for _, p in ipairs({
   LAZY .. "/auto-core.nvim", LAZY .. "/worktree.nvim",
   plugins .. "/auto-core.nvim/main",
   plugins .. "/worktree.nvim/main",
+  -- The SAME-BRANCH siblings, last so they WIN. Without them this suite
+  -- resolved auto-core to the installed copy, which does not have the draft
+  -- store auto-finder reads since ADR-0081 P5 — and the failure surfaced as a
+  -- pcall in section [7] returning false with the reason discarded.
+  plugins .. "/auto-core.nvim/" .. vim.fn.fnamemodify(plugin_root, ":t"),
+  plugins .. "/worktree.nvim/" .. vim.fn.fnamemodify(plugin_root, ":t"),
   plugin_root,
 }) do
   if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
@@ -374,11 +380,12 @@ end)()
 
   local saved_cols = vim.o.columns
   vim.o.columns = 200
-  local okrun = pcall(tree.open_diff, {
+  local okrun, runerr = pcall(tree.open_diff, {
     kind = "commit", repo = { common_dir = "/tmp/x", slug = "s", label = "l" },
     node = { sha = string.rep("a", 40), short = "aaaaaaa" },
   })
-  ok("[7] open_diff survives a review whose load RETURNS an error", okrun)
+  ok("[7] open_diff survives a review whose load RETURNS an error", okrun,
+    tostring(runerr))
   local found = false
   for _, n in ipairs(notes) do
     if type(n.msg) == "string" and n.msg:find("unreadable review", 1, true) then
