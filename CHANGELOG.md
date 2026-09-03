@@ -2,6 +2,37 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.15] — 2026-09-03 — the review submit actually writes
+
+Pairs with worktree.nvim v0.5.7. **This is the fix that makes review authoring
+work at all** — the three preceding releases each corrected a real defect, and
+none of them was the blocker.
+
+`_kb_root()` has sat in `views/repos/authoring.lua`, correct and unreachable,
+since ADR-0067 A4: it was written for `markdown_path`, that function was deleted
+when the store took ownership of the canonical path, and the value it resolves
+was never passed on. `save_pair` therefore fell back to reading
+`$AUTO_AGENTS_KB_ROOT` — a variable injected into **agent spawns only** — so
+every submit from the editor died at its preflight with `cannot resolve $KB_ROOT
+for the review document`.
+
+The feature had never been exercised in the one configuration that matters: an
+interactive editor with no agent environment. Every test sets that variable, and
+must, because a review write touches a real store and a real knowledge base.
+
+- **One line:** `kb_root = _kb_root()` in the `save_pair` options. The resolver
+  reaches the KB through **auto-core**, which owns the `auto-agents.kb.root()`
+  hop, so the panel keeps depending on auto-core and worktree.nvim alone.
+- `tests/adr0065-p3-submit.lua` asserts the **handoff** — that submit forwards a
+  `kb_root` equal to auto-core's resolved value. Deliberately the handoff and
+  not the outcome: worktree.nvim v0.5.7 also resolves the root when a caller
+  omits it, so an end-to-end submit succeeds whichever fix is present, which
+  would leave an outcome test unable to discriminate this one.
+
+Reviewed by lector (approved, exact head 59d41cc, PR #20). Architecture
+post-mortem and refactor proposal: ADR-0080 (proposed) and
+`shared/synthesis/2026-09-03-repos-review-authoring-architecture-and-the-three-round-miss.md`.
+
 ## [v0.4.14] — 2026-09-03 — the review submit stops trapping the reviewer
 
 ADR-0065 §2.10. Pairs with worktree.nvim v0.5.6 and auto-core v0.2.11.
