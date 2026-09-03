@@ -17,12 +17,39 @@ for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
   if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
 end
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
+  -- PREPEND, so the LAST entry wins: `main` first, the same-branch sibling
+  -- second, and the sibling therefore takes precedence. (The sibling suite
+  -- adr0065-p3 APPENDED with the same list order, which inverts the winner --
+  -- it resolved worktree to `main` and reported green against the old store
+  -- for a whole review round. Order and direction have to agree.)
   for _, wt in ipairs({ "main", branch_dir }) do
     local r = sib .. "/" .. plugin .. "/" .. wt
     if vim.fn.isdirectory(r) == 1 then vim.opt.runtimepath:prepend(r) end
   end
 end
 vim.opt.runtimepath:prepend(root)
+
+-- ASSERT WHAT LOADED, because a harness that silently resolves a dependency to
+-- the wrong copy reports on code nobody is reviewing. `debug.getinfo().source`
+-- is the only reliable way to ask: `package.searchpath` answers where a module
+-- WOULD be found, not where it came from.
+do
+  local function loaded_from(modname, fn_name)
+    local okm, mod = pcall(require, modname)
+    assert(okm and type(mod) == "table" and type(mod[fn_name]) == "function",
+      "harness: could not load " .. modname .. "." .. fn_name)
+    return debug.getinfo(mod[fn_name], "S").source:sub(2)
+  end
+  for _, pair in ipairs({ { "worktree.review", "save_pair", "worktree.nvim" },
+                          { "auto-core.docstore", "write_json", "auto-core.nvim" } }) do
+    local src = loaded_from(pair[1], pair[2])
+    if vim.fn.isdirectory(sib .. "/" .. pair[3] .. "/" .. branch_dir) == 1
+      and not src:find("/" .. branch_dir .. "/", 1, true) then
+      error(("harness: %s resolved to %s, not the %s sibling"):format(
+        pair[1], src, branch_dir), 0)
+    end
+  end
+end
 vim.o.columns, vim.o.lines = 200, 60
 local sb = vim.fn.tempname() .. "-p4"
 dofile(vim.fn.fnamemodify(debug.getinfo(1,"S").source:sub(2),":p:h").."/_sandbox.lua")("p4")

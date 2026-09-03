@@ -29,14 +29,41 @@ package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.pa
 local sib = vim.fn.fnamemodify(root, ":h:h")
 local branch_dir = vim.fn.fnamemodify(root, ":t")
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
-  for _, wt in ipairs({ "main", branch_dir }) do
+  -- THE SAME-BRANCH SIBLING FIRST. These are APPENDED, so the FIRST entry wins
+  -- the runtimepath search -- the opposite of the prepend idiom used elsewhere
+  -- in this repo, and the loop had `main` first, so every run resolved
+  -- `worktree.*` to MAIN while claiming to test the paired branch. It reported
+  -- green against the OLD store for an entire review round; lector's exact-head
+  -- run failed correctly and mine could not have.
+  for _, wt in ipairs({ branch_dir, "main" }) do
     local r = sib .. "/" .. plugin .. "/" .. wt
     if vim.fn.isdirectory(r) == 1 then
       vim.opt.runtimepath:append(r)
-      package.path = r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua;" .. package.path
+      package.path = package.path .. ";" .. r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua"
     end
   end
 end
+
+-- ASSERT WHAT LOADED. A harness that silently resolves a dependency to the
+-- wrong copy produces evidence about code nobody is reviewing, and
+-- `debug.getinfo().source` is the only reliable way to ask -- `package.searchpath`
+-- answers where a module WOULD be found, not where it came from.
+local function _assert_sibling(modname, fn_name)
+  local okm, mod = pcall(require, modname)
+  if not okm or type(mod) ~= "table" or type(mod[fn_name]) ~= "function" then
+    error(("harness: could not load %s.%s"):format(modname, fn_name), 0)
+  end
+  local src = debug.getinfo(mod[fn_name], "S").source:sub(2)
+  local want = "/" .. branch_dir .. "/"
+  if not src:find(want, 1, true) and vim.fn.isdirectory(
+      sib .. "/" .. modname:match("^[^.]+") .. ".nvim/" .. branch_dir) == 1 then
+    error(("harness: %s resolved to %s, not the %s sibling — this suite would "
+      .. "report on the wrong code"):format(modname, src, branch_dir), 0)
+  end
+  return src
+end
+_assert_sibling("worktree.review", "save_pair")
+_assert_sibling("auto-core.docstore", "write_json")
 
 local pass, fail = 0, 0
 local function ok(n, c, d)
@@ -90,9 +117,16 @@ io.stdout:write("\n[3] submit writes BOTH artifacts, JSON last\n")
 -- ADR-0067 A4: the write goes through `save_pair`, so BOTH artifacts are
 -- claimed with `store.create_exclusive` and the JSON no longer passes through
 -- `review.save`. Record at that one boundary and classify by filename.
+-- INSTRUMENTED AT THE LIVE BOUNDARY. ADR-0081 P4b moved the reservation claim
+-- into `auto-core.docstore.revisions`, so `worktree.store.create_exclusive` no
+-- longer sees it -- and worktree's own md/json claims DELEGATE to auto-core, so
+-- one patch on `docstore.create_exclusive` observes all three. Patching the
+-- retired boundary recorded { markdown, json } and lost the ordering proof
+-- entirely (lector r3 MF3).
 local order = {}
-local real_create = store.create_exclusive
-store.create_exclusive = function(path, body)
+local _ds = require("auto-core.docstore")
+local real_create = _ds.create_exclusive
+_ds.create_exclusive = function(path, body)
   local pth = tostring(path)
   if pth:find("%-review%.md$") then order[#order + 1] = "markdown"
   elseif pth:find("%.review%.json$") then order[#order + 1] = "json"
@@ -100,6 +134,7 @@ store.create_exclusive = function(path, body)
   elseif pth:find("%.tombstone$") then order[#order + 1] = "tombstone" end
   return real_create(path, body)
 end
+local function _restore_create() _ds.create_exclusive = real_create end
 local d = A.draft(repo.slug, SHA)
 A.add_finding(d, { path = "foo.lua", line = 3, side = "RIGHT", severity = "must-fix", body = "bad" })
 A.add_finding(d, { severity = "nit", body = "this module has no tests", anchored = false })
@@ -137,6 +172,11 @@ do
       return n.markdown == 1 and n.json == 1
     end)(), vim.inspect(order))
 end
+-- The recorder's work is done. Left installed it would sit under every later
+-- section, including the one that injects a write failure at worktree's
+-- boundary -- two wrappers on one path is how a restore puts back the wrong
+-- function.
+_restore_create()
 ok("*** the Markdown carries KB_RULES R2 frontmatter ***",
   md:find("^%-%-%-\ntype: review\n") ~= nil, md:sub(1, 80))
 ok("and the inline Tags/Abstract preview lines",
@@ -183,7 +223,7 @@ store.create_exclusive = function(path, body)
   return guard(path, body)
 end
 local res3, reason3 = A.submit({ repo = repo, sha = SHA })
-store.create_exclusive = real_create
+store.create_exclusive = guard
 ok("*** submit reports failure rather than claiming success ***", res3 == nil, tostring(res3))
 ok("and names the kept Markdown so the prose is not thought lost",
   reason3 and reason3:find("is not lost", 1, true) ~= nil, tostring(reason3))
@@ -278,6 +318,41 @@ do
       ok("[6] MF5: and its document sits under Alice's reviews directory",
         written ~= nil and tostring(written.document):find("/alice%-reviewer/"),
         tostring(written and written.document))
+    end
+
+    -- MF2 (r3): the LEGACY TWO-ARGUMENT call must not snapshot from the
+    -- AMBIENT cwd. It resolved `git config user.name` against whatever
+    -- directory nvim happened to sit in, so a draft for repo B was stamped
+    -- with repo A's reviewer -- and because submit TRUSTS the snapshot, B's
+    -- review was submitted under A's name even though submit was given B's cwd.
+    do
+      local bdir = tmp .. "/repo_b_only"
+      vim.fn.mkdir(bdir, "p")
+      vim.fn.system({ "git", "-C", bdir, "init", "-q" })
+      vim.fn.system({ "git", "-C", bdir, "config", "user.name", "Bee Only" })
+      local bsha, bslug = string.rep("7", 40), "own__bonly"
+
+      -- Two-argument call: no context, so NO snapshot may be taken.
+      local db = A.draft(bslug, bsha)
+      A.add_finding(db, { path = "b.lua", line = 1, severity = "nit", body = "b" })
+      ok("[6] *** MF2: a two-argument draft takes NO reviewer snapshot ***",
+        A.reviewer_snapshot(bslug, bsha) == nil,
+        vim.inspect(A.reviewer_snapshot(bslug, bsha)))
+
+      -- Submit knows the cwd, so it binds correctly at that point.
+      local rb = A.submit({ repo = { slug = bslug, label = "bonly",
+        owner = "own", name = "bonly", url = "git@github.com:own/bonly.git" },
+        sha = bsha, cwd = bdir })
+      ok("[6] MF2: fixture: that submit succeeded", rb ~= nil)
+      if rb then
+        local w = select(1, require("worktree.review").load(bslug, bsha, rb.revision))
+        ok("[6] *** MF2: and it is attributed to THIS repo's reviewer ***",
+          w ~= nil and w.reviewer == "Bee Only", vim.inspect(w and w.reviewer))
+      end
+      ok("[6] MF2: the snapshot is recorded at submit, so it stops being ambiguous",
+        (A.reviewer_snapshot(bslug, bsha) or {}).bound_at_submit == true
+        or A.reviewer_snapshot(bslug, bsha) == nil,
+        vim.inspect(A.reviewer_snapshot(bslug, bsha)))
     end
 
     -- CONTROL: a draft bound AFTER the change snapshots Bob, so the assertion

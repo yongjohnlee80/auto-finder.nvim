@@ -79,12 +79,24 @@ function M.draft(slug, sha, opts)
   -- Bob -- silent authorship corruption, reproduced by lector (MF5). The
   -- snapshot lives in `meta`, which is CONTEXT and never makes a draft dirty.
   if type(d.meta) ~= "table" then d.meta = {} end
-  if d.meta.reviewer == nil then
-    local display, rslug = M.reviewer(opts and opts.cwd or nil)
+  -- ONLY FROM EXPLICIT RESOLVED CONTEXT. Binding without a `cwd` resolved
+  -- `git config user.name` against whatever directory nvim happened to sit in,
+  -- so a draft for repo B created through the legacy two-argument call was
+  -- stamped with repo A's reviewer -- and because `submit` then TRUSTS the
+  -- snapshot, it submitted B's review under A's name even though submit itself
+  -- was given B's cwd (lector r3 MF2). The ambient cwd is not the repo under
+  -- review; it is a coincidence.
+  --
+  -- With no cwd, the snapshot is deliberately left ABSENT, and `submit` -- which
+  -- does know the cwd -- binds it correctly at that point. No snapshot is a
+  -- recoverable state; a wrong one is not.
+  local cwd = opts and opts.cwd
+  if d.meta.reviewer == nil and type(cwd) == "string" and cwd ~= "" then
+    local display, rslug = M.reviewer(cwd)
     -- Recorded even when it resolves to nothing, so a later read cannot mistake
     -- "we asked and got nothing" for "we never asked".
     d.meta.reviewer = { display = display, slug = rslug,
-                        bound_at = os.time(), cwd = opts and opts.cwd or nil }
+                        bound_at = os.time(), cwd = cwd }
   end
   return d
 end
@@ -377,10 +389,15 @@ function M.submit(opts)
     or nil
   local display, rslug = snap and snap.display or nil, snap and snap.slug or nil
   if not display or display == "" then
-    -- No snapshot (a draft from before this change, or a caller that built one
-    -- by hand): resolve now and say so in the record's own terms rather than
-    -- silently substituting.
+    -- No snapshot -- a draft bound through the two-argument call, or one from
+    -- before this change. Resolve from THIS submit's cwd, which is the repo
+    -- actually under review, and record it so the draft stops being ambiguous.
     display, rslug = M.reviewer(opts.cwd)
+    if type(d) == "table" and type(d.meta) == "table" then
+      d.meta.reviewer = { display = display, slug = rslug,
+                          bound_at = os.time(), cwd = opts.cwd,
+                          bound_at_submit = true }
+    end
   end
   if not rslug then
     return nil, "the reviewer name produced no safe path segment; set git config user.name"
