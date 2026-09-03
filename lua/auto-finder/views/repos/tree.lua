@@ -173,6 +173,35 @@ local function _draft_holds(d)
   return table.concat(bits, " + ")
 end
 
+---_repo_drafts lists this repo's UNSAVED drafts, newest scope order.
+---
+---From auto-core's store, filtered to scopes that actually hold work. The scope
+---grammar is `<slug>@<full sha>` (ADR-0081 §2.5), so the slug match is exact —
+---a prefix match would let `lab__proj` claim `lab__project`'s drafts.
+---@param repo table
+---@return { sha: string, short: string, holds: string, scope: string, draft: table }[]
+local function _repo_drafts(repo)
+  local ok, drafts = pcall(require, "auto-core.drafts")
+  if not ok or type(drafts) ~= "table" or type(drafts.scopes) ~= "function" then
+    return {}
+  end
+  local out = {}
+  for _, scope in ipairs(drafts.scopes({ dirty_only = true })) do
+    local slug, sha = tostring(scope):match("^(.*)@(%x+)$")
+    if slug == repo.slug and sha then
+      local d = drafts.peek(scope)
+      if d then
+        out[#out + 1] = {
+          sha = sha, short = sha:sub(1, 7), scope = scope, draft = d,
+          holds = "(draft — " .. _draft_holds(d) .. ")",
+        }
+      end
+    end
+  end
+  table.sort(out, function(a, b) return a.scope < b.scope end)
+  return out
+end
+
 ---_review_label renders one review row as a FILENAME plus a bracketed badge
 ---(§11 — Johno: "the severity should be appended beside the filename in
 ---filename [severity] kinda way").
@@ -302,13 +331,20 @@ local function _render(bufnr)
 
   local function container(depth, opts)
     local open = M._expanded[opts.id] == true
+    local prefix = string.rep(IND, depth) .. _chevron(open) .. " "
     _row(rows, lines, hls, {
       kind = opts.kind, id = opts.id, expandable = true,
       repo = opts.repo, worktree = opts.worktree, node = opts.node,
       hl = opts.hl,
-      text = string.rep(IND, depth) .. _chevron(open) .. " "
-        .. opts.label .. (opts.suffix or ""),
+      text = prefix .. opts.label .. (opts.suffix or ""),
     })
+    -- `spans` are offsets into the LABEL, so a caller never has to know how
+    -- wide the indent or the chevron is -- which is exactly the kind of
+    -- duplicated layout arithmetic that drifts when the glyph changes.
+    for _, sp in ipairs(opts.spans or {}) do
+      hls[#hls + 1] = { lnum = #lines - 1, hl = sp.hl,
+                        col = #prefix + sp.from, end_col = #prefix + sp.to }
+    end
     return open
   end
 
@@ -395,11 +431,24 @@ local function _render(bufnr)
               for _, node in ipairs(cc.items) do
                 local nid = node.kind == "uncommitted"
                   and ("unc:" .. wt.path) or ("commit:" .. node.sha)
+                -- PUSH STATE on the hash (Johno, 2026-09-03: "pushed commit
+                -- hash be in purple color, and none pushed on to be orange",
+                -- with the title left plain). `pushed` is nil when the read
+                -- FAILED, and nil paints nothing: a panel that renders every
+                -- hash purple because git errored is worse than one that
+                -- renders none, because the reader cannot tell.
+                local spans
+                if node.kind == "commit" and node.pushed ~= nil and node.short then
+                  spans = { { from = 0, to = #node.short,
+                              hl = node.pushed and "AutoCoreGitPushed"
+                                or "AutoCoreGitUnpushed" } }
+                end
                 local nopen = container(2, {
                   kind = node.kind, id = nid, repo = repo, worktree = wt,
                   node = node,
                   hl = node.kind == "uncommitted" and "AutoCoreGitModified" or nil,
                   label = node.label,
+                  spans = spans,
                 })
                 if nopen then
                   local fc = _cache(nid)
@@ -515,11 +564,20 @@ local function _render(bufnr)
           local vid = "reviews:" .. repo.common_dir
           local vc = _cache(vid)
           if not vc.index then vc.index = backend.reviews_index(repo) or {} end
+          -- The count includes UNSAVED drafts: a section that says "(2)" while
+          -- holding two reviews and a draft is lying about what is inside it,
+          -- and the draft is the row a reader is most likely looking for.
+          local ndrafts = #_repo_drafts(repo)
+          local ntotal = #vc.index + ndrafts
           local vopen = container(1, {
             kind = "reviews", id = vid, repo = repo,
             hl = "AutoCoreSectionInactive",
             label = "reviews",
-            suffix = #vc.index > 0 and ("  (" .. #vc.index .. ")") or "",
+            suffix = ntotal > 0
+              and ("  (" .. ntotal .. (ndrafts > 0
+                and (", " .. ndrafts .. " draft" .. (ndrafts == 1 and "" or "s"))
+                or "") .. ")")
+              or "",
           })
           if vopen then
             if not vc.items then vc.items = backend.reviews_all(repo) or {} end
@@ -528,6 +586,31 @@ local function _render(bufnr)
             end
             for _, meta in ipairs(vc.items) do
               _render_review(rows, lines, hls, 2, meta, { repo = repo })
+            end
+            -- UNSAVED DRAFTS, beside the saved reviews (Johno, 2026-09-03:
+            -- "I would like to see the draft feedback also listed on the
+            -- reviews section. So that I can pass that draft to agent to work
+            -- with before making the commits").
+            --
+            -- Readable here at all only because ADR-0081 P5 moved the draft
+            -- store into auto-core: while it was auto-finder's module state,
+            -- this panel could see it but nothing else could, which defeated
+            -- the purpose of showing it.
+            --
+            -- `dirty_only` is load-bearing: reading a draft materialises an
+            -- empty shell, so an unfiltered listing would show a row for every
+            -- commit anyone ever pressed `s` on.
+            for _, d in ipairs(_repo_drafts(repo)) do
+              local n = #lines
+              lines[n + 1] = ("      %s  %s"):format(d.short, d.holds)
+              hls[#hls + 1] = { lnum = n, col = 6, end_col = 6 + #d.short,
+                                hl = "AutoCoreGitModified" }
+              rows[n + 1] = { kind = "draft", depth = 2, repo = repo,
+                              sha = d.sha, scope = d.scope, draft = d.draft,
+                              -- `text` is what every other row carries, and it
+                              -- is how the suites identify a row without
+                              -- re-deriving its label.
+                              text = lines[n + 1] }
             end
           end
         end
@@ -545,8 +628,18 @@ local function _render(bufnr)
   vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   for _, h in ipairs(hls) do
-    pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, 0,
-      { end_line = h.lnum + 1, hl_group = h.hl })
+    if h.col then
+      -- A COLUMN SPAN: only part of the row is painted. Needed because a
+      -- commit's push state is a property of its HASH, not of the row -- a
+      -- whole row in purple reads as a category, and the subject line is the
+      -- reader's text, not a status field. Whole-row entries (no `col`) keep
+      -- the original behaviour, so nothing else changes.
+      pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, h.col,
+        { end_row = h.lnum, end_col = h.end_col, hl_group = h.hl })
+    else
+      pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, 0,
+        { end_line = h.lnum + 1, hl_group = h.hl })
+    end
   end
   vim.bo[bufnr].modifiable = false
 
@@ -625,6 +718,16 @@ local function _activate(row)
     return
   end
   if row.kind == "review_file" then return _open_path(row.path) end
+  if row.kind == "draft" then
+    -- A draft has no file to open, so `<CR>` reopens the DIFF for its commit,
+    -- which is where the work continues and where the draft repaints. The row
+    -- shape `open_diff` needs is the commit row's, rebuilt from what the scope
+    -- already carries.
+    return M.open_diff({
+      kind = "commit", repo = row.repo, worktree = row.worktree,
+      node = { kind = "commit", sha = row.sha, short = row.sha:sub(1, 7) },
+    })
+  end
   if row.kind == "more" then return M.load_more(row) end
   -- A review row now EXPANDS into its [markdown, json] pair rather than opening
   -- the JSON directly — the Markdown is openable and editable from the child
@@ -1083,6 +1186,37 @@ local function _info(row)
       "",
       "<CR> on a review opens its JSON · i describes it",
     }
+  elseif row.kind == "draft" then
+    -- A draft has no document to read: everything known about it is in the
+    -- store, and this is the view that lets a reader decide whether to finish
+    -- it, hand it to an agent, or drop it.
+    local authoring = require("auto-finder.views.repos.authoring")
+    local d = row.draft or {}
+    lines = {
+      "Unsaved draft (nothing on disk yet)",
+      "  repo:    " .. tostring(row.repo.label),
+      "  commit:  " .. tostring(row.sha),
+      "  scope:   " .. tostring(row.scope),
+      "  holds:   " .. _draft_holds(d),
+      "  verdict: " .. tostring(d.verdict or "comment"),
+      "",
+    }
+    for _, c in ipairs(authoring.anchored(d)) do
+      lines[#lines + 1] = ("  [%s] %s:%s  %s")
+        :format(tostring(c.severity), tostring(c.path), tostring(c.line),
+                tostring(c.body))
+    end
+    for _, u in ipairs(authoring.unanchored(d)) do
+      lines[#lines + 1] = ("  [%s] (no line)  %s")
+        :format(tostring(u.severity), tostring(u.body))
+    end
+    if type(d.summary) == "string" and d.summary ~= "" then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "  summary: " .. d.summary
+    end
+    lines[#lines + 1] = ""
+    lines[#lines + 1] = "It lives in auto-core's draft store, so an agent can read"
+    lines[#lines + 1] = "it without going through this panel. <CR> opens the diff."
   elseif row.kind == "review" then
     -- Both kinds of review row land here — the ones under a commit and the
     -- ones in the repo's `reviews` section — and only the second arrives

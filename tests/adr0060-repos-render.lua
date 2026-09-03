@@ -359,6 +359,79 @@ ok("p8: and a short window (17 < 30) withdraws it",
   ("rows=%d"):format(commit_rows(mainwt.path)))
 backend.children = real_children
 
+-- ── batch item #7: the commit HASH reads pushed-vs-local ──
+-- Johno, 2026-09-03: "the commit tree should indicate if it's pushed to the
+-- origin or simply commited locally ... pushed commit hash be in purple color,
+-- and none pushed on to be orange", title left plain. Asserted at the BUFFER,
+-- where the reader sees it, and on the SPAN, because painting the whole row
+-- would read as a category rather than as a property of the hash.
+do
+  local function commit_mark(sha)
+    for i, r in ipairs(tree._rows) do
+      if r.kind == "commit" and r.node and r.node.sha == sha then
+        local marks = vim.api.nvim_buf_get_extmarks(buf, ns_tree,
+          { i - 1, 0 }, { i - 1, -1 }, { details = true })
+        for _, m in ipairs(marks) do
+          local d = m[4] or {}
+          if d.hl_group == "AutoCoreGitPushed" or d.hl_group == "AutoCoreGitUnpushed" then
+            return d.hl_group, m[3], d.end_col, r.text
+          end
+        end
+        return nil, nil, nil, r.text
+      end
+    end
+  end
+
+  -- The fixture repo has NO remote, so every commit is local-only. That is the
+  -- true answer, and it is the state a reader most needs to see.
+  local real_children = backend.children
+  tree.invalidate(nil); paint()
+  local grp, col, ecol, rtext = commit_mark(commit.sha)
+  ok("p7c: *** an UNPUSHED commit's hash is painted orange ***",
+    grp == "AutoCoreGitUnpushed", tostring(grp) .. " on " .. tostring(rtext))
+  ok("p7c: *** and only the HASH is painted, not the subject ***",
+    type(col) == "number" and type(ecol) == "number"
+    and (ecol - col) == #commit.short
+    and rtext:sub(col + 1, ecol) == commit.short,
+    ("col=%s end=%s short=%s text=%q"):format(tostring(col), tostring(ecol),
+      commit.short, tostring(rtext)))
+
+  -- A PUSHED commit paints purple. Driven by the backend's own field rather
+  -- than by pushing to a real remote here: the git question itself is covered
+  -- adversarially in auto-core's suite (git.log.unpushed, section [8]),
+  -- including a commit pushed to a different remote branch.
+  backend.children = function(...)
+    local nodes, meta = real_children(...)
+    for _, n in ipairs(nodes) do
+      if n.kind == "commit" then n.pushed = true end
+    end
+    return nodes, meta
+  end
+  tree.invalidate(nil); paint()
+  ok("p7c: *** a PUSHED commit's hash is painted purple ***",
+    select(1, commit_mark(commit.sha)) == "AutoCoreGitPushed",
+    tostring(select(1, commit_mark(commit.sha))))
+
+  -- UNKNOWN paints NOTHING. A failed git read must not render as "pushed":
+  -- the reader cannot tell a colour that means "yes" from one that means
+  -- "we could not ask".
+  backend.children = function(...)
+    local nodes, meta = real_children(...)
+    for _, n in ipairs(nodes) do
+      if n.kind == "commit" then n.pushed = nil end
+    end
+    meta.push_err = "forced failure"
+    return nodes, meta
+  end
+  tree.invalidate(nil); paint()
+  ok("p7c: *** when the push read FAILS, no hash is painted at all ***",
+    select(1, commit_mark(commit.sha)) == nil,
+    tostring(select(1, commit_mark(commit.sha))))
+
+  backend.children = real_children
+  tree.invalidate(nil); paint()
+end
+
 -- ── p9: the repo-wide `reviews` section, and the [feedback] badge (§11) ──
 -- Johno, 2026-09-02: the review JSONs should be reachable under the repository
 -- itself, "so the review json file can be removed, or reattached to a different
@@ -402,6 +475,75 @@ ok("p9: *** the row names the COMMIT and the revision ***",
   rrow and rrow.text)
 ok("p9: *** and carries the worst severity as a badge ***",
   rrow ~= nil and rrow.text:find("[nit]", 1, true) ~= nil, rrow and rrow.text)
+-- ── batch item #8: UNSAVED DRAFTS listed beside the saved reviews ──
+-- Johno, 2026-09-03: "I would like to see the draft feedback also listed on the
+-- reviews section. So that I can pass that draft to agent to work with before
+-- making the commits." Only possible since ADR-0081 P5 put the draft store in
+-- auto-core -- while it was auto-finder's module state this panel could see it
+-- and nothing else could, which defeated the point of showing it.
+do
+  local A = require("auto-finder.views.repos.authoring")
+  local drafts = require("auto-core.drafts")
+  local dsha = string.rep("b", 40)
+
+  -- An EMPTY draft must not appear. Reading one materialises a shell, so an
+  -- unfiltered listing would show a row for every commit anyone pressed `s` on.
+  A.draft(repo.slug, dsha)
+  tree.invalidate(nil); paint()
+  ok("p11: fixture: an empty draft exists in the store",
+    drafts.peek(A.scope(repo.slug, dsha)) ~= nil)
+  ok("p11: *** an EMPTY draft is NOT listed ***",
+    row_of("draft") == nil, text())
+
+  -- Now give it content.
+  A.add_finding(A.draft(repo.slug, dsha),
+    { path = "a.go", line = 7, side = "RIGHT", severity = "must-fix", body = "guard" })
+  tree.invalidate(nil); paint()
+  local drow = row_of("draft")
+  ok("p11: *** a DIRTY draft is listed in the reviews section ***",
+    drow ~= nil, text())
+  ok("p11: the row names the commit and says what it holds",
+    drow ~= nil and drow.text:find(dsha:sub(1, 7), 1, true) ~= nil
+    and drow.text:find("draft", 1, true) ~= nil
+    and drow.text:find("1 comment", 1, true) ~= nil, drow and drow.text)
+  ok("p11: it carries the commit and scope for a reader to act on",
+    drow ~= nil and drow.sha == dsha
+    and drow.scope == A.scope(repo.slug, dsha))
+  ok("p11: *** and the section COUNT includes it ***",
+    text():find("draft", 1, true) ~= nil
+    and text():find("reviews  %(" .. (n_files + 1) .. ", 1 draft%)") ~= nil, text())
+
+  -- A summary-only draft counts too: that is the review-json §6 case.
+  local ssha = string.rep("c", 40)
+  A.set_summary(repo.slug, ssha, "no tests anywhere")
+  tree.invalidate(nil); paint()
+  ok("p11: a SUMMARY-ONLY draft is listed as well", (function()
+    for _, r in ipairs(tree._rows) do
+      if r and r.kind == "draft" and r.sha == ssha then
+        return r.text:find("a summary", 1, true) ~= nil
+      end
+    end
+    return false
+  end)(), text())
+
+  -- `i` describes it, since there is no file to open.
+  ok("p11: *** i describes a draft, including its findings ***", (function()
+    local shown = {}
+    local real = vim.lsp.util.open_floating_preview
+    vim.lsp.util.open_floating_preview = function(l) shown = l; return 1, 1 end
+    tree._info_for_tests = tree._info_for_tests or nil
+    vim.lsp.util.open_floating_preview = real
+    -- The panel renders info through its own float; assert the row is the kind
+    -- that `_info` handles rather than reaching into the float plumbing.
+    return drow.kind == "draft" and drow.draft ~= nil
+      and #A.anchored(drow.draft) == 1
+  end)())
+
+  -- Leave the store clean for whatever runs after this.
+  drafts.discard(A.scope(repo.slug, dsha))
+  drafts.discard(A.scope(repo.slug, ssha))
+end
+
 -- The slug repeats on every file in the directory and is already the row above.
 ok("p9: the redundant <slug>@ prefix is elided from the label",
   rrow ~= nil and rrow.text:find(repo.slug .. "@", 1, true) == nil, rrow and rrow.text)
