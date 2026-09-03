@@ -1062,12 +1062,17 @@ function M._submit_review(row, sha)
   -- asking it must not create the thing it asks about. A `get` here left an
   -- empty shell in the store for every commit a reader merely pressed `s` on,
   -- and those shells are what a draft LISTER would have to filter back out.
-  local draft = authoring.peek(row.repo.slug, sha) or authoring.draft(row.repo.slug, sha)
+  -- PEEK ONLY. `peek(...) or draft(...)` was the first attempt and it defeated
+  -- itself: the fallback created the very shell peeking was meant to avoid, so
+  -- every commit a reader merely pressed `s` on left an entry behind — and
+  -- those entries are what the draft listing in the reviews section then has
+  -- to filter back out. A question must not create what it asks about.
+  local draft = authoring.peek(row.repo.slug, sha)
   -- Refuse EARLY and say what would make it submittable. `authoring.submit`
   -- refuses an empty draft too, but only after the reader has answered a
   -- verdict and a summary — two prompts spent to be told there was nothing to
   -- write.
-  if not authoring.dirty(draft) then
+  if not (draft and authoring.dirty(draft)) then
     logger.notify("repos: nothing to submit yet — c annotates a line, u records a finding without one",
       { level = vim.log.levels.WARN })
     return

@@ -539,6 +539,46 @@ do
       and #A.anchored(drow.draft) == 1
   end)())
 
+  -- ANOTHER REPO's draft must not appear here. `drafts.scopes()` is
+  -- process-global, so the slug match is what keeps repos apart -- and with a
+  -- single-repo fixture a loose match changes nothing, which the mutation
+  -- matrix reported. A PREFIX of this repo's slug is the adversarial case:
+  -- `lab__proj` must not claim `lab__project`'s drafts.
+  do
+    local other = repo.slug .. "ect"
+    local osha = string.rep("f", 40)
+    A.add_finding(A.draft(other, osha),
+      { path = "z.go", line = 1, severity = "nit", body = "elsewhere" })
+    tree.invalidate(nil); paint()
+    local mine, theirs = 0, 0
+    for _, r in ipairs(tree._rows) do
+      if r and r.kind == "draft" then
+        if r.sha == dsha then mine = mine + 1 end
+        if r.sha == osha then theirs = theirs + 1 end
+      end
+    end
+    ok("[p11] *** another repo's draft is NOT listed under this one ***",
+      mine == 1 and theirs == 0, ("mine=%d theirs=%d"):format(mine, theirs))
+    drafts.discard(A.scope(other, osha))
+  end
+
+  -- Pressing `s` on an EMPTY draft must not leave a shell behind: the submit
+  -- check asks a question, and asking must not create what it asks about.
+  do
+    local qsha = string.rep("1", 40)
+    local crow2 = row_of("commit")
+    local real_select, real_input = vim.ui.select, vim.ui.input
+    vim.ui.select = function(_, _, cb) cb(nil) end   -- dismissed
+    vim.ui.input = function(_, cb) cb(nil) end
+    tree._submit_review({ kind = "commit", repo = repo,
+      worktree = crow2 and crow2.worktree or nil,
+      node = { kind = "commit", sha = qsha, short = qsha:sub(1, 7) } }, qsha)
+    vim.ui.select, vim.ui.input = real_select, real_input
+    ok("[p11] *** asking 's' on an empty draft leaves NO shell in the store ***",
+      drafts.peek(A.scope(repo.slug, qsha)) == nil,
+      vim.inspect(drafts.peek(A.scope(repo.slug, qsha))))
+  end
+
   -- Leave the store clean for whatever runs after this.
   drafts.discard(A.scope(repo.slug, dsha))
   drafts.discard(A.scope(repo.slug, ssha))
