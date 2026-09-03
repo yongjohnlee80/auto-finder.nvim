@@ -87,7 +87,15 @@ local _rerender  -- forward declaration
 local function _row(rows, lines, hls, opts)
   lines[#lines + 1] = opts.text
   rows[#rows + 1] = opts
-  if opts.hl then hls[#hls + 1] = { lnum = #lines - 1, hl = opts.hl } end
+  local n = #lines - 1
+  if opts.hl then hls[#hls + 1] = { lnum = n, hl = opts.hl } end
+  -- `spans` paint part of the row over the whole-line `hl`. Each is a byte
+  -- range into `opts.text` with its own group and a higher priority, so a
+  -- badge (e.g. a severity) shows through the row's status colour.
+  for _, sp in ipairs(opts.spans or {}) do
+    hls[#hls + 1] = { lnum = n, hl = sp.hl, col = sp.from, end_col = sp.to,
+                      priority = sp.priority or 200 }
+  end
   return #lines
 end
 
@@ -185,14 +193,28 @@ local function _repo_drafts(repo)
   if not ok or type(drafts) ~= "table" or type(drafts.scopes) ~= "function" then
     return {}
   end
+  local authoring = require("auto-finder.views.repos.authoring")
   local out = {}
   for _, scope in ipairs(drafts.scopes({ dirty_only = true })) do
+    local d = drafts.peek(scope)
+    -- A COMMIT draft: `<slug>@<40-hex>`. An UNCOMMITTED draft:
+    -- `<slug>@working:<worktree-path>` (ADR-0081 §2.5). Both are surfaced so a
+    -- reader can hand either to an agent; the uncommitted one has no sha and
+    -- reopens the UNCOMMITTED diff instead.
     local slug, sha = tostring(scope):match("^(.*)@(%x+)$")
-    if slug == repo.slug and sha then
-      local d = drafts.peek(scope)
-      if d then
+    if d and slug == repo.slug and sha then
+      out[#out + 1] = {
+        sha = sha, short = sha:sub(1, 7), scope = scope, draft = d,
+        holds = "(draft — " .. _draft_holds(d) .. ")",
+      }
+    else
+      -- ANCHORED parse (lector): `is_working` returns the slug + worktree id
+      -- from a real `@working:` boundary, not a substring search.
+      local ok_w, wslug = authoring.is_working(scope)
+      if d and ok_w and wslug == repo.slug then
         out[#out + 1] = {
-          sha = sha, short = sha:sub(1, 7), scope = scope, draft = d,
+          working = true, worktree = d.meta and d.meta.worktree or nil,
+          short = "UNCOMMITTED", scope = scope, draft = d,
           holds = "(draft — " .. _draft_holds(d) .. ")",
         }
       end
@@ -486,31 +508,40 @@ local function _render(bufnr)
                     msg(3, "(no files)")
                   end
                   for _, f in ipairs(fc.items) do
-                    -- The badge is deliberately just the WORD, not the severity:
-                    -- it answers "is there feedback on this file", and the row
-                    -- already carries the file's own status colour. `<CR>` on the
-                    -- review row, or `o` on the commit, is where the finding
-                    -- itself is read.
+                    -- The badge names the WORST SEVERITY on the file (Johno,
+                    -- 2026-09-03), not the literal word "feedback": `[must-fix]`
+                    -- tells the reader which file to open first, and it is
+                    -- painted in the severity's own colour (a span over the
+                    -- badge) so it reads the same as the finding does inline.
+                    -- The tally already carries `worst` (worktree tally_paths).
                     local reviewed = (fc.reviewed or {})[f.path]
+                    local worst = reviewed and reviewed.worst or nil
+                    local body = string.rep(IND, 3) .. (KIND_MARK[f.kind] or "?")
+                      .. " " .. f.path
+                      .. (f.orig and ("  ← " .. f.orig) or "")
+                    local badge = worst and ("  [" .. worst .. "]") or ""
+                    local spans
+                    if worst and SEVERITY_HL[worst] then
+                      -- Paint just the `[severity]` badge, not the whole row.
+                      spans = { { from = #body, to = #body + #badge,
+                                  hl = SEVERITY_HL[worst] } }
+                    end
                     _row(rows, lines, hls, {
                       kind = "file", repo = repo, worktree = wt, node = node,
                       file = f, hl = KIND_HL[f.kind] or "AutoCoreDimmed",
-                      feedback = reviewed or nil,
-                      text = string.rep(IND, 3) .. (KIND_MARK[f.kind] or "?")
-                        .. " " .. f.path
-                        .. (f.orig and ("  ← " .. f.orig) or "")
-                        .. (reviewed and "  [feedback]" or ""),
+                      feedback = reviewed or nil, severity = worst,
+                      text = body .. badge,
+                      spans = spans,
                     })
                   end
-                  -- Requirement 9: review files sit beside the changed files.
-                  -- Rendered through the SAME label and colour as the repo's
-                  -- `reviews` section (§11) — the same file listed in two places
-                  -- reading two different ways is how a reader stops trusting
-                  -- either.
-                  for _, rv in ipairs(fc.reviews or {}) do
-                    _render_review(rows, lines, hls, 3, rv,
-                      { repo = repo, worktree = wt, node = node })
-                  end
+                  -- The per-commit review rows are GONE (Johno, 2026-09-03): the
+                  -- same review already appears in the repo's `reviews` section,
+                  -- and listing it twice — once here, once there — is the
+                  -- redundancy that made the tree read as if there were two
+                  -- reviews. The file badge above is the only in-commit trace a
+                  -- reviewed file needs; the review DOCUMENT lives under
+                  -- `reviews`. `fc.reviews` is still fetched, but only to feed
+                  -- the badge tally (`fc.reviewed`).
                 end
               end
               -- Only a bounded window that is actually FULL shows a load-more
@@ -607,6 +638,9 @@ local function _render(bufnr)
                                 hl = "AutoCoreGitModified" }
               rows[n + 1] = { kind = "draft", depth = 2, repo = repo,
                               sha = d.sha, scope = d.scope, draft = d.draft,
+                              -- A working draft carries no sha; `<CR>` reopens
+                              -- the UNCOMMITTED diff instead of a commit's.
+                              working = d.working, worktree = d.worktree,
                               -- `text` is what every other row carries, and it
                               -- is how the suites identify a row without
                               -- re-deriving its label.
@@ -635,7 +669,8 @@ local function _render(bufnr)
       -- reader's text, not a status field. Whole-row entries (no `col`) keep
       -- the original behaviour, so nothing else changes.
       pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, h.col,
-        { end_row = h.lnum, end_col = h.end_col, hl_group = h.hl })
+        { end_row = h.lnum, end_col = h.end_col, hl_group = h.hl,
+          priority = h.priority })
     else
       pcall(vim.api.nvim_buf_set_extmark, bufnr, NS, h.lnum, 0,
         { end_line = h.lnum + 1, hl_group = h.hl })
@@ -719,10 +754,16 @@ local function _activate(row)
   end
   if row.kind == "review_file" then return _open_path(row.path) end
   if row.kind == "draft" then
-    -- A draft has no file to open, so `<CR>` reopens the DIFF for its commit,
-    -- which is where the work continues and where the draft repaints. The row
-    -- shape `open_diff` needs is the commit row's, rebuilt from what the scope
-    -- already carries.
+    -- A draft has no file to open, so `<CR>` reopens the DIFF where the work
+    -- continues and the draft repaints. A working draft reopens the UNCOMMITTED
+    -- diff; a commit draft reopens that commit's.
+    if row.working then
+      return M.open_diff({
+        kind = "uncommitted", repo = row.repo,
+        worktree = row.worktree and { path = row.worktree } or nil,
+        node = { kind = "uncommitted" },
+      })
+    end
     return M.open_diff({
       kind = "commit", repo = row.repo, worktree = row.worktree,
       node = { kind = "commit", sha = row.sha, short = row.sha:sub(1, 7) },
@@ -870,18 +911,34 @@ function M.open_diff(row, opts)
   -- rather than work.
   local authoring = require("auto-finder.views.repos.authoring")
   local annotate, keymaps
+  -- A draft can be authored on BOTH a commit and UNCOMMITTED work (ADR-0081
+  -- §2.5 uncommitted-scope amendment). The two differ only in the SCOPE the
+  -- draft is keyed to and whether it can be SUBMITTED: a SAVED review still
+  -- needs a commit to anchor to, so on uncommitted `s` explains rather than
+  -- writes, and the draft is the vehicle for handing ongoing work to an agent.
+  local wt_path = row.worktree and row.worktree.path or nil
+  local draft, scope, submit_fn
   if uncommitted then
-    -- The schema needs a 40-hex commit and a working tree has none, so the
-    -- capability is PRESENT-but-disabled: `c` explains rather than doing
-    -- nothing, and `x`/`s` stay unbound so nothing implies a draft exists.
-    annotate = {
-      disabled_reason = "UNCOMMITTED has no commit to anchor a review to — commit or stash first",
-    }
+    scope = authoring.scope_working(row.repo.slug, wt_path)
+    draft = scope and authoring.draft_working(row.repo.slug, wt_path) or nil
+    submit_fn = function()
+      logger.notify("repos: UNCOMMITTED can't be saved as a review yet — commit, then "
+        .. "reopen and press s. Your draft IS saved and listed under this repo's "
+        .. "reviews, so an agent can pick it up now.", { level = vim.log.levels.WARN })
+    end
   else
+    scope = authoring.scope(row.repo.slug, sha)
     -- The repo's worktree path, so the reviewer SNAPSHOT this binds resolves
     -- against the right repository's `git config user.name` (ADR-0081 §2.5).
-    local draft = authoring.draft(row.repo.slug, sha,
-      { cwd = row.worktree and row.worktree.path or nil })
+    draft = authoring.draft(row.repo.slug, sha, { cwd = wt_path })
+    submit_fn = function() M._submit_review(row, sha) end
+  end
+  if not draft then
+    -- The scope itself could not be formed — a worktree with no path. This is
+    -- the only case that still disables authoring; UNCOMMITTED no longer is.
+    annotate = { disabled_reason =
+      "no worktree path to anchor a draft to — open the diff from a watched worktree" }
+  else
     annotate = {
       -- Findings go in through ONE entry point (ADR-0081 P5), so "is there
       -- unsaved work?" has exactly one answer. An anchored annotation carries a
@@ -912,19 +969,26 @@ function M.open_diff(row, opts)
         -- close (ADR-0065 §2.3).
         vim.schedule(function()
           local C = CLOSE_CHOICES
-          vim.ui.select({ C.submit, C.keep, C.discard, C.stay }, {
-            prompt = ("unsent review — %s (kept either way):"):format(_draft_holds(draft)),
+          -- Submit is offered ONLY when there is a commit to save to; on
+          -- UNCOMMITTED the draft is kept for an agent, and the prompt says so.
+          local choices = uncommitted and { C.keep, C.discard, C.stay }
+            or { C.submit, C.keep, C.discard, C.stay }
+          vim.ui.select(choices, {
+            prompt = ("unsent %s — %s (kept either way):"):format(
+              uncommitted and "draft (uncommitted)" or "review", _draft_holds(draft)),
           }, function(choice)
             if choice == C.submit then
-              M._submit_review(row, sha)
+              submit_fn()
             elseif choice == C.keep then
-              logger.notify(("repos: closed — %s kept; reopen with o and s submits")
-                :format(_draft_holds(draft)), { level = vim.log.levels.INFO })
+              logger.notify(("repos: closed — %s kept; reopen with o%s")
+                :format(_draft_holds(draft),
+                  uncommitted and " (listed under reviews for an agent)"
+                    or " and s submits"), { level = vim.log.levels.INFO })
               pcall(function() dv.close("resume") end)
             elseif choice == C.discard then
               -- The one destructive answer, so it says what it destroyed.
               local held = _draft_holds(draft)
-              authoring.discard(row.repo.slug, sha)
+              authoring.discard_scope(scope)
               logger.notify("repos: discarded " .. held, { level = vim.log.levels.WARN })
               pcall(function() dv.close("resume") end)
             else
@@ -941,8 +1005,8 @@ function M.open_diff(row, opts)
       end,
     }
     keymaps = {
-      { key = "s", desc = "submit review",
-        fn = function() M._submit_review(row, sha) end },
+      { key = "s", desc = uncommitted and "submit (commit first)" or "submit review",
+        fn = submit_fn },
       -- UNANCHORED findings need a way in (review-json §6): "this module has no
       -- tests", "the ADR contradicts §3" — findings with no `(path, line)`,
       -- which must not be dropped to fit the schema and must not be given an
@@ -1203,7 +1267,9 @@ local function _info(row)
     lines = {
       "Unsaved draft (nothing on disk yet)",
       "  repo:    " .. tostring(row.repo.label),
-      "  commit:  " .. tostring(row.sha),
+      row.working
+        and ("  target:  UNCOMMITTED (" .. tostring(row.worktree or "?") .. ")")
+        or  ("  commit:  " .. tostring(row.sha)),
       "  scope:   " .. tostring(row.scope),
       "  holds:   " .. _draft_holds(d),
       "  verdict: " .. tostring(d.verdict or "comment"),
@@ -1348,8 +1414,10 @@ M.HELP = {
   "  Same key, two meanings: in the PANEL s stages a file and c commits;",
   "  in the DIFF VIEW s submits a review and c annotates a line.",
   "",
-  "  On UNCOMMITTED only c is bound in the diff view, and it explains",
-  "  itself: a review anchors to a commit sha, and a working tree has none.",
+  "  On UNCOMMITTED you can still c/u to leave a DRAFT — it is saved and",
+  "  listed under the repo's reviews, so an agent can pick it up. Only s is",
+  "  held back: a SAVED review anchors to a commit sha, so commit first,",
+  "  then reopen and s.",
   "",
   "  An UNWATCHED worktree lists no commits, on purpose: it costs no",
   "  git calls at all. Press w on the worktree you are working in.",
