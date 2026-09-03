@@ -69,108 +69,26 @@ end
 
 ---WORKING_MARK is the scope segment for a draft on UNCOMMITTED work (ADR-0081
 ---§2.5, uncommitted-scope amendment). `@working:` can never be a committed
----scope's `@<40-hex>`, so the two namespaces cannot collide, and it carries the
----worktree PATH — a repo can have several linked worktrees, each with its own
----working tree, and a draft belongs to exactly one of them. A path is stable
----(it is not a window id, which §2.5 forbids); a reopened diff on the same
----checkout resolves to the same draft.
+---scope's `@<40-hex>`, so the two namespaces cannot collide. It carries the
+---worktree's opaque IDENTITY (from `worktree_id`, an auto-core UUID) — not its
+---path, which moves, and not its git registration name, which remove+recreate
+---can reuse. A repo can have several linked worktrees, each with its own
+---identity, so a draft belongs to exactly one of them.
 M.WORKING_MARK = "@working:"
 
----_registration_gitdir resolves a worktree's git ADMIN directory.
----
----For a linked worktree `<path>/.git` is a FILE reading
----`gitdir: <common>/worktrees/<name>`; for the main worktree `<path>/.git` is
----the git directory itself. Read through auto-core (the family's file owner)
----rather than by shelling git, so auto-finder neither learns git nor breaks the
----dependency rule.
----@param worktree_path string
----@return string?  absolute registration gitdir
-local function _registration_gitdir(worktree_path)
-  if type(worktree_path) ~= "string" or worktree_path == "" then return nil end
-  local ok, ds = pcall(require, "auto-core.docstore")
-  if not ok or type(ds) ~= "table" then return nil end
-  local dotgit = worktree_path .. "/.git"
-  local kind = ds.kind and ds.kind(dotgit) or nil
-  if kind == "directory" then
-    return vim.fs and vim.fs.normalize(dotgit) or dotgit
-  elseif kind == "file" then
-    local content = ds.read and select(1, ds.read(dotgit)) or nil
-    local target = type(content) == "string"
-      and content:match("gitdir:%s*(.-)%s*$") or nil
-    if not target or target == "" then return nil end
-    if not target:match("^/") then target = worktree_path .. "/" .. target end
-    return vim.fs and vim.fs.normalize(target) or target
-  end
-  return nil
-end
-
----UUID_FILE is the per-worktree identity file, kept in the worktree's git ADMIN
----directory — never in the tracked tree, so it is not committed and never
----pushed. The registration directory is deleted by `git worktree remove` and
----recreated fresh by `git worktree add`, which is exactly why a UUID inside it
----distinguishes a REMOVED-AND-RECREATED worktree from the original even when git
----reuses the registration name (lector: a registration name is not an immutable
----incarnation).
-M.UUID_FILE = "auto-finder-worktree-uuid"
-
----_mint_uuid returns an unguessable id. `uv.random` where available; the
----fallback is seeded per call. It only has to be unique, not secret.
-local function _mint_uuid()
-  local uv = vim.uv or vim.loop
-  if uv and uv.random then
-    local ok, bytes = pcall(uv.random, 16)
-    if ok and type(bytes) == "string" then
-      return (bytes:gsub(".", function(c) return string.format("%02x", c:byte()) end))
-    end
-  end
-  math.randomseed((os.time() * 1000 + (vim.fn.getpid and vim.fn.getpid() or 0)) % 2147483647)
-  local t = {}
-  for _ = 1, 16 do t[#t + 1] = string.format("%02x", math.random(0, 255)) end
-  return table.concat(t, "")
-end
-
----worktree_id resolves a DURABLE, per-incarnation identity for a worktree.
----
----A raw path is not identity, and neither is the registration gitdir alone: a
----path can move, and `git worktree remove` + `add` can reuse a registration
----name (lector, §2.5 amendment review). So the id is a **per-worktree UUID**
----persisted in the worktree's git admin directory (`<gitdir>/auto-finder-…`):
----
----  * created LAZILY, on the first bind of a draft for this worktree;
----  * retained across `git worktree move` — the admin dir and its contents
----    survive a move, so the same worktree keeps the same id;
----  * FRESH on remove-and-recreate — the admin dir is deleted on remove and
----    recreated empty on add, so a new incarnation mints a new UUID and cannot
----    inherit the old draft, whatever its path or registration name.
----
----`create=false` (the default) reads an existing UUID without minting one, so a
----PEEK never writes admin metadata. `create=true` mints and persists on absence,
----racing writers reconciled by an exclusive create.
+---worktree_id delegates to auto-core, which OWNS the git-layout knowledge and
+---the identity file (ADR-0081 §2.5, lector r2). auto-finder keeps only
+---draft/scope behaviour and never reads `.git` or constructs the admin path
+---itself — that knowledge lived here briefly in r2 and was moved back.
 ---@param worktree_path string
 ---@param opts { create: boolean? }?
----@return string? uuid, string? gitdir
+---@return string?  opaque UUID, or nil
 function M.worktree_id(worktree_path, opts)
-  local reg = _registration_gitdir(worktree_path)
-  if not reg then return nil, nil end
-  local ok, ds = pcall(require, "auto-core.docstore")
-  if not ok or type(ds) ~= "table" then return nil, reg end
-  local uuid_path = reg .. "/" .. M.UUID_FILE
-  local existing = ds.read and select(1, ds.read(uuid_path)) or nil
-  if type(existing) == "string" and vim.trim(existing) ~= "" then
-    return vim.trim(existing), reg
+  local ok, core = pcall(require, "auto-core.git.worktree")
+  if not ok or type(core) ~= "table" or type(core.worktree_id) ~= "function" then
+    return nil
   end
-  if not (opts and opts.create) then return nil, reg end
-  local uuid = _mint_uuid()
-  -- Exclusive create so two simultaneous binds agree on ONE id: the loser reads
-  -- the winner's value back rather than overwriting it.
-  local claimed = ds.create_exclusive and ds.create_exclusive(uuid_path, uuid .. "\n")
-  if not claimed then
-    local again = ds.read and select(1, ds.read(uuid_path)) or nil
-    if type(again) == "string" and vim.trim(again) ~= "" then
-      return vim.trim(again), reg
-    end
-  end
-  return uuid, reg
+  return core.worktree_id(worktree_path, opts)
 end
 
 ---_slug_ok rejects a slug that could inject a scope delimiter. A committed
@@ -233,8 +151,9 @@ end
 ---@param worktree_path string
 ---@return table?
 function M.draft_working(slug, worktree_path)
-  -- create=true: binding a draft is the moment the worktree's UUID is minted.
-  local id, gitdir = M.worktree_id(worktree_path, { create = true })
+  -- create=true: binding a draft is the moment the worktree's UUID is minted
+  -- (by auto-core, which owns the git-layout resolution).
+  local id = M.worktree_id(worktree_path, { create = true })
   local scope = id and M.scope_working(slug, id) or nil
   if not scope then return nil end
   local d = _drafts().get(scope)
@@ -245,10 +164,10 @@ function M.draft_working(slug, worktree_path)
     d.meta.reviewer = { display = display, slug = rslug,
                         bound_at = os.time(), cwd = worktree_path }
   end
-  -- The UUID keys the draft; the gitdir and display path are lookup/recovery
-  -- metadata, refreshed each bind so a moved worktree's path catches up.
+  -- The opaque UUID keys the draft; the display path is lookup/recovery
+  -- metadata, refreshed each bind so a moved worktree's path catches up. The
+  -- gitdir is auto-core's internal detail and is not held here.
   d.meta.worktree_id = id
-  d.meta.worktree_gitdir = gitdir
   d.meta.worktree = worktree_path
   return d
 end

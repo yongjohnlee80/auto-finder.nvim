@@ -334,31 +334,29 @@ do
       A.discard_scope(scope)
       return before and A.peek_working("own__w2", wdir) == nil
     end)())
-  ok("[6] *** the working scope is keyed by a per-worktree UUID, not path/gitdir ***",
+  ok("[6] *** the working scope is keyed by the opaque worktree identity, not the path ***",
     (function()
-      -- lector §2.5 amendment (r1): a path is not durable, and neither is the
-      -- registration gitdir alone. The id is a UUID persisted in the git admin
-      -- dir, so the scope contains the UUID — not the checkout path, not the
-      -- gitdir.
+      -- lector §2.5 amendment (r3): the durable identity is resolved by auto-core
+      -- (`auto-core.git.worktree.worktree_id`) — auto-finder only delegates and
+      -- keys the scope on the opaque id it returns. The git-admin mechanics (where
+      -- the UUID lives, remove/recreate freshness) are auto-core's contract,
+      -- proven in auto-core `tests/git-worktree-id.lua`. Here we assert only the
+      -- scope shape: the id, not the checkout path, decides the key.
       local wdir = tmp .. "/repo_id"
       vim.fn.mkdir(wdir, "p")
       vim.fn.system({ "git", "-C", wdir, "init", "-q" })
-      local id, gitdir = A.worktree_id(wdir, { create = true })
-      return type(id) == "string" and id:match("^%x+$") ~= nil and #id == 32
+      local id = A.worktree_id(wdir, { create = true })
+      return type(id) == "string" and id ~= "" and not id:find("@", 1, true)
         and A.scope_working("own__id", id) == "own__id@working:" .. id
         and A.scope_working("own__id", id) ~= "own__id@working:" .. wdir
-        and A.scope_working("own__id", id) ~= "own__id@working:" .. tostring(gitdir)
-        -- the UUID lives in the git ADMIN dir, not the tracked tree
-        and vim.fn.filereadable(gitdir .. "/" .. A.UUID_FILE) == 1
     end)())
-  ok("[6] a PEEK does not mint a UUID (no admin write)", (function()
+  ok("[6] a PEEK on an unbound worktree returns nil (delegates create=false)", (function()
       local wdir = tmp .. "/repo_peek"
       vim.fn.mkdir(wdir, "p")
       vim.fn.system({ "git", "-C", wdir, "init", "-q" })
-      -- peek before any bind: no draft, and no UUID file created.
-      local before = A.peek_working("own__pk", wdir)
-      return before == nil
-        and vim.fn.filereadable(wdir .. "/.git/" .. A.UUID_FILE) == 0
+      -- peek before any bind: no draft. (That create=false mints no admin file is
+      -- auto-core's contract, asserted in its own suite.)
+      return A.peek_working("own__pk", wdir) == nil
     end)())
   ok("[6] *** remove+recreate at the SAME path mints a NEW id — no old draft reopens ***",
     (function()
@@ -373,12 +371,12 @@ do
       g("worktree", "add", "-q", wt)
       A.add_finding(A.draft_working("own__rr", wt),
         { severity = "must-fix", body = "OLD draft", anchored = false })
-      local id_before = select(1, A.worktree_id(wt))
+      local id_before = A.worktree_id(wt)
       local held = A.peek_working("own__rr", wt)
       -- remove the worktree and recreate one at the SAME path
       g("worktree", "remove", "--force", wt)
       g("worktree", "add", "-q", wt)
-      local id_after = select(1, A.worktree_id(wt, { create = true }))
+      local id_after = A.worktree_id(wt, { create = true })
       return held ~= nil and A.dirty(held) == true
         and type(id_before) == "string" and type(id_after) == "string"
         and id_before ~= id_after                       -- fresh incarnation, fresh id
@@ -404,7 +402,7 @@ do
     end)())
   ok("[6] a moved worktree REBINDS by identity (path is display metadata)",
     (function()
-      -- Same registration gitdir → same draft, whatever the display path says.
+      -- Same opaque identity → same draft, whatever the display path says.
       -- Simulated by binding, then rewriting the path meta as a move would, and
       -- confirming the identity-keyed peek still finds the one draft.
       local wdir = tmp .. "/repo_move"
