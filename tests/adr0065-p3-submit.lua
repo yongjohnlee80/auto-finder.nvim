@@ -334,20 +334,55 @@ do
       A.discard_scope(scope)
       return before and A.peek_working("own__w2", wdir) == nil
     end)())
-  ok("[6] *** the working scope is keyed by git IDENTITY, not the raw path ***",
+  ok("[6] *** the working scope is keyed by a per-worktree UUID, not path/gitdir ***",
     (function()
-      -- lector §2.5 amendment: a raw path is not durable. The id is the
-      -- worktree's registration gitdir, so the scope contains that, not the
-      -- checkout path.
+      -- lector §2.5 amendment (r1): a path is not durable, and neither is the
+      -- registration gitdir alone. The id is a UUID persisted in the git admin
+      -- dir, so the scope contains the UUID — not the checkout path, not the
+      -- gitdir.
       local wdir = tmp .. "/repo_id"
       vim.fn.mkdir(wdir, "p")
       vim.fn.system({ "git", "-C", wdir, "init", "-q" })
-      local id = A.worktree_id(wdir)
-      local scope = A.scope_working("own__id", id)
-      return type(id) == "string" and id:find("/%.git$") ~= nil
-        and scope == "own__id@working:" .. id
-        -- the raw path is NOT what keys it
-        and scope ~= "own__id@working:" .. wdir
+      local id, gitdir = A.worktree_id(wdir, { create = true })
+      return type(id) == "string" and id:match("^%x+$") ~= nil and #id == 32
+        and A.scope_working("own__id", id) == "own__id@working:" .. id
+        and A.scope_working("own__id", id) ~= "own__id@working:" .. wdir
+        and A.scope_working("own__id", id) ~= "own__id@working:" .. tostring(gitdir)
+        -- the UUID lives in the git ADMIN dir, not the tracked tree
+        and vim.fn.filereadable(gitdir .. "/" .. A.UUID_FILE) == 1
+    end)())
+  ok("[6] a PEEK does not mint a UUID (no admin write)", (function()
+      local wdir = tmp .. "/repo_peek"
+      vim.fn.mkdir(wdir, "p")
+      vim.fn.system({ "git", "-C", wdir, "init", "-q" })
+      -- peek before any bind: no draft, and no UUID file created.
+      local before = A.peek_working("own__pk", wdir)
+      return before == nil
+        and vim.fn.filereadable(wdir .. "/.git/" .. A.UUID_FILE) == 0
+    end)())
+  ok("[6] *** remove+recreate at the SAME path mints a NEW id — no old draft reopens ***",
+    (function()
+      -- lector r1's required control: a fresh worktree at the same path/name is
+      -- a different incarnation and must NOT inherit the old draft.
+      local base = tmp .. "/rr_repo"; vim.fn.mkdir(base, "p")
+      local function g(...) return vim.fn.system({ "git", "-C", base, "-c",
+        "user.email=t@t", "-c", "user.name=t", ... }) end
+      g("init", "-q")
+      vim.fn.writefile({ "x" }, base .. "/f.txt"); g("add", "."); g("commit", "-q", "-m", "one")
+      local wt = tmp .. "/rr_wt"
+      g("worktree", "add", "-q", wt)
+      A.add_finding(A.draft_working("own__rr", wt),
+        { severity = "must-fix", body = "OLD draft", anchored = false })
+      local id_before = select(1, A.worktree_id(wt))
+      local held = A.peek_working("own__rr", wt)
+      -- remove the worktree and recreate one at the SAME path
+      g("worktree", "remove", "--force", wt)
+      g("worktree", "add", "-q", wt)
+      local id_after = select(1, A.worktree_id(wt, { create = true }))
+      return held ~= nil and A.dirty(held) == true
+        and type(id_before) == "string" and type(id_after) == "string"
+        and id_before ~= id_after                       -- fresh incarnation, fresh id
+        and A.peek_working("own__rr", wt) == nil         -- the new worktree sees NO draft
     end)())
   ok("[6] *** FAIL-CLOSED: submit REFUSES a non-committed scope before any save ***",
     (function()
