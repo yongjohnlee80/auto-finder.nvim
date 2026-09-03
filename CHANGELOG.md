@@ -2,6 +2,46 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.16] — 2026-09-03 — ADR-0081 P5: the draft moves to auto-core; drafts and push state in the tree
+
+Patch. `authoring`'s public functions keep their names; the store behind
+them moved, and two panel features land on top of it.
+
+### Changed
+
+- **The review draft lives in `auto-core.drafts`** (ADR-0081 P5), not in
+  `authoring._drafts`. It was module state in the plugin no other plugin
+  may depend on, so an agent could not read a draft and the composer that
+  fills one sat a plugin away from the store it appended to.
+  Findings enter through a single `add_finding`; `anchored` and
+  `unanchored` are derived views rather than two lists; `dirty` is
+  auto-core's predicate, not a second one.
+- The draft's scope is the repo slug plus the **full** commit, and
+  `scope()` now refuses an abbreviation — two commits sharing a 7-character
+  prefix would merge two reviewers' drafts into one.
+
+### Added
+
+- **Unsaved drafts are listed in a repository's `reviews` section**, so a
+  draft can be handed to an agent before the commit exists. Only drafts
+  that hold work appear; the section count names them; `i` describes one,
+  and `<CR>` reopens its diff.
+- **Commit hashes read pushed-vs-local**: purple on `origin`, orange
+  local-only, subject left plain — and nothing painted when the read
+  failed, because a panel that colours every hash because git errored is
+  worse than one that colours none. Only the hash is painted, which
+  required the tree painter to learn column spans.
+
+### Fixed
+
+- **The reviewer is snapshotted when a draft is bound**, not resolved at
+  write time. A draft begun by one reviewer and submitted after the
+  repository's `user.name` changed was persisted under the new name:
+  silent authorship corruption, invisible to the person whose work it was.
+- Asking "is there anything to submit?" no longer CREATES a draft. The
+  check materialised an empty draft for every commit a reader pressed `s`
+  on, and those shells then had to be filtered out of any listing.
+
 ## [v0.4.15] — 2026-09-03 — the review submit actually writes
 
 Pairs with worktree.nvim v0.5.7. **This is the fix that makes review authoring
