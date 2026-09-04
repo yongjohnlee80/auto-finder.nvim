@@ -281,9 +281,11 @@ local function _render_review(rows, lines, hls, depth, meta, extra)
   local IND = "  "
   local id = "review:" .. tostring(meta.path)
   local open = M._expanded[id] == true
+  local ppr = extra and (extra.parent_pr or extra.pr)
   _row(rows, lines, hls, {
     kind = "review", id = id, expandable = true,
     repo = extra.repo, worktree = extra.worktree, node = extra.node, review = meta,
+    parent_pr = ppr,
     hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
     text = string.rep(IND, depth) .. _chevron(open) .. " " .. _review_label(meta),
   })
@@ -295,6 +297,7 @@ local function _render_review(rows, lines, hls, depth, meta, extra)
     _row(rows, lines, hls, {
       kind = "review_file", repo = extra.repo, worktree = extra.worktree,
       node = extra.node, review = meta, path = meta.document,
+      parent_pr = ppr,
       hl = "AutoCoreReviewBody",
       text = string.rep(IND, depth + 1) .. "md   "
         .. (vim.fn.fnamemodify(meta.document, ":t")),
@@ -308,6 +311,7 @@ local function _render_review(rows, lines, hls, depth, meta, extra)
   _row(rows, lines, hls, {
     kind = "review_file", repo = extra.repo, worktree = extra.worktree,
     node = extra.node, review = meta, path = meta.path,
+    parent_pr = ppr,
     hl = "AutoCoreReviewFrame",
     text = string.rep(IND, depth + 1) .. "json " .. (vim.fn.fnamemodify(meta.path, ":t")),
   })
@@ -449,6 +453,54 @@ local function _render(bufnr)
                 -- the absence of an UNCOMMITTED row is not evidence of a clean
                 -- tree. Say so rather than letting omission imply it.
                 msg(2, "working-tree status unavailable", "AutoCoreGitDeleted")
+              end
+              -- Render PR row if worktree is associated with a PR (ADR-0083 §2.5/§2.6)
+              if type(backend.pr_for_worktree) == "function" then
+                local pr = backend.pr_for_worktree(repo, wt)
+                if pr then
+                  local pr_hl = (pr.draft or pr.state == "draft") and "AutoCoreReviewFrame"
+                    or (pr.state == "closed" and "AutoCoreGitDeleted" or "AutoCoreGitAdded")
+                  local pr_badge = (pr.draft or pr.state == "draft") and "[DRAFT]"
+                    or (pr.state == "closed" and "[CLOSED]" or "[OPEN]")
+                  local pr_text = string.format("%s● PR #%s: %s  %s",
+                    string.rep(IND, 2), tostring(pr.number), pr.title or "", pr_badge)
+                  _row(rows, lines, hls, {
+                    kind = "pr",
+                    id = "pr:" .. repo.common_dir .. ":" .. tostring(pr.number),
+                    depth = 2,
+                    repo = repo,
+                    worktree = wt,
+                    pr = pr,
+                    hl = pr_hl,
+                    text = pr_text,
+                    node = {
+                      kind = "pr",
+                      pr_number = pr.number,
+                      title = pr.title,
+                      short = "PR#" .. tostring(pr.number),
+                    },
+                  })
+                  -- Child reviews associated with this PR (Action 5)
+                  local pr_revs = {}
+                  if type(backend.reviews_for_pr) == "function" then
+                    pr_revs = backend.reviews_for_pr(repo, pr.number)
+                  elseif type(backend.reviews_all) == "function" then
+                    local all_revs = backend.reviews_all(repo)
+                    for _, r in ipairs(all_revs) do
+                      if r.pr and tostring(r.pr) == tostring(pr.number) then
+                        table.insert(pr_revs, r)
+                      end
+                    end
+                  end
+                  for _, r_meta in ipairs(pr_revs) do
+                    _render_review(rows, lines, hls, 3, r_meta, {
+                      repo = repo,
+                      worktree = wt,
+                      pr = pr,
+                      parent_pr = pr,
+                    })
+                  end
+                end
               end
               for _, node in ipairs(cc.items) do
                 local nid = node.kind == "uncommitted"
@@ -769,6 +821,12 @@ local function _activate(row)
       node = { kind = "commit", sha = row.sha, short = row.sha:sub(1, 7) },
     })
   end
+  if row.kind == "pr" then
+    if row.pr and row.pr.kb_doc and vim.fn.filereadable(row.pr.kb_doc) == 1 then
+      return _open_path(row.pr.kb_doc)
+    end
+    return M.open_pr_diff(row)
+  end
   if row.kind == "more" then return M.load_more(row) end
   -- A review row now EXPANDS into its [markdown, json] pair rather than opening
   -- the JSON directly — the Markdown is openable and editable from the child
@@ -1083,12 +1141,42 @@ function M.open_diff(row, opts)
     keymaps = keymaps,
     -- Reopen where a prior session left off (requirement 6). nil on a first
     -- open; set only when `resume_diff` re-enters here.
-    initial = opts and opts.initial or nil,
+    initial = (opts and opts.initial) or (row.file and { path = row.file.path }) or nil,
     -- Remember this diff and the reader's last position so the <C-g> modal can
     -- recall it. The position is auto-core's (it owns the panes); the row is
     -- ours (it names the repo, worktree and commit to reopen). Captured on
     -- EVERY close, so "resume" always means the diff you last looked at.
-    on_close = function(pos) M._resume = { row = row, pos = pos } end,
+    on_close = function(pos)
+      pos = pos or {}
+      local cur_file = pos.path
+      local cur_idx = pos.idx
+      local cur_pane = pos.pane
+      local file_positions = pos.file_positions or {}
+      if cur_file and not file_positions[cur_file] then
+        file_positions[cur_file] = {
+          lnum = pos.lnum or 1,
+          col = pos.col or 0,
+          pane = cur_pane or "preview",
+        }
+      end
+
+      M._resume = {
+        repo_slug = row.repo and row.repo.slug,
+        common_dir = row.repo and row.repo.common_dir,
+        worktree_path = (row.worktree and row.worktree.path) or (row.repo and (row.repo.sample_worktree or row.repo.path)),
+        target_kind = (row.node and row.node.kind) or row.kind,
+        sha = row.node and row.node.sha,
+        pr_number = row.node and row.node.pr_number,
+        active_file = cur_file,
+        active_idx = cur_idx,
+        focused_pane = cur_pane,
+        file_positions = file_positions,
+        timestamp = os.time(),
+        row = row,
+        pos = pos,
+      }
+      M._persist_resume()
+    end,
     title = " " .. tostring(row.node.short) .. "  "
       .. tostring((row.node.commit or {}).subject or "") .. " ",
   })
@@ -1200,6 +1288,413 @@ function M._finish_submit(row, sha)
   end
 end
 
+---open_pr_diff opens multi-commit PR diffview (ADR-0083 §2.6 Action 2).
+---@param row table
+---@param opts table?
+function M.open_pr_diff(row, opts)
+  opts = opts or {}
+  local backend = _repos()
+  if not (backend and row and row.repo) then return end
+
+  local pr = row.pr
+  local wt = row.worktree
+  if not pr and wt and type(backend.pr_for_worktree) == "function" then
+    pr = backend.pr_for_worktree(row.repo, wt)
+  end
+  if not pr then
+    logger.notify("repos: put the cursor on a PR or a worktree with a PR to open PR diff",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local base_branch = pr.base or pr.base_ref
+    or (type(backend.resolve_base) == "function" and backend.resolve_base(row.repo.common_dir))
+    or "main"
+  local pr_branch = pr.branch or (wt and wt.branch) or ("pr-" .. tostring(pr.number))
+
+  local commits = {}
+  if type(backend.pr_diff) == "function" then
+    commits = backend.pr_diff(row.repo, base_branch, pr_branch)
+  else
+    local ok_pr, pr_mod = pcall(require, "worktree.pr")
+    if ok_pr and type(pr_mod.pr_diff_commits) == "function" then
+      commits = pr_mod.pr_diff_commits(row.repo, base_branch, pr_branch)
+    end
+  end
+
+  local all_files = {}
+  for _, c in ipairs(commits) do
+    local files = {}
+    if type(backend.diff) == "function" then
+      local dok, dfiles = pcall(backend.diff, row.repo, c.sha)
+      if dok and type(dfiles) == "table" then files = dfiles end
+    end
+    for _, f in ipairs(files) do
+      f.commit_sha = c.sha
+      f.commit_short = c.short or c.sha:sub(1, 7)
+      f.commit_subject = c.subject or ""
+      table.insert(all_files, f)
+    end
+  end
+
+  if #all_files == 0 then
+    logger.notify(string.format("repos: no changed files found for PR #%s", tostring(pr.number)),
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local annotations = {}
+  local ok_rev, review = pcall(require, "worktree.review")
+  if ok_rev then
+    local pr_revs = {}
+    if type(backend.reviews_for_pr) == "function" then
+      pr_revs = backend.reviews_for_pr(row.repo, pr.number)
+    else
+      for _, c in ipairs(commits) do
+        local revs = backend.reviews(row.repo, c.sha)
+        for _, r in ipairs(revs) do table.insert(pr_revs, r) end
+      end
+    end
+    for _, r_meta in ipairs(pr_revs) do
+      local ok_doc, doc = pcall(review.load, row.repo.slug, r_meta.commit or r_meta.sha, r_meta.revision)
+      if ok_doc and doc then
+        for path, list in pairs(review.by_path(doc)) do
+          annotations[path] = annotations[path] or {}
+          for _, comment in ipairs(list) do
+            comment.author = comment.author or doc.reviewer
+            table.insert(annotations[path], comment)
+          end
+        end
+      end
+    end
+  end
+
+  local ok_dv, dv = pcall(require, "auto-core.ui.diffview")
+  if not ok_dv then
+    logger.notify("repos: auto-core.ui.diffview is unavailable", { level = vim.log.levels.ERROR })
+    return
+  end
+
+  local authoring = require("auto-finder.views.repos.authoring")
+  local wt_path = wt and wt.path or nil
+  local default_sha = commits[1] and commits[1].sha or "HEAD"
+  local draft = authoring.draft(row.repo.slug, default_sha, { cwd = wt_path })
+  draft.pr = pr.number
+
+  local annotate = {
+    on_add = function(a)
+      local cur_file = dv.current_file()
+      if cur_file and cur_file.commit_sha then
+        a.commit = cur_file.commit_sha
+      end
+      authoring.add_finding(draft, a)
+    end,
+    on_remove = function(a)
+      for i = #draft.items, 1, -1 do
+        local c = draft.items[i]
+        if c.anchored and c.path == a.path and c.line == a.line
+          and (c.side or "RIGHT") == (a.side or "RIGHT") then
+          table.remove(draft.items, i)
+        end
+      end
+    end,
+    pending = function() return authoring.anchored(draft) end,
+    before_close = function(reason)
+      if #draft.items > 0 and reason == "key" then
+        return false
+      end
+      return true
+    end,
+  }
+
+  local keymaps = {
+    {
+      key = "s",
+      desc = "submit",
+      fn = function()
+        if #draft.items == 0 then
+          logger.notify("repos: no findings to submit", { level = vim.log.levels.WARN })
+          return
+        end
+        local by_commit = {}
+        for _, item in ipairs(draft.items) do
+          local sha = item.commit or default_sha
+          by_commit[sha] = by_commit[sha] or {}
+          table.insert(by_commit[sha], item)
+        end
+        for sha, items in pairs(by_commit) do
+          local rev_payload = {
+            schema = review.SCHEMA,
+            commit = sha,
+            revision = 1,
+            repo = { url = row.repo.url, owner = row.repo.slug, name = row.repo.label },
+            reviewer = vim.g.auto_agents_name or "reviewer",
+            reviewer_slug = vim.g.auto_agents_name or "reviewer",
+            pr = pr.number,
+            comments = {},
+          }
+          for _, it in ipairs(items) do
+            table.insert(rev_payload.comments, {
+              path = it.path,
+              line = it.line,
+              severity = it.severity or "comment",
+              body = it.body,
+              side = it.side or "RIGHT",
+            })
+          end
+          local md_body = string.format("# Review for commit %s (PR #%s)\n\nSubmitted from repos panel.\n", sha:sub(1, 7), tostring(pr.number))
+          local ok_save, serr = review.save_pair(row.repo.slug, rev_payload, md_body)
+          if not ok_save then
+            logger.notify(string.format("repos: failed to save review for %s — %s", sha:sub(1, 7), tostring(serr)), { level = vim.log.levels.ERROR })
+          end
+        end
+        draft.items = {}
+        M.invalidate(nil)
+        _rerender()
+        dv.close("submit")
+        logger.notify(string.format("repos: submitted review for PR #%s", tostring(pr.number)), { level = vim.log.levels.INFO })
+      end,
+    },
+  }
+
+  local title = string.format(" PR #%s: %s ", tostring(pr.number), pr.title or "")
+  local float, err = dv.open({
+    title = title,
+    files = all_files,
+    annotations = annotations,
+    annotate = annotate,
+    keymaps = keymaps,
+    worktree = wt_path,
+    context = opts.context or "hunk",
+    initial = opts.initial,
+    on_close = function(pos)
+      pos = pos or {}
+      local cur_file = pos.path
+      local cur_idx = pos.idx
+      local cur_pane = pos.pane
+      local file_positions = pos.file_positions or {}
+      if cur_file and not file_positions[cur_file] then
+        file_positions[cur_file] = {
+          lnum = pos.lnum or 1,
+          col = pos.col or 0,
+          pane = cur_pane or "preview",
+        }
+      end
+
+      M._resume = {
+        repo_slug = row.repo and row.repo.slug,
+        common_dir = row.repo and row.repo.common_dir,
+        worktree_path = wt_path,
+        target_kind = "pr",
+        pr_number = pr.number,
+        sha = default_sha,
+        active_file = cur_file,
+        active_idx = cur_idx,
+        focused_pane = cur_pane,
+        file_positions = file_positions,
+        context = pos and pos.context,
+        timestamp = os.time(),
+        row = row,
+        pos = pos,
+      }
+      M._persist_resume()
+    end,
+  })
+  if not float then
+    logger.notify("repos: cannot open diff — " .. tostring(err), { level = vim.log.levels.ERROR })
+  end
+end
+
+---post_pr_feedback posts review findings to PR inline (ADR-0083 §2.6 Action 4).
+---@param row table
+---@param opts table?
+function M.post_pr_feedback(row, opts)
+  opts = opts or {}
+  local backend = _repos()
+  if not (backend and row and row.repo) then return end
+
+  local pr = row.pr
+  local wt = row.worktree
+  if not pr and wt and type(backend.pr_for_worktree) == "function" then
+    pr = backend.pr_for_worktree(row.repo, wt)
+  end
+  if not pr and row.review and row.review.pr then
+    pr = { number = row.review.pr }
+  end
+  if not pr then
+    logger.notify("repos: put cursor on a PR or a worktree with a PR to post feedback",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if not ok_pr then
+    logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+    return
+  end
+
+  local reviews = {}
+  if type(backend.reviews_for_pr) == "function" then
+    reviews = backend.reviews_for_pr(row.repo, pr.number)
+  else
+    local all = backend.reviews_all(row.repo)
+    for _, r in ipairs(all) do
+      if r.pr and tostring(r.pr) == tostring(pr.number) then
+        table.insert(reviews, r)
+      end
+    end
+  end
+
+  if #reviews == 0 then
+    logger.notify(string.format("repos: no review documents associated with PR #%s to post", tostring(pr.number)),
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local res = pr_mod.post_feedback(row.repo, pr.number, reviews, opts)
+  if res and res.ok then
+    logger.notify(string.format("repos: feedback posted to PR #%s (receipt saved)", tostring(pr.number)),
+      { level = vim.log.levels.INFO })
+  else
+    logger.notify(string.format("repos: failed to post feedback to PR #%s — %s", tostring(pr.number), tostring(res and res.error or "unknown")),
+      { level = vim.log.levels.ERROR })
+  end
+end
+
+---create_pr_for_worktree prompts and creates a new PR for worktree branch (ADR-0083 §2.6 Action 6).
+---@param row table
+function M.create_pr_for_worktree(row)
+  local backend = _repos()
+  if not (backend and row and row.repo and row.worktree) then
+    logger.notify("repos: put cursor on a worktree to create a PR",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local repo = row.repo
+  local wt = row.worktree
+  local branch = wt.branch or "HEAD"
+  local base = (type(backend.resolve_base) == "function" and backend.resolve_base(repo.common_dir)) or "main"
+
+  vim.ui.input({ prompt = string.format("PR Title for %s: ", branch) }, function(title)
+    if not title or title == "" then return end
+    vim.ui.input({ prompt = "PR Description: " }, function(body)
+      local ok_pr, pr_mod = pcall(require, "worktree.pr")
+      if not ok_pr then
+        logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+        return
+      end
+      local res = pr_mod.create_pr(repo, {
+        title = title,
+        body = body or "",
+        head = branch,
+        base = base,
+      })
+      if res and res.ok then
+        M.invalidate(nil)
+        _rerender()
+        logger.notify(string.format("repos: created PR #%s: %s", tostring(res.pr and res.pr.number or ""), title),
+          { level = vim.log.levels.INFO })
+      else
+        logger.notify(string.format("repos: could not create PR — %s", tostring(res and res.error or "unknown")),
+          { level = vim.log.levels.ERROR })
+      end
+    end)
+  end)
+end
+
+---get_pr_for_repo fetches PR branch and creates worktree (ADR-0083 §2.6 Action 1).
+---@param row table
+function M.get_pr_for_repo(row)
+  local backend = _repos()
+  if not (backend and row and row.repo) then
+    logger.notify("repos: put cursor on a repository or worktree to fetch PR",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local repo = row.repo
+  vim.ui.input({ prompt = string.format("Fetch PR # for %s: ", repo.label) }, function(input)
+    if not input or input == "" then return end
+    local num = tonumber(input) or input
+    local ok_pr, pr_mod = pcall(require, "worktree.pr")
+    if not ok_pr then
+      logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+      return
+    end
+    local res = pr_mod.fetch_and_create_worktree(repo, num)
+    if res and res.ok then
+      M.invalidate(nil)
+      _rerender()
+      logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(num), tostring(res.branch)),
+        { level = vim.log.levels.INFO })
+    else
+      logger.notify(string.format("repos: could not fetch PR #%s — %s", tostring(num), tostring(res and res.error or "unknown")),
+        { level = vim.log.levels.ERROR })
+    end
+  end)
+end
+
+function M.get_pr_command(opts)
+  local backend = _repos()
+  local root = _cache("root")
+  local repos = (root and root.items) or (backend and backend.repos()) or {}
+  local repo = repos[1]
+  if not repo then
+    logger.notify("repos: no repository found in workspace", { level = vim.log.levels.ERROR })
+    return
+  end
+  local arg = opts and opts.fargs and opts.fargs[1]
+  if arg then
+    local ok_pr, pr_mod = pcall(require, "worktree.pr")
+    if ok_pr then
+      local res = pr_mod.fetch_and_create_worktree(repo, tonumber(arg) or arg)
+      if res and res.ok then
+        M.invalidate(nil)
+        _rerender()
+        logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(arg), tostring(res.branch)), { level = vim.log.levels.INFO })
+        return
+      end
+    end
+  end
+  M.get_pr_for_repo({ repo = repo })
+end
+
+function M.create_pr_command(opts)
+  local backend = _repos()
+  local root = _cache("root")
+  local repos = (root and root.items) or (backend and backend.repos()) or {}
+  local repo = repos[1]
+  if not repo then
+    logger.notify("repos: no repository found in workspace", { level = vim.log.levels.ERROR })
+    return
+  end
+  local wts = (backend and backend.worktrees(repo)) or {}
+  local wt = wts[1]
+  M.create_pr_for_worktree({ repo = repo, worktree = wt })
+end
+
+function M.post_pr_feedback_command(opts)
+  local backend = _repos()
+  local root = _cache("root")
+  local repos = (root and root.items) or (backend and backend.repos()) or {}
+  local repo = repos[1]
+  if not repo then
+    logger.notify("repos: no repository found in workspace", { level = vim.log.levels.ERROR })
+    return
+  end
+  local arg = opts and opts.fargs and opts.fargs[1]
+  if arg then
+    M.post_pr_feedback({ repo = repo, pr = { number = tonumber(arg) or arg } })
+  else
+    vim.ui.input({ prompt = "Post feedback for PR #: " }, function(input)
+      if input and input ~= "" then
+        M.post_pr_feedback({ repo = repo, pr = { number = tonumber(input) or input } })
+      end
+    end)
+  end
+end
+
 ---_info is `i`.
 local function _info(row)
   if not row then return end
@@ -1224,6 +1719,20 @@ local function _info(row)
       "  is base:  " .. tostring(row.worktree.is_base),
       "",
       "An unwatched worktree costs no git calls; w toggles it.",
+    }
+  elseif row.kind == "pr" then
+    local pr = row.pr or {}
+    lines = {
+      "Pull Request #" .. tostring(pr.number or (row.node and row.node.pr_number) or "?"),
+      "  title:   " .. tostring(pr.title or ""),
+      "  state:   " .. tostring(pr.state or (pr.draft and "draft" or "open")),
+      "  branch:  " .. tostring(pr.branch or (row.worktree and row.worktree.branch) or ""),
+      "  base:    " .. tostring(pr.base or pr.base_ref or "(unknown)"),
+      "  author:  " .. tostring(pr.author or "(unknown)"),
+      "  kb_doc:  " .. tostring(pr.kb_doc or "(none)"),
+      "",
+      "O opens grouped multi-commit diff · P posts inline feedback",
+      "<CR> opens KB document",
     }
   elseif row.kind == "commit" then
     local c = row.node.commit or {}
@@ -1386,12 +1895,17 @@ M.HELP = {
   "  a file with review feedback on it is badged [feedback]",
   "  a review row is named <commit>.r<N>.review.json  [worst severity]",
   "",
-  "  <CR>  expand · open a file · open a review JSON",
+  "  <CR>  expand · open a file · open a review JSON · open PR KB doc",
   "  o     diff the commit — three columns: files | a/ (old) | b/ (new)",
+  "  O     diff PR across all commits (on PR entry)",
   "  w     watch / unwatch this worktree (persists)",
   "  m     load another window of commits",
   "  i     info about the node          R  reload (all with no node)",
-  "  d     remove this review JSON — confirms, and keeps its Markdown",
+  "  d     remove review / dissociate from PR — confirms first",
+  "  A     attach review feedback to an in-progress task",
+  "  G     GetPR: fetch PR branch and create worktree (on repo)",
+  "  N     CreatePR: create PR for this worktree (on worktree)",
+  "  P     post inline feedback to PR (on PR) / push (on worktree)",
   "  ?     this help",
   "",
   "  git actions:",
@@ -1583,6 +2097,50 @@ function M.remove_review(row)
     return
   end
   local meta = row.review
+  local pr_num = (row.parent_pr and row.parent_pr.number)
+    or (row.pr and row.pr.number)
+    or (row.review and row.review.pr)
+  if pr_num then
+    local label = tostring(meta.name or meta.path)
+    local prompt = string.format("Dissociate review %s from PR #%s? (Files on disk will NOT be deleted)", label, tostring(pr_num))
+    local function go_dissociate(choice)
+      if choice ~= "yes" then
+        logger.notify("repos: dissociation cancelled", { level = vim.log.levels.INFO })
+        return
+      end
+      local ok_store, store = pcall(require, "worktree.store")
+      local ok_pr, pr_mod = pcall(require, "worktree.pr")
+      local data, rerr = ok_store and store.read_json(meta.path)
+      if not data then
+        logger.notify("repos: could not read review JSON to dissociate — " .. tostring(rerr), { level = vim.log.levels.ERROR })
+        return
+      end
+      if ok_pr and pr_mod.dissociate_review then
+        pr_mod.dissociate_review(data, pr_num)
+      else
+        data.pr = nil
+      end
+      if ok_store and store.write_json then
+        store.write_json(meta.path, data)
+      else
+        local ok_atomic, fs_atomic = pcall(require, "auto-core.fs.atomic")
+        if ok_atomic and fs_atomic.write then
+          fs_atomic.write(meta.path, vim.json.encode(data))
+        end
+      end
+      M.invalidate(nil)
+      _rerender()
+      logger.notify(string.format("repos: dissociated review %s from PR #%s", label, tostring(pr_num)), { level = vim.log.levels.INFO })
+    end
+    local okc, float = pcall(require, "auto-core.ui.float")
+    if okc and float and type(float.confirm) == "function" then
+      float.confirm(prompt, { on_choice = go_dissociate })
+    else
+      vim.ui.select({ "yes", "no" }, { prompt = prompt }, go_dissociate)
+    end
+    return
+  end
+
   -- The RAW filename, not the elided row label: a prompt that is about to
   -- delete something names it exactly as the filesystem does.
   local label = tostring(meta.name or meta.path)
@@ -1633,6 +2191,85 @@ function M.remove_review(row)
   end
 end
 
+---attach_review_to_task is `A` on a review row: attach the review's canonical
+---Markdown (or JSON) path to an in-progress task in .todo-list/in-progress/ (ADR-0083 §2.1).
+function M.attach_review_to_task(row)
+  if not (row and (row.kind == "review" or row.kind == "review_file") and row.review) then
+    logger.notify("repos: cursor must be on a review row to attach feedback",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local meta = row.review
+  local review_path = meta.document or meta.md_path or meta.path
+  if not review_path or review_path == "" then
+    logger.notify("repos: review has no file path", { level = vim.log.levels.WARN })
+    return
+  end
+  local ok_todo, todo_api = pcall(require, "auto-core.todo")
+  if not (ok_todo and todo_api and type(todo_api.list) == "function") then
+    logger.notify("repos: auto-core.todo not available", { level = vim.log.levels.WARN })
+    return
+  end
+  local tasks = todo_api.list({ status = "in-progress" })
+  if not tasks or #tasks == 0 then
+    logger.notify("repos: no in-progress tasks found in .todo-list/in-progress/",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local items = {}
+  for _, t in ipairs(tasks) do
+    table.insert(items, {
+      task = t,
+      label = string.format("%s (%s)", t.title or "untitled", t.id or "no-id"),
+    })
+  end
+  vim.ui.select(items, {
+    prompt = "Attach review to in-progress task:",
+    format_item = function(item) return item.label end,
+  }, function(choice)
+    if not choice then return end
+    local sel_task = choice.task
+    local ok_paths, todo_paths = pcall(require, "auto-core.todo.paths")
+    local portable_ref
+    if ok_paths and todo_paths and type(todo_paths.to_portable) == "function" then
+      portable_ref = todo_paths.to_portable(review_path)
+    else
+      local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+      if ok_vars and vars and type(vars.symbolize_path) == "function" then
+        portable_ref = vars.symbolize_path(review_path)
+      else
+        portable_ref = review_path
+      end
+    end
+    local updated_reviews = {}
+    if type(sel_task.review) == "table" then
+      for _, r in ipairs(sel_task.review) do
+        table.insert(updated_reviews, r)
+      end
+    elseif type(sel_task.review) == "string" and sel_task.review ~= "" then
+      table.insert(updated_reviews, sel_task.review)
+    end
+    local exists = false
+    for _, r in ipairs(updated_reviews) do
+      if r == portable_ref or r == review_path then
+        exists = true
+        break
+      end
+    end
+    if not exists then
+      table.insert(updated_reviews, portable_ref)
+    end
+    local ok, err = todo_api.update(sel_task.id, { review = updated_reviews })
+    if ok then
+      logger.notify(string.format("repos: attached review to task '%s'", sel_task.title or sel_task.id),
+        { level = vim.log.levels.INFO })
+    else
+      logger.notify(string.format("repos: failed to attach review: %s", tostring(err)),
+        { level = vim.log.levels.ERROR })
+    end
+  end)
+end
+
 ---git_push is `P`: publish, but only after an explicit confirmation.
 ---
 ---`P` is one keypress from `p`, and a push is the only action on this panel
@@ -1641,6 +2278,9 @@ end
 ---to be published — and the point is that a mistyped key on the wrong row
 ---cannot publish.
 function M.git_push(row)
+  if row and row.kind == "pr" then
+    return M.post_pr_feedback(row)
+  end
   if not (row and row.repo) then
     logger.notify("repos: put the cursor on a repository to push",
       { level = vim.log.levels.WARN })
@@ -1681,6 +2321,14 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: expand / open")
   set("o", function() M.open_diff(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: diff this commit")
+  set("O", function()
+    local row = _row_under_cursor(panel_winid)
+    if row and row.kind == "pr" then
+      M.open_pr_diff(row)
+    else
+      M.open_diff(row)
+    end
+  end, "auto-finder.repos: diff PR across all commits / diff commit")
   set("w", function() M.toggle_watch(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: watch / unwatch this worktree")
   set("m", function() M.load_more(_row_under_cursor(panel_winid)) end,
@@ -1696,9 +2344,15 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("c", function() M.git_commit(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: commit what is staged")
   set("P", function() M.git_push(_row_under_cursor(panel_winid)) end,
-    "auto-finder.repos: push (confirms first)")
+    "auto-finder.repos: post inline feedback to PR (on PR) / push (confirms first)")
   set("d", function() M.remove_review(_row_under_cursor(panel_winid)) end,
-    "auto-finder.repos: remove this review JSON (confirms first)")
+    "auto-finder.repos: remove review / dissociate from PR (confirms first)")
+  set("A", function() M.attach_review_to_task(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: attach review to in-progress task")
+  set("G", function() M.get_pr_for_repo(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: fetch PR branch and create worktree (GetPR)")
+  set("N", function() M.create_pr_for_worktree(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: create PR for worktree (CreatePR)")
   set("?", _help, "auto-finder.repos: help")
 end
 
@@ -1759,29 +2413,149 @@ function M.on_focus(panel_winid, bufnr)
   _render(bufnr)
 end
 
----can_resume reports whether a diff has been opened this session and can be
----reopened where it was left. The <C-g> modal probes this to decide whether to
----offer the entry at all.
+---_state_file returns the durable path to the serialized diff session.
+function M._state_file()
+  if M._custom_state_file then return M._custom_state_file end
+  return vim.fn.stdpath("state") .. "/auto-finder/last-diff.json"
+end
+
+---_persist_resume writes M._resume to disk atomically.
+function M._persist_resume()
+  if not M._resume then return end
+  local ok_atomic, fs_atomic = pcall(require, "auto-core.fs.atomic")
+  if not ok_atomic or type(fs_atomic.write) ~= "function" then return end
+  local payload = {
+    repo_slug = M._resume.repo_slug,
+    common_dir = M._resume.common_dir,
+    worktree_path = M._resume.worktree_path,
+    target_kind = M._resume.target_kind,
+    sha = M._resume.sha,
+    pr_number = M._resume.pr_number,
+    active_file = M._resume.active_file,
+    active_idx = M._resume.active_idx,
+    focused_pane = M._resume.focused_pane,
+    file_positions = M._resume.file_positions,
+    timestamp = M._resume.timestamp or os.time(),
+  }
+  pcall(fs_atomic.write, M._state_file(), vim.json.encode(payload), { mkdir = true })
+end
+
+---_hydrate_resume loads M._resume from disk if not present in memory.
+function M._hydrate_resume()
+  if M._resume ~= nil then return M._resume end
+  local state_path = M._state_file()
+  if vim.fn.filereadable(state_path) ~= 1 then return nil end
+  local ok, content = pcall(vim.fn.readfile, state_path)
+  if not ok or not content or #content == 0 then return nil end
+  local raw = table.concat(content, "\n")
+  local dok, data = pcall(vim.json.decode, raw)
+  if not dok or type(data) ~= "table" then return nil end
+  M._resume = data
+  return M._resume
+end
+
+---can_resume reports whether a diff has been opened this session (or saved from a
+---previous session) and can be reopened where it was left. The <C-g> modal probes
+---this to decide whether to offer the entry at all.
 ---@return boolean
 function M.can_resume()
-  return M._resume ~= nil
+  return M._hydrate_resume() ~= nil
 end
 
 ---resume_diff reopens the last diff at the reader's last position. This is what
 ---makes leaving the diff to check a file (the `o` key) safe: the way back is one
 ---gesture, from anywhere, through the navigation modal.
 function M.resume_diff()
-  local r = M._resume
-  if not r or not r.row then
+  local r = M._hydrate_resume()
+  if not r then
     logger.notify("repos: no diff to resume — open one with o first",
       { level = vim.log.levels.INFO })
     return
   end
-  M.open_diff(r.row, { initial = r.pos })
+
+  -- Validate repo and worktree directories exist on disk
+  local repo_dir = r.common_dir or (r.row and r.row.repo and r.row.repo.common_dir)
+  local wt_path = r.worktree_path or (r.row and r.row.worktree and r.row.worktree.path)
+  if (repo_dir and vim.fn.isdirectory(repo_dir) ~= 1) or (wt_path and vim.fn.isdirectory(wt_path) ~= 1) then
+    M._resume = nil
+    pcall(vim.fn.delete, M._state_file())
+    logger.notify("repos: previous diff target repository/worktree no longer exists",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local row = r.row
+  if not row then
+    local backend = _repos()
+    local repo_obj = nil
+    if backend and type(backend.repos) == "function" then
+      for _, repo in ipairs(backend.repos() or {}) do
+        if repo.slug == r.repo_slug or repo.common_dir == r.common_dir then
+          repo_obj = repo
+          break
+        end
+      end
+    end
+    if not repo_obj then
+      repo_obj = {
+        slug = r.repo_slug,
+        common_dir = r.common_dir,
+        path = r.worktree_path,
+        sample_worktree = r.worktree_path,
+      }
+    end
+    local wt_obj = nil
+    if backend and type(backend.worktrees) == "function" and repo_obj then
+      for _, wt in ipairs(backend.worktrees(repo_obj) or {}) do
+        if wt.path == r.worktree_path then
+          wt_obj = wt
+          break
+        end
+      end
+    end
+    if not wt_obj and r.worktree_path then
+      wt_obj = { path = r.worktree_path }
+    end
+    local node_obj = {
+      kind = r.target_kind,
+      sha = r.sha,
+      short = r.sha and r.sha:sub(1, 7) or (r.target_kind == "uncommitted" and "UNCOMMITTED" or ""),
+      pr_number = r.pr_number,
+      commit = { subject = "" },
+    }
+    row = {
+      kind = r.target_kind,
+      repo = repo_obj,
+      worktree = wt_obj,
+      node = node_obj,
+    }
+  end
+
+  local initial = {
+    path = r.active_file,
+    active_file = r.active_file,
+    idx = r.active_idx,
+    active_idx = r.active_idx,
+    pane = r.focused_pane,
+    focused_pane = r.focused_pane,
+    file_positions = r.file_positions,
+    lnum = (r.file_positions and r.active_file and r.file_positions[r.active_file] and r.file_positions[r.active_file].lnum) or (r.pos and r.pos.lnum),
+    col = (r.file_positions and r.active_file and r.file_positions[r.active_file] and r.file_positions[r.active_file].col) or (r.pos and r.pos.col),
+  }
+
+  if r.target_kind == "pr" then
+    if not row.pr and r.pr_number then
+      row.pr = { number = r.pr_number }
+    end
+    M.open_pr_diff(row, { initial = initial })
+  else
+    M.open_diff(row, { initial = initial })
+  end
 end
 
 function M.on_close()
   _dispose_subscriptions()
+  M._persist_resume()
   -- DELETE the buffer, do not merely drop the pointer (ADR-0060 r1 SF1).
   -- `get_buffer` creates it with bufhidden=hide, so clearing `M._bufnr` alone
   -- leaked one named `auto-finder://repos` buffer per close/reopen — and per

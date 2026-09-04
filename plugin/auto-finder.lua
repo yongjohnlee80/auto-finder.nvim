@@ -52,3 +52,23 @@ end, {
   desc = "Reopen the last repos diff view at its last position",
 })
 
+vim.api.nvim_create_user_command("AutoFinderGetPR", function(opts)
+  require("auto-finder.views.repos.tree").get_pr_command(opts)
+end, {
+  nargs = "?",
+  desc = "Fetch PR branch and create worktree (ADR-0083)",
+})
+
+vim.api.nvim_create_user_command("AutoFinderCreatePR", function(opts)
+  require("auto-finder.views.repos.tree").create_pr_command(opts)
+end, {
+  desc = "Create PR for active branch (ADR-0083)",
+})
+
+vim.api.nvim_create_user_command("AutoFinderPostPRFeedback", function(opts)
+  require("auto-finder.views.repos.tree").post_pr_feedback_command(opts)
+end, {
+  nargs = "?",
+  desc = "Post review feedback to PR (ADR-0083)",
+})
+
