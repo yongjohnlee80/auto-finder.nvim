@@ -5693,7 +5693,19 @@ section(function()
   local id_done = todo.add({ id = "2026-05-30-p40-done",     title = "completed task"})
   todo.status(id_done, "completed")
   local id_ip   = todo.add({ id = "2026-05-30-p40-ip",       title = "in-progress task" })
-  todo.assign(id_ip, "agent:phase1")  -- auto-engages in-progress
+  -- Assign AND engage, explicitly. The comment here used to read
+  -- "auto-engages in-progress", and that stopped being true: auto-core
+  -- decoupled assignment from the status transition (86b0897, an ADR-0035 r5
+  -- amendment — "starting work should not be claimed purely because ownership
+  -- changed"). The fixture kept assigning and expecting a bucket move, so the
+  -- task stayed in `open` and FOUR assertions failed from one cause: no In
+  -- Progress header, the two order checks that reference it, and p40-open
+  -- rendering as ordinal 2 because Open now held two rows.
+  --
+  -- This is a fixture that has to say what it wants rather than rely on a
+  -- side effect of something else, which is the better shape regardless.
+  todo.assign(id_ip, "agent:phase1")
+  todo.status(id_ip, "in-progress")
   local id_auto = todo.add({ id = "2026-05-30-p40-auto",     title = "automated template" })
   todo.status(id_auto, "automated")
   local id_arch = todo.add({ id = "2026-05-30-p40-archived", title = "archived task" })
