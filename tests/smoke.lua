@@ -5820,6 +5820,51 @@ section(function()
     ok("p40: archived row not present in rows (collapsed sub-period)", true)
   end
 
+  -- 40e. ASSIGNMENT DOES NOT MOVE A TASK — the PANEL-VISIBLE half.
+  --
+  -- auto-core decoupled assignment from the status transition (86b0897,
+  -- ADR-0035 r5: "starting work should not be claimed purely because
+  -- ownership changed") and asserts that at the MODEL layer. What only this
+  -- repo can assert is the consequence a user sees: an assigned task still
+  -- renders under Open. auto-core has no panel, so that property has no other
+  -- home.
+  --
+  -- This is NOT covered by the fixture above, and the reason is worth stating
+  -- because it is why the cell exists: the fixture now calls assign AND
+  -- status, so it ARRANGES the state it wants and observes the decoupling
+  -- nowhere. Setup is not pinning. Without this cell, someone "fixing" the
+  -- panel by re-adding the move — here, or by asking auto-core to revert
+  -- deliberate work — meets nothing. (gold-man, #28 r0.)
+  local id_asg = todo.add({ id = "2026-05-30-p40-assigned-only",
+                            title = "assigned but not started" })
+  todo.assign(id_asg, "agent:phase1")
+  todo.refresh()
+  vim.wait(150, function() return false end)
+  if type(view.refresh) == "function" then pcall(view.refresh)
+  else view.get_buffer(panel_win) end
+  vim.wait(80, function() return false end)
+
+  local asg_row
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id == id_asg then asg_row = row end
+  end
+  ok("p40e: an assigned task is still status=open (assignment moved nothing)",
+    asg_row ~= nil and asg_row.task.status == "open",
+    "row=" .. tostring(asg_row ~= nil) .. " status="
+      .. tostring(asg_row and asg_row.task.status))
+
+  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local ln_open, ln_ip
+  for i, l in ipairs(lines) do
+    if not ln_open and l:find("Open %(") then ln_open = i end
+    if not ln_ip and l:find("In Progress %(") then ln_ip = i end
+  end
+  ok("p40e: …and it renders UNDER Open, above the In Progress header",
+    asg_row and ln_open and ln_ip
+      and asg_row.lnum > ln_open and asg_row.lnum < ln_ip,
+    ("row lnum=%s, Open header=%s, In Progress header=%s")
+      :format(tostring(asg_row and asg_row.lnum), tostring(ln_open), tostring(ln_ip)))
+
   if vim.api.nvim_win_is_valid(panel_win) then
     pcall(vim.api.nvim_win_close, panel_win, true)
   end
