@@ -180,6 +180,12 @@ SUITES=(
   "adr0065-p3|tests/adr0065-p3-submit.lua"
   # ADR-0069 - semantic auto-core git-read call-site migration.
   "adr0069-git-reads|tests/adr0069-git-reads.lua"
+  # ADR-0083 - attach review feedback to in-progress task.
+  "adr0083-attach|tests/adr0083-repos-task-attach.lua"
+  # ADR-0083 - diff resumption and session persistence.
+  "adr0083-resume|tests/adr0083-diff-resumption.lua"
+  # ADR-0083 - PR row rendering, child reviews, dissociation, and PR actions.
+  "adr0083-pr-tree|tests/adr0083-repos-pr-tree.lua"
 )
 
 # The XDG contract binds EVERY runnable entrypoint, not only the ones
