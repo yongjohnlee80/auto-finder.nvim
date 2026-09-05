@@ -2,6 +2,45 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.21] — 2026-09-05 — four probes stop closing the panel they were told not to touch
+
+Patch. Tests only — no Lua surface changed.
+
+Four probes did `topleft split <file>` believing they created a window to
+close. Measured on the real panel: the split makes a window, has the edit
+into it refused, unwinds the window, loads the file INTO the panel, and
+reports success throughout — `wins 2->2, ok=true, err=nil`. So
+`close(nvim_get_current_win())` closed the panel.
+
+**It is not `winfixbuf`**, which is worth recording because the obvious
+diagnosis is wrong and I shipped an assertion that said otherwise before
+measuring it away. A synthetic window with `winfixbuf=true` creates a
+window normally — as do `buftype=nofile`, both together, and a plain
+window. Only the real panel swallows the split, so it is the panel's own
+autocmds. That has a consequence beyond this suite: a rule of the form
+"pick a window with `buftype == "" and not winfixbuf`" cannot see this
+case.
+
+Probes now go through a helper that moves off any window refusing buffer
+changes, splits, and RETURNS the window; cleanups close the window they
+were given rather than whatever happens to be current. Asserted per call,
+because a helper that silently stopped creating a window would put every
+caller back to closing the panel.
+
+**Accidental panel closes per run: 7 → 0.** The four that remain are
+designed teardowns — `slot_remove` and the `worktree:switched` publish —
+identified by making the counter record a traceback rather than by
+reading the diff. The old "seven" conflated four accidents with designed
+teardowns and masked a fifth: a probe closing the panel first made one
+teardown unreachable, because you cannot close it twice.
+
+One of the five split sites is deliberately unchanged. The terminal probe
+runs from the panel, so `:terminal` fails and its three assertions have
+never executed; converting it makes them run and they do not hold as
+written. Its skip branch no longer reports a PASS — `ok(name, true)` on a
+cell that ran nothing had been inflating the summary line by one, which
+is the same family as an aborted suite reporting zero failures.
+
 ## [v0.4.20] — 2026-09-05 — two things the suite believed that were no longer true
 
 Patch. Tests and CI only — no Lua surface changed.
