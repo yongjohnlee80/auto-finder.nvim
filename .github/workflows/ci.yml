@@ -170,6 +170,20 @@ jobs:
           # reporting the reassuring answer for every input, which is worse than
           # no instrument. Caught by reading the step's OUTPUT rather than its
           # exit status.
+          # The pin appears TWICE in this file: the install step consumes it,
+          # this step reports on it. Assert they are the SAME. When this design
+          # was rolled out to the four sibling repos, this step arrived carrying
+          # THIS repo's SHA — so all four would have reported the age of a pin
+          # they do not use, in a step whose whole job is to notice staleness.
+          # Nothing about the copy looked wrong; it was found by comparing the
+          # two values. The guard lives here too so the family is identical and
+          # the next copy inherits it.
+          seen="$(grep -oE 'AUTO_CORE_REF: "[0-9a-f]{40}"' .github/workflows/ci.yml \
+                   | grep -oE '[0-9a-f]{40}' | sort -u | wc -l)"
+          if [ "$seen" -ne 1 ]; then
+            echo "::error title=pin mismatch::this workflow names ${seen} different auto-core pins; the age below would describe the wrong one"
+            exit 1
+          fi
           missing="$(gh api \
             "repos/yongjohnlee80/auto-core.nvim/compare/${AUTO_CORE_REF}...main" \
             --jq '.ahead_by' 2>/dev/null || true)"
