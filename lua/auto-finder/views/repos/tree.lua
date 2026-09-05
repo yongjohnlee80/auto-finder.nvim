@@ -877,14 +877,14 @@ end
 ---— requirement 8's "see agent's or my review feedback right on the panel".
 function M.open_diff(row, opts)
   local backend = _repos()
-  if not (backend and row and row.repo) then return end
+  if not (backend and row and row.repo) then return false, "missing backend or repo" end
   local node = row.node
   local uncommitted = node and node.kind == "uncommitted"
   local sha = node and node.sha
   if not sha and not uncommitted then
     logger.notify("repos: put the cursor on a commit or UNCOMMITTED to diff it",
       { level = vim.log.levels.WARN })
-    return
+    return false, "no commit or uncommitted target"
   end
   -- Guarded because `diff()` reaches into auto-core's diff parser. availability
   -- is probed up front, but an unprotected call here surfaced as a raw keymap
@@ -902,14 +902,14 @@ function M.open_diff(row, opts)
   if not dok then
     logger.notify("repos: cannot diff — " .. tostring(files),
       { level = vim.log.levels.ERROR })
-    return
+    return false, "cannot diff"
   end
   files = files or {}
   if #files == 0 then
     logger.notify("repos: no diff for "
-      .. tostring(uncommitted and "UNCOMMITTED" or row.node.short),
+      .. tostring(uncommitted and "UNCOMMITTED" or (row.node and row.node.short) or sha),
       { level = vim.log.levels.WARN })
-    return
+    return false, "no diff"
   end
 
   -- Merge every revision's comments, newest revision last so a later pass
@@ -1184,7 +1184,7 @@ function M.open_diff(row, opts)
     -- Refusing on a narrow window is deliberate (auto-core sets MIN_COLUMNS):
     -- half a diff read as a whole one is worse than none.
     logger.notify("repos: " .. tostring(err), { level = vim.log.levels.WARN })
-    return
+    return false, err
   end
 
   -- Feedback anchored to a line the diff does not show would otherwise vanish
@@ -1199,6 +1199,7 @@ function M.open_diff(row, opts)
       .. "this diff — " .. table.concat(names, ", "),
       { level = vim.log.levels.WARN })
   end
+  return true, handle
 end
 
 ---_submit_review collects the verdict and summary, then writes the pair.
@@ -1294,7 +1295,7 @@ end
 function M.open_pr_diff(row, opts)
   opts = opts or {}
   local backend = _repos()
-  if not (backend and row and row.repo) then return end
+  if not (backend and row and row.repo) then return false, "missing backend or repo" end
 
   local pr = row.pr
   local wt = row.worktree
@@ -1304,7 +1305,7 @@ function M.open_pr_diff(row, opts)
   if not pr then
     logger.notify("repos: put the cursor on a PR or a worktree with a PR to open PR diff",
       { level = vim.log.levels.WARN })
-    return
+    return false, "no PR found"
   end
 
   local base_branch = pr.base or pr.base_ref
@@ -1340,7 +1341,7 @@ function M.open_pr_diff(row, opts)
   if #all_files == 0 then
     logger.notify(string.format("repos: no changed files found for PR #%s", tostring(pr.number)),
       { level = vim.log.levels.WARN })
-    return
+    return false, "no diff"
   end
 
   local annotations = {}
@@ -1502,7 +1503,9 @@ function M.open_pr_diff(row, opts)
   })
   if not float then
     logger.notify("repos: cannot open diff — " .. tostring(err), { level = vim.log.levels.ERROR })
+    return false, err
   end
+  return true, float
 end
 
 ---post_pr_feedback posts review findings to PR inline (ADR-0083 §2.6 Action 4).
@@ -2115,18 +2118,49 @@ function M.remove_review(row)
         logger.notify("repos: could not read review JSON to dissociate — " .. tostring(rerr), { level = vim.log.levels.ERROR })
         return
       end
+      local did_change = false
       if ok_pr and pr_mod.dissociate_review then
-        pr_mod.dissociate_review(data, pr_num)
+        did_change = pr_mod.dissociate_review(data, pr_num)
       else
-        data.pr = nil
+        if tonumber(data.pr) == tonumber(pr_num) then
+          data.pr = nil
+          did_change = true
+        end
       end
+      if not did_change then
+        logger.notify(string.format("repos: review %s is not associated with PR #%s", label, tostring(pr_num)), { level = vim.log.levels.WARN })
+        return
+      end
+      local write_ok = false
+      local werr = nil
       if ok_store and store.write_json then
-        store.write_json(meta.path, data)
+        local wok, err = store.write_json(meta.path, data)
+        if wok then
+          write_ok = true
+        else
+          werr = err
+        end
       else
         local ok_atomic, fs_atomic = pcall(require, "auto-core.fs.atomic")
         if ok_atomic and fs_atomic.write then
-          fs_atomic.write(meta.path, vim.json.encode(data))
+          local wok, err = fs_atomic.write(meta.path, vim.json.encode(data))
+          if wok then
+            write_ok = true
+          else
+            werr = err
+          end
+        else
+          local wok, err = pcall(vim.fn.writefile, { vim.json.encode(data) }, meta.path)
+          if wok and err == 0 then
+            write_ok = true
+          else
+            werr = err or "write failed"
+          end
         end
+      end
+      if not write_ok then
+        logger.notify(string.format("repos: failed to save dissociated review %s: %s", label, tostring(werr or "write error")), { level = vim.log.levels.ERROR })
+        return
       end
       M.invalidate(nil)
       _rerender()
@@ -2450,6 +2484,13 @@ function M._hydrate_resume()
   local raw = table.concat(content, "\n")
   local dok, data = pcall(vim.json.decode, raw)
   if not dok or type(data) ~= "table" then return nil end
+  -- Validate payload carries necessary fields (N1)
+  if not (data.repo_slug or data.common_dir) or not data.target_kind then
+    return nil
+  end
+  if data.target_kind ~= "uncommitted" and not data.sha and not data.pr_number then
+    return nil
+  end
   M._resume = data
   return M._resume
 end
@@ -2470,7 +2511,7 @@ function M.resume_diff()
   if not r then
     logger.notify("repos: no diff to resume — open one with o first",
       { level = vim.log.levels.INFO })
-    return
+    return false, "no diff to resume"
   end
 
   -- Validate repo and worktree directories exist on disk
@@ -2481,7 +2522,7 @@ function M.resume_diff()
     pcall(vim.fn.delete, M._state_file())
     logger.notify("repos: previous diff target repository/worktree no longer exists",
       { level = vim.log.levels.WARN })
-    return
+    return false, "target repo or worktree no longer exists"
   end
 
   local row = r.row
@@ -2543,14 +2584,27 @@ function M.resume_diff()
     col = (r.file_positions and r.active_file and r.file_positions[r.active_file] and r.file_positions[r.active_file].col) or (r.pos and r.pos.col),
   }
 
+  local ok_open, open_err
   if r.target_kind == "pr" then
     if not row.pr and r.pr_number then
       row.pr = { number = r.pr_number }
     end
-    M.open_pr_diff(row, { initial = initial })
+    ok_open, open_err = M.open_pr_diff(row, { initial = initial })
   else
-    M.open_diff(row, { initial = initial })
+    ok_open, open_err = M.open_diff(row, { initial = initial })
   end
+
+  if ok_open == false then
+    -- Commit or target diff no longer exists (e.g. rebased, amended, force-pushed).
+    -- Retire stale resume state (SF1).
+    M._resume = nil
+    pcall(vim.fn.delete, M._state_file())
+    logger.notify(string.format("repos: previous diff target (%s) is stale; cleared resume state",
+      tostring(r.sha and r.sha:sub(1, 7) or r.target_kind or "target")),
+      { level = vim.log.levels.WARN })
+    return false, open_err
+  end
+  return true
 end
 
 function M.on_close()

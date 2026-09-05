@@ -258,6 +258,44 @@ local after_data = vim.json.decode(after_raw)
 ok("ADR-0083: review JSON file still exists on disk", vim.fn.filereadable(mock_pr_review.path) == 1)
 ok("ADR-0083: review JSON pr field was cleared (dissociated)", after_data.pr == nil)
 
+-- SF2 Test: review whose pr does not match reports unassociated, does NOT report success
+notes = {}
+tree.remove_review(found_pr_review_row)
+ok("SF2: unassociated review reports refusal warning",
+  last_note() and last_note().msg:find("is not associated with PR #42", 1, true) ~= nil,
+  vim.inspect(notes))
+local found_false_dissociated = false
+for _, n in ipairs(notes) do
+  if n.msg:find("dissociated review", 1, true) then found_false_dissociated = true end
+end
+ok("SF2: success was NOT falsely reported for unassociated review", found_false_dissociated == false)
+
+-- SF2 Test: write failure does not report success
+local orig_store_write = package.loaded["worktree.store"].write_json
+package.loaded["worktree.store"].write_json = function()
+  return false, "simulated disk error"
+end
+-- Reset pr to 42 on disk
+after_data.pr = 42
+vim.fn.writefile({ vim.json.encode(after_data) }, mock_pr_review.path)
+notes = {}
+tree.remove_review(found_pr_review_row)
+ok("SF2: failed write reports error",
+  last_note() and last_note().msg:find("failed to save dissociated review", 1, true) ~= nil,
+  vim.inspect(notes))
+found_false_dissociated = false
+for _, n in ipairs(notes) do
+  if n.msg:find("dissociated review", 1, true) and not n.msg:find("failed", 1, true) then
+    found_false_dissociated = true
+  end
+end
+ok("SF2: success was NOT falsely reported on write failure", found_false_dissociated == false)
+package.loaded["worktree.store"].write_json = orig_store_write
+
+-- Clean up and re-dissociate
+notes = {}
+tree.remove_review(found_pr_review_row)
+
 -- 7. Open PR diff (Action 2)
 local open_diff_called = false
 local mock_dv = {

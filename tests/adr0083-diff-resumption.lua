@@ -215,5 +215,57 @@ ok("M._resume cleared after stale detection", tree._resume == nil)
 ok("stale state file deleted", vim.fn.filereadable(test_state_file) == 0)
 ok("can_resume returns false after stale cleanup", tree.can_resume() == false)
 
+-- Test 7: SF1 — Stale commit diff (repo/worktree exist, but commit has no diff / rebased / amended)
+tree._resume = nil
+local stale_commit_payload = {
+  repo_slug = "test-repo",
+  common_dir = repo_dir,
+  worktree_path = wt_dir,
+  target_kind = "commit",
+  sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+  active_file = "file1.lua",
+  active_idx = 1,
+  focused_pane = "preview",
+  file_positions = {},
+  timestamp = os.time(),
+}
+require("auto-core.fs.atomic").write(test_state_file, vim.json.encode(stale_commit_payload), { mkdir = true })
+
+-- Mock diff returning empty for deadbeef
+local orig_diff = package.loaded["worktree.repos"].diff
+package.loaded["worktree.repos"].diff = function(repo, sha)
+  if sha:find("deadbeef") then return {} end
+  return orig_diff(repo, sha)
+end
+
+ok("can_resume reports true before invocation", tree.can_resume() == true)
+notes = {}
+local res_ok, res_err = tree.resume_diff()
+ok("SF1: resume_diff returns false on dead commit diff", res_ok == false)
+local found_no_diff = false
+local found_stale_cleared = false
+for _, n in ipairs(notes) do
+  if n.msg:find("no diff for") then found_no_diff = true end
+  if n.msg:find("stale; cleared resume state") then found_stale_cleared = true end
+end
+ok("SF1: no diff warning logged for dead commit", found_no_diff)
+ok("SF1: stale cleared warning logged", found_stale_cleared)
+ok("SF1: M._resume cleared after dead commit detection", tree._resume == nil)
+ok("SF1: stale state file removed from disk", vim.fn.filereadable(test_state_file) == 0)
+ok("SF1: can_resume returns false after dead commit cleanup", tree.can_resume() == false)
+package.loaded["worktree.repos"].diff = orig_diff
+
+-- Test 8: N1 — Empty or truncated payload validation in _hydrate_resume
+tree._resume = nil
+require("auto-core.fs.atomic").write(test_state_file, "{}", { mkdir = true })
+ok("N1: can_resume returns false for empty {} state file", tree.can_resume() == false)
+
+require("auto-core.fs.atomic").write(test_state_file, '{"repo_slug":"foo"}', { mkdir = true })
+ok("N1: can_resume returns false when target_kind is missing", tree.can_resume() == false)
+
+require("auto-core.fs.atomic").write(test_state_file, '{"repo_slug":"foo","target_kind":"commit"}', { mkdir = true })
+ok("N1: can_resume returns false when commit sha is missing", tree.can_resume() == false)
+pcall(vim.fn.delete, test_state_file)
+
 print(("\nTotal: %d passed, %d failed"):format(pass, fail))
 if fail > 0 then vim.cmd("cquit 1") else vim.cmd("qall!") end
