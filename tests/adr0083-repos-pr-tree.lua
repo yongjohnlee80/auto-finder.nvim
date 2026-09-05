@@ -7,10 +7,36 @@ for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
   if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
 end
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
-  for _, wt in ipairs({ "main", branch_dir }) do
-    local r = sib .. "/" .. plugin .. "/" .. wt
-    if vim.fn.isdirectory(r) == 1 then vim.opt.runtimepath:prepend(r) end
+  -- A candidate must be able to SERVE the request, not merely exist. These
+  -- suites need worktree.pr / worktree.repos.reviews_index and
+  -- auto-core.docstore; a checkout predating them cannot answer at all, and
+  -- because the LAST prepend wins, a stale sibling shadowed a current copy —
+  -- the suites aborted mid-run rather than reporting a count. Direction and
+  -- precedence are unchanged; LAZY joins as the lowest-precedence candidate.
+  local req = ({
+    ["worktree.nvim"]  = { "lua/worktree/repos.lua", "function M.reviews_index" },
+    ["auto-core.nvim"] = { "lua/auto-core/docstore/init.lua", "function M.write_json" },
+  })[plugin]
+  local function serves(r)
+    if not req then return true end
+    local f = r .. "/" .. req[1]
+    if vim.fn.filereadable(f) ~= 1 then return false end
+    for _, line in ipairs(vim.fn.readfile(f)) do
+      if line:find(req[2], 1, true) then return true end
+    end
+    return false
   end
+  local roots, fallback = {}, nil
+  for _, r in ipairs({ LAZY .. "/" .. plugin,
+                       sib .. "/" .. plugin .. "/main",
+                       sib .. "/" .. plugin .. "/" .. branch_dir }) do
+    if vim.fn.isdirectory(r) == 1 then
+      if serves(r) then roots[#roots + 1] = r
+      elseif not fallback then fallback = r end
+    end
+  end
+  if #roots == 0 and fallback then roots[1] = fallback end
+  for _, r in ipairs(roots) do vim.opt.runtimepath:prepend(r) end
 end
 vim.opt.runtimepath:prepend(root)
 vim.o.columns, vim.o.lines = 200, 60

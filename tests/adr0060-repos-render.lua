@@ -16,16 +16,53 @@ local branch_dir = vim.fn.fnamemodify(root, ":t")
 for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
   if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
 end
+-- The marker each dependency must actually PROVIDE for this suite to mean
+-- anything -- the same surfaces the loaded_from() assertions below check.
+-- A checkout lacking it is not an older version of the dependency, it is one
+-- that cannot answer the request at all.
+-- {file, symbol}: the file must exist AND name the symbol. A path check alone
+-- is too weak -- worktree/review.lua exists in checkouts far too old to carry
+-- reviews_index, so a stale sibling passed the marker and then failed at the
+-- call site with "attempt to call a nil value" halfway through the suite.
+local REQUIRED = {
+  ["worktree.nvim"]  = { "lua/worktree/repos.lua", "function M.reviews_index" },
+  ["auto-core.nvim"] = { "lua/auto-core/docstore/init.lua", "function M.write_json" },
+}
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
-  -- PREPEND, so the LAST entry wins: `main` first, the same-branch sibling
-  -- second, and the sibling therefore takes precedence. (The sibling suite
-  -- adr0065-p3 APPENDED with the same list order, which inverts the winner --
-  -- it resolved worktree to `main` and reported green against the old store
-  -- for a whole review round. Order and direction have to agree.)
-  for _, wt in ipairs({ "main", branch_dir }) do
-    local r = sib .. "/" .. plugin .. "/" .. wt
-    if vim.fn.isdirectory(r) == 1 then vim.opt.runtimepath:prepend(r) end
+  -- PREPEND, so the LAST entry wins: LAZY first, `main` next, the same-branch
+  -- sibling last, and the sibling therefore takes precedence. (The sibling
+  -- suite adr0065-p3 APPENDED with the same list order, which inverts the
+  -- winner -- it resolved worktree to `main` and reported green against the
+  -- old store for a whole review round. Order and direction have to agree.)
+  --
+  -- LAZY is a candidate now, and a candidate that cannot serve is SKIPPED.
+  -- Sibling precedence is deliberate and kept -- but it applied even to a
+  -- sibling that could not answer: on a machine whose auto-core.nvim/main sat
+  -- 39 commits behind (pre-docstore), this suite aborted at the assertion
+  -- below while a current copy sat in the lazy dir, unconsidered.
+  local req = REQUIRED[plugin]
+  local function serves(r)
+    if req == nil then return true end
+    local f = r .. "/" .. req[1]
+    if vim.fn.filereadable(f) ~= 1 then return false end
+    for _, line in ipairs(vim.fn.readfile(f)) do
+      if line:find(req[2], 1, true) then return true end
+    end
+    return false
   end
+  local candidates, fallback = {}, nil
+  for _, r in ipairs({ LAZY .. "/" .. plugin,
+                       sib .. "/" .. plugin .. "/main",
+                       sib .. "/" .. plugin .. "/" .. branch_dir }) do
+    if vim.fn.isdirectory(r) == 1 then
+      if serves(r) then candidates[#candidates + 1] = r
+      elseif not fallback then fallback = r end
+    end
+  end
+  -- Nothing qualifying: keep one anyway so the assertion below fails LOUDLY
+  -- naming the module, rather than this loop silently prepending nothing.
+  if #candidates == 0 and fallback then candidates[1] = fallback end
+  for _, r in ipairs(candidates) do vim.opt.runtimepath:prepend(r) end
 end
 vim.opt.runtimepath:prepend(root)
 
