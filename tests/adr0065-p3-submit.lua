@@ -26,6 +26,7 @@ package.path = root .. "/lua/?.lua;" .. root .. "/lua/?/init.lua;" .. package.pa
 -- reported it as truncated, which is exactly right and exactly why the summary
 -- sentinel exists — but a harness that pins a branch name will break again on
 -- the next branch, so this resolves by shape instead.
+local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 local sib = vim.fn.fnamemodify(root, ":h:h")
 local branch_dir = vim.fn.fnamemodify(root, ":t")
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
@@ -35,12 +36,42 @@ for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
   -- `worktree.*` to MAIN while claiming to test the paired branch. It reported
   -- green against the OLD store for an entire review round; lector's exact-head
   -- run failed correctly and mine could not have.
-  for _, wt in ipairs({ branch_dir, "main" }) do
-    local r = sib .. "/" .. plugin .. "/" .. wt
-    if vim.fn.isdirectory(r) == 1 then
-      vim.opt.runtimepath:append(r)
-      package.path = package.path .. ";" .. r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua"
+  -- A candidate must be able to SERVE the request, not merely exist. These
+  -- suites need worktree.repos.reviews_index / worktree.pr and
+  -- auto-core.docstore; a sibling checkout predating them is not an older
+  -- dependency, it is one that cannot answer -- and because the FIRST entry
+  -- wins here, a stale same-branch sibling shadowed a current copy and the
+  -- suite aborted mid-run ("could not load auto-core.docstore.write_json",
+  -- "module 'worktree.pr' not found"). Direction and order are unchanged; the
+  -- lazy dir is added as a last-resort candidate so a machine with stale
+  -- siblings still resolves something that works.
+  local req = ({
+    ["worktree.nvim"]  = { "lua/worktree/repos.lua", "function M.reviews_index" },
+    ["auto-core.nvim"] = { "lua/auto-core/docstore/init.lua", "function M.write_json" },
+  })[plugin]
+  local function serves(r)
+    if not req then return true end
+    local f = r .. "/" .. req[1]
+    if vim.fn.filereadable(f) ~= 1 then return false end
+    for _, line in ipairs(vim.fn.readfile(f)) do
+      if line:find(req[2], 1, true) then return true end
     end
+    return false
+  end
+  local roots, fallback = {}, nil
+  for _, r in ipairs({ sib .. "/" .. plugin .. "/" .. branch_dir,
+                       sib .. "/" .. plugin .. "/main",
+                       LAZY .. "/" .. plugin }) do
+    if vim.fn.isdirectory(r) == 1 then
+      if serves(r) then roots[#roots + 1] = r
+      elseif not fallback then fallback = r end
+    end
+  end
+  -- Nothing qualifying: keep one so the failure stays loud and names the module.
+  if #roots == 0 and fallback then roots[1] = fallback end
+  for _, r in ipairs(roots) do
+    vim.opt.runtimepath:append(r)
+    package.path = package.path .. ";" .. r .. "/lua/?.lua;" .. r .. "/lua/?/init.lua"
   end
 end
 
