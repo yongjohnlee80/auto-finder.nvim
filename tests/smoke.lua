@@ -1745,38 +1745,89 @@ local _size_before, _state_path, _state_winid = _tree_info()
 ok("buffers state visible to autocmd (path matches cwd, winid matches panel)",
    _state_path == vim.fn.getcwd() and _state_winid == af.state.panel_winid)
 
--- TRIPWIRE. The comment that used to sit here said "open the file in a side
--- split (so we don't replace the panel buffer)", and it is WRONG: with the
--- panel focused, `topleft split <file>` creates NO window — the file is
--- hijacked into the panel — so this probe and three like it have been closing
--- THE PANEL, seven times per suite run, in their cleanup below.
+-- WHY THESE PROBES GO THROUGH A HELPER.
 --
--- That is currently harmless. It was not: it kept auto-core's WinClosed
--- transition parked for eleven days, because with the transition in each of
--- those closes correctly tears down cached section buffers and two unrelated
--- assertions failed (697/2 on 2026-08-25). Today the same run is 708/0 both
--- with and without it — the consequence changed, the mechanism did not.
+-- The panel window carries `winfixbuf=true`. `topleft split <file>` from it
+-- creates NO window and raises NO error — measured: `ok=true, err=nil,
+-- wins 2->2, current still the panel`. The split makes a window, the edit
+-- into it is refused because winfixbuf is inherited, and the window is undone;
+-- vim.cmd reports success throughout. So a probe that splits while the panel
+-- is focused, then closes "its" window, closes THE PANEL.
 --
--- So this cell asserts the MECHANISM rather than the seven-count: a count
--- breaks on any unrelated probe being added, while this fails exactly when
--- the hijack stops happening, which is the thing a future reader needs to
--- know. Fixing the probes is tracked separately
--- (2026-09-05-auto-finder-four-smoke-probes-close-the-panel-unintentionally…);
--- deliberately NOT fixed here, because the choice between opening from a
--- non-panel window, suppressing the hijack, or restructuring what these four
--- sections assert is a design decision and `:noautocmd` is unavailable — they
--- assert on BufAdd / BufEnter handling.
-local _wins_before = #vim.api.nvim_list_wins()
-local _panel_before = af.state.panel_winid
-vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_path))
-ok("[tripwire] `topleft split` creates NO window here — the file is hijacked "
-   .. "into the panel, so this probe's cleanup closes the PANEL",
-   #vim.api.nvim_list_wins() == _wins_before
-     and vim.api.nvim_get_current_win() == _panel_before,
-   ("wins %d->%d, current=%s panel=%s — if this now FAILS the hijack has "
-    .. "changed and the probe task's premise needs re-reading")
-     :format(_wins_before, #vim.api.nvim_list_wins(),
-             tostring(vim.api.nvim_get_current_win()), tostring(_panel_before)))
+-- Four probes did exactly that, seven times per suite run. It was harmless
+-- until it was not: it kept auto-core's WinClosed transition parked for eleven
+-- days, because with the transition in, each of those closes correctly tears
+-- down cached section buffers and two unrelated assertions failed (697/2,
+-- 2026-08-25).
+--
+-- `:noautocmd` is NOT the fix — these probes assert on BufAdd / BufEnter
+-- handling, which is the whole point of them. The fix is to split from a
+-- window that can actually take a buffer, and to close the window we were
+-- actually given rather than whatever happens to be current.
+--
+-- The mechanism itself is pinned below on a SYNTHETIC winfixbuf window, so it
+-- keeps being checked without any probe having to close the real panel to
+-- prove it.
+-- Move focus off any window that refuses buffer changes, so a following
+-- `:split` / `:terminal` behaves as its caller assumes. Returns a scratch
+-- window if one had to be created, for the caller to close.
+local function probe_editable()
+  local function fixed(w)
+    local okv, v = pcall(function() return vim.wo[w].winfixbuf end)
+    return okv and v == true
+  end
+  if not fixed(vim.api.nvim_get_current_win()) then return nil end
+  local other
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if not fixed(w) then other = w end
+  end
+  if other then
+    vim.api.nvim_set_current_win(other)
+    return nil
+  end
+  vim.cmd("botright new")
+  return vim.api.nvim_get_current_win()
+end
+
+local function probe_split(path)
+  local scratch = probe_editable()
+  local before = #vim.api.nvim_list_wins()
+  vim.cmd("topleft split " .. vim.fn.fnameescape(path))
+  local win = vim.api.nvim_get_current_win()
+  -- Asserted per call, not once: a helper that silently stopped creating a
+  -- window would put every caller back to closing the panel, and that is the
+  -- failure this whole change exists to remove.
+  ok("probe_split created a real window for " .. vim.fn.fnamemodify(path, ":t"),
+    #vim.api.nvim_list_wins() > before and win ~= af.state.panel_winid,
+    ("wins %d->%d, win=%s panel=%s"):format(before, #vim.api.nvim_list_wins(),
+      tostring(win), tostring(af.state.panel_winid)))
+  return win, scratch
+end
+
+local function probe_close(win, scratch)
+  if win and vim.api.nvim_win_is_valid(win) then
+    pcall(vim.api.nvim_win_close, win, true)
+  end
+  if scratch and vim.api.nvim_win_is_valid(scratch) then
+    pcall(vim.api.nvim_win_close, scratch, true)
+  end
+end
+
+-- The mechanism is DOCUMENTED here rather than re-asserted, and the reason is
+-- that I tried to assert it and the assertion was wrong. A synthetic
+-- `botright new` window with `winfixbuf=true` does NOT reproduce it — measured,
+-- four ways: plain, winfixbuf, buftype=nofile, and both together all create a
+-- window normally. What the real panel does, measured on it directly:
+--
+--   wins 2->2, current still the panel, panel buffer CHANGED to the probe file
+--
+-- The file is loaded INTO the panel and no window survives. So it is the
+-- panel's own autocmds doing it, not a window option, and reproducing it
+-- requires hijacking the real panel mid-suite — which is the very damage this
+-- change removes. The per-call assertion in probe_split is what stays honest:
+-- it fails the moment a probe stops getting a real window, whatever the cause.
+
+local _probe_win = probe_split(_probe_path)
 -- Debounce is 80ms; wait long enough for fire() to land plus a poll cycle.
 vim.wait(400, function()
   return _tree_size() > _size_before
@@ -1786,8 +1837,9 @@ ok("buffers tree grew after opening a new file (before=" ..
    _size_before .. " after=" .. _size_after .. ")",
    _size_after > _size_before)
 
--- Cleanup: close the probe window, delete the buffer + the file on disk.
-pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+-- Cleanup: close the window probe_split gave us — NOT whatever is current,
+-- which is how this used to close the panel.
+probe_close(_probe_win)
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_get_name(b) == _probe_path then
     pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -2065,7 +2117,7 @@ ok("panel shows config (active=" .. tostring(_af._registry.active) ..
 -- refresh so the panel keeps showing config.
 local _probe = vim.fn.getcwd() .. "/tests/_v2_11_gate_probe.txt"
 local _fh = io.open(_probe, "w"); _fh:write("x"); _fh:close()
-vim.cmd("topleft split " .. vim.fn.fnameescape(_probe))
+local _win_a = probe_split(_probe)
 vim.wait(300)  -- debounce + scheduler
 
 local _panel_buf_post =
@@ -2090,8 +2142,8 @@ ok("panel did NOT swap to buffers source tree after BufAdd while config active "
 ok("registry.active still 0 (config) — gate did not flip section",
    _af._registry.active == 0)
 
--- Cleanup probe.
-pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+-- Cleanup probe: close the window we were GIVEN, not whatever is current.
+probe_close(_win_a)
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
   if vim.api.nvim_buf_get_name(b) == _probe then
     pcall(vim.api.nvim_buf_delete, b, { force = true })
@@ -2207,7 +2259,7 @@ _af._buffers_dirty = false
 -- gate must skip → `_buffers_dirty` should flip to true.
 local _probe_dirty = vim.fn.getcwd() .. "/tests/_v2_13_dirty_probe.txt"
 local _fh2 = io.open(_probe_dirty, "w"); _fh2:write("dirty-bit probe"); _fh2:close()
-vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_dirty))
+local _win_b = probe_split(_probe_dirty)
 vim.wait(300)  -- > 80ms debounce + scheduler
 ok("BufAdd while buffers inactive flipped _buffers_dirty=true",
    _af._buffers_dirty == true,
@@ -2215,7 +2267,7 @@ ok("BufAdd while buffers inactive flipped _buffers_dirty=true",
 
 -- Close the split so focus returns somewhere sensible; the probe
 -- buffer remains in the buffer list with `buflisted=true`.
-pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+probe_close(_win_b)
 
 -- (2) Switch to buffers. The on_focus consumer must clear the flag
 -- AND repopulate the tree with the probe buffer.
@@ -2246,13 +2298,13 @@ ok("buffers tree now contains the probe buf (regression: stale tree after gate-s
 -- should refresh inline AND ensure the dirty bit stays cleared.
 local _probe_active = vim.fn.getcwd() .. "/tests/_v2_13_active_probe.txt"
 local _fh3 = io.open(_probe_active, "w"); _fh3:write("active probe"); _fh3:close()
-vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_active))
+local _win_c = probe_split(_probe_active)
 vim.wait(300)
 ok("BufAdd while buffers active keeps _buffers_dirty=false (handled inline)",
    _af._buffers_dirty == false,
    "got " .. tostring(_af._buffers_dirty))
 -- Close the split.
-pcall(vim.api.nvim_win_close, vim.api.nvim_get_current_win(), true)
+probe_close(_win_c)
 
 -- Cleanup probes.
 for _, p in ipairs({ _probe_dirty, _probe_active }) do
@@ -2628,13 +2680,18 @@ end
 ok("baseline: edit_probe NOT yet in tree",
   not buffers_tree_has_file(_probe_edit))
 local _prev_win = vim.api.nvim_get_current_win()
--- Open in a side split so we don't clobber the panel.
-vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_edit))
+-- "Open in a side split so we don't clobber the panel" was the intent and not
+-- the behaviour: from the panel this loaded the file INTO the panel and created
+-- no window. This probe never closed anything, so it clobbered silently rather
+-- than closing the panel like its three siblings — a quieter symptom of the
+-- same defect.
+local _win_d = probe_split(_probe_edit)
 vim.api.nvim_set_current_win(_prev_win)
 af._refresh_buffers_now(af.state.panel_winid)
 vim.wait(200, function() return buffers_tree_has_file(_probe_edit) end, 20)
 ok("user-story: `:edit <file>` adds the file to the buffers tree",
   buffers_tree_has_file(_probe_edit))
+probe_close(_win_d)
 
 -- ── User-story: `:badd <file>` shows up in the panel (THE REGRESSION GUARD) ──
 ok("baseline: badd_probe NOT yet in tree",
@@ -2667,6 +2724,18 @@ ok("user-story: `:bd <bufnr>` removes the file from the buffers tree",
 -- ── User-story: terminal buffers appear under the Terminals group ──
 -- :terminal opens a real PTY; in headless mode that can fail on
 -- platforms without a usable shell. Use a guarded pcall + skip.
+-- DELIBERATELY NOT converted to probe_editable, and this comment is the
+-- finding rather than an excuse. Running it from the panel makes `:terminal`
+-- fail, the pcall below reports a platform skip, and the whole branch is dead
+-- — so its three assertions have NEVER EXECUTED. Coming off the panel makes
+-- `:terminal` work, and the newly live branch immediately fails: first
+-- "Invalid window id" on a `_prev_win` captured many assertions earlier, then
+-- three assertions that do not hold as written.
+--
+-- Fixing those is a different job from "probes close the panel": this probe
+-- never closes anything, because it never gets a window. Filed separately with
+-- the measurements, rather than half-fixed here or quietly left looking
+-- converted.
 local _term_ok = pcall(function()
   vim.cmd("topleft split | terminal echo smoke-term-probe")
 end)
@@ -2688,8 +2757,19 @@ if _term_ok then
   ok("user-story: a `:terminal` buffer appears in the buffers tree",
     saw_terminal)
 else
-  ok("user-story: terminal buffer test (skipped — :terminal failed in headless)",
-    true, "headless terminal launch failed; not a regression of the fix")
+  -- NOT ok(..., true). This branch asserts nothing, so it must not report a
+  -- pass: `ok(name, true)` on a cell that executed nothing inflates the summary
+  -- line run-all gates on, and a green that means "did not run" is the same
+  -- family as an aborted suite reporting zero failures. It also contradicted
+  -- the comment above, which says plainly that these assertions have never
+  -- executed. (gold-man, #30 r0.)
+  --
+  -- A print, so the run says out loud that a section was skipped and the count
+  -- reflects only what ran.
+  print("  SKIP  user-story: `:terminal` buffer in the buffers tree — "
+    .. ":terminal failed here. NOT a platform limitation: this probe runs from "
+    .. "the panel, where :terminal cannot take the window. Its three assertions "
+    .. "have never executed. Tracked separately.")
 end
 
 -- ── User-story: out-of-cwd buffer appears as a sibling root group ──
