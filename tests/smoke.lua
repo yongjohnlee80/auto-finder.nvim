@@ -1745,8 +1745,38 @@ local _size_before, _state_path, _state_winid = _tree_info()
 ok("buffers state visible to autocmd (path matches cwd, winid matches panel)",
    _state_path == vim.fn.getcwd() and _state_winid == af.state.panel_winid)
 
--- Open the file in a side split (so we don't replace the panel buffer).
+-- TRIPWIRE. The comment that used to sit here said "open the file in a side
+-- split (so we don't replace the panel buffer)", and it is WRONG: with the
+-- panel focused, `topleft split <file>` creates NO window — the file is
+-- hijacked into the panel — so this probe and three like it have been closing
+-- THE PANEL, seven times per suite run, in their cleanup below.
+--
+-- That is currently harmless. It was not: it kept auto-core's WinClosed
+-- transition parked for eleven days, because with the transition in each of
+-- those closes correctly tears down cached section buffers and two unrelated
+-- assertions failed (697/2 on 2026-08-25). Today the same run is 708/0 both
+-- with and without it — the consequence changed, the mechanism did not.
+--
+-- So this cell asserts the MECHANISM rather than the seven-count: a count
+-- breaks on any unrelated probe being added, while this fails exactly when
+-- the hijack stops happening, which is the thing a future reader needs to
+-- know. Fixing the probes is tracked separately
+-- (2026-09-05-auto-finder-four-smoke-probes-close-the-panel-unintentionally…);
+-- deliberately NOT fixed here, because the choice between opening from a
+-- non-panel window, suppressing the hijack, or restructuring what these four
+-- sections assert is a design decision and `:noautocmd` is unavailable — they
+-- assert on BufAdd / BufEnter handling.
+local _wins_before = #vim.api.nvim_list_wins()
+local _panel_before = af.state.panel_winid
 vim.cmd("topleft split " .. vim.fn.fnameescape(_probe_path))
+ok("[tripwire] `topleft split` creates NO window here — the file is hijacked "
+   .. "into the panel, so this probe's cleanup closes the PANEL",
+   #vim.api.nvim_list_wins() == _wins_before
+     and vim.api.nvim_get_current_win() == _panel_before,
+   ("wins %d->%d, current=%s panel=%s — if this now FAILS the hijack has "
+    .. "changed and the probe task's premise needs re-reading")
+     :format(_wins_before, #vim.api.nvim_list_wins(),
+             tostring(vim.api.nvim_get_current_win()), tostring(_panel_before)))
 -- Debounce is 80ms; wait long enough for fire() to land plus a poll cycle.
 vim.wait(400, function()
   return _tree_size() > _size_before
