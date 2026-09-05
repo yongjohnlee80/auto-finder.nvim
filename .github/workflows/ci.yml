@@ -1,0 +1,192 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # For the `drift` job below only — it must not run on a PR, and a schedule
+  # cannot be triggered by hand when you want to check it.
+  schedule:
+    - cron: "0 6 * * 1"   # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+# Least privilege: these jobs only read the tree.
+permissions:
+  contents: read
+
+# The EVENT is part of the group, and cancellation is limited to PRs.
+#
+# `github.ref` alone is not enough: on a `schedule` event it is the DEFAULT
+# BRANCH ref — the same value a push to main has — so a merge landing during
+# the Monday drift run would cancel it. A cancelled run is not a failure: it
+# reports nothing and looks like nothing happened, which is precisely how a
+# drift signal stops arriving without anyone noticing. That is the same failure
+# the drift job exists to prevent, arriving by another route. (gold-man, r1 O3.)
+#
+# cancel-in-progress is kept for pull_request, where a superseded run proves
+# nothing about the head that replaced it, and dropped everywhere else, where
+# each commit deserves its own verdict.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# auto-finder had no automated gate. `tests/run-all.sh` already turns a silent
+# abort into a loud failure — it parses each suite's summary line and treats its
+# ABSENCE as a hard failure, which is the only thing that catches a C-level
+# crash mid-run. CI does not reimplement that; it supplies the environment and
+# lets the runner be the judge.
+jobs:
+  lua:
+    runs-on: ubuntu-latest
+    # Generous because this is the largest suite in the family (17 test files).
+    # It bounds a hung job rather than expressing an expected duration.
+    timeout-minutes: 25
+    steps:
+      # Pinned by commit SHA, not by tag: a tag can be moved to different code
+      # under the same name.
+      #
+      # Deliberately NO branch-restoring step and no fetch-depth: 0. auto-core's
+      # workflow needs both because its suites read its own refs; these read
+      # none. Keeping `push` and `pull_request` behaviourally IDENTICAL is the
+      # point: the step auto-core needs there is the one that exits 128 here
+      # (actions/checkout checks the branch out on push rather than detaching),
+      # and an entry whose first firing is the merge cannot be witnessed
+      # beforehand — so the fix is to remove the per-entry difference.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: install neovim
+        env:
+          # Pinned by VERSION AND CHECKSUM. A GitHub release asset can be
+          # replaced under the same tag and name, so the version alone is not
+          # reproducible; the SHA-256 is the real pin. v0.12.5 is the version
+          # these suites were verified against locally. Recompute when bumping.
+          NVIM_VERSION: "v0.12.5"
+          NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
+        run: |
+          # --retry: a transient network blip should not fail a PR for reasons
+          # unrelated to its change.
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
+          echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # All pinned by commit, so an upstream change cannot become a mystery
+      # failure on an unrelated PR here. The cost of that pin — a consumer
+      # frozen against its dependencies can never observe an upstream
+      # regression — is paid by the `drift` job below, not by weakening this.
+      - name: install plugin dependencies
+        env:
+          AUTO_CORE_REF: "bc4d998bc22f0644b80e3e89cfe3e1b92d71d32a"  # main @ v0.2.15
+          WORKTREE_REF:  "1aedccca735b42b43b68f4e4f246669075ce03ae"
+          AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
+          PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
+          NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
+          NVIM_DAP_REF:  "c9a0738e45f1bd41d792a126941348dce661cf9b"
+        run: ./.github/install-deps.sh
+
+      # A runner's Neovim ships parsers for c, lua, vim, vimdoc, markdown and
+      # query ONLY. Everything else is something a developer installed once and
+      # stopped seeing — which is exactly how this stayed invisible: the suite
+      # was green on every machine with a parser lying around, and the first
+      # runner without one failed the rendering cells while reporting the scan
+      # as "complete". It completed, having found nothing.
+      #
+      # `go` only. The tests view delegates discovery to auto-run, and
+      # smoke-adr0048 is the one suite here that builds a language fixture — a Go
+      # one. There are no JS/TS fixtures anywhere in this tree, so auto-run's
+      # other three grammars are not this repo's dependency.
+      - name: install tree-sitter parsers
+        env:
+          LANGS: "go"
+        run: ./.github/install-parsers.sh
+
+      # Named "assert", not "verify", because it CAN fail: it compares the
+      # running nvim against the pin, and checks BOTH resolution shapes the
+      # suites use. A step named "verify" that only prints a version is the
+      # present-and-blind shape — it converts "nobody checked" into "checked
+      # and fine".
+      - name: assert the toolchain and both dependency shapes
+        env:
+          NVIM_VERSION: "v0.12.5"
+        run: |
+          got="$(nvim --version | head -1 | awk '{print $2}')"
+          echo "nvim: $got (pinned $NVIM_VERSION)"
+          test "$got" = "$NVIM_VERSION"
+          lazy="$HOME/.local/share/nvim/lazy"
+          siblings="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          for d in plenary.nvim nui.nvim nvim-dap auto-core.nvim worktree.nvim; do
+            test -d "$lazy/$d" || { echo "missing lazy/$d" >&2; exit 1; }
+          done
+          for d in auto-core.nvim worktree.nvim auto-run.nvim; do
+            test -d "$siblings/$d/main" || { echo "missing sibling $d/main" >&2; exit 1; }
+          done
+
+      - name: tests/run-all.sh
+        run: ./tests/run-all.sh
+
+  # CONSUMER DRIFT.
+  #
+  # The reason auto-core got CI first is that a regression there reaches its
+  # consumers before anyone notices — and a consumer pinned to a frozen
+  # auto-core is precisely the thing that cannot notice. Both properties are
+  # wanted and they conflict, so they are split rather than traded: `lua` pins
+  # and gates, this resolves auto-core at its DEFAULT BRANCH.
+  #
+  # Schedule and manual dispatch ONLY — deliberately not `push`. On push it
+  # would redden the merge run for an upstream change unrelated to the PR being
+  # merged, and would put a code path on the merge that no PR run exercised.
+  drift:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: install neovim
+        env:
+          NVIM_VERSION: "v0.12.5"
+          NVIM_SHA256: "bce0f56eda1f1b1db6eee8f4133d7a38813ea07933837dd1777411ca384c6875"
+        run: |
+          curl -fsSL --retry 3 --retry-delay 2 -o /tmp/nvim.tar.gz \
+            "https://github.com/neovim/neovim/releases/download/$NVIM_VERSION/nvim-linux-x86_64.tar.gz"
+          echo "$NVIM_SHA256  /tmp/nvim.tar.gz" | sha256sum -c -
+          sudo tar -C /opt -xzf /tmp/nvim.tar.gz
+          echo "/opt/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      # The ONE difference from `lua`: auto-core rides its default branch.
+      # Everything else stays pinned, so a failure here names auto-core rather
+      # than "something moved".
+      - name: install plugin dependencies (auto-core at HEAD)
+        env:
+          AUTO_CORE_REF: ""   # empty => default branch
+          WORKTREE_REF:  "1aedccca735b42b43b68f4e4f246669075ce03ae"
+          AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
+          PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
+          NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
+          NVIM_DAP_REF:  "c9a0738e45f1bd41d792a126941348dce661cf9b"
+        run: ./.github/install-deps.sh
+
+      # A runner's Neovim ships parsers for c, lua, vim, vimdoc, markdown and
+      # query ONLY. Everything else is something a developer installed once and
+      # stopped seeing — which is exactly how this stayed invisible: the suite
+      # was green on every machine with a parser lying around, and the first
+      # runner without one failed the rendering cells while reporting the scan
+      # as "complete". It completed, having found nothing.
+      #
+      # `go` only. The tests view delegates discovery to auto-run, and
+      # smoke-adr0048 is the one suite here that builds a language fixture — a Go
+      # one. There are no JS/TS fixtures anywhere in this tree, so auto-run's
+      # other three grammars are not this repo's dependency.
+      - name: install tree-sitter parsers
+        env:
+          LANGS: "go"
+        run: ./.github/install-parsers.sh
+
+      - name: report which auto-core is under test
+        run: |
+          siblings="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
+          git -C "$siblings/auto-core.nvim/main" log --oneline -1
+
+      - name: tests/run-all.sh
+        run: ./tests/run-all.sh
