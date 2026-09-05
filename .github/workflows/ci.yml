@@ -85,6 +85,22 @@ jobs:
           NVIM_DAP_REF:  "c9a0738e45f1bd41d792a126941348dce661cf9b"
         run: ./.github/install-deps.sh
 
+      # A runner's Neovim ships parsers for c, lua, vim, vimdoc, markdown and
+      # query ONLY. Everything else is something a developer installed once and
+      # stopped seeing — which is exactly how this stayed invisible: the suite
+      # was green on every machine with a parser lying around, and the first
+      # runner without one failed the rendering cells while reporting the scan
+      # as "complete". It completed, having found nothing.
+      #
+      # `go` only. The tests view delegates discovery to auto-run, and
+      # smoke-adr0048 is the one suite here that builds a language fixture — a Go
+      # one. There are no JS/TS fixtures anywhere in this tree, so auto-run's
+      # other three grammars are not this repo's dependency.
+      - name: install tree-sitter parsers
+        env:
+          LANGS: "go"
+        run: ./.github/install-parsers.sh
+
       # Named "assert", not "verify", because it CAN fail: it compares the
       # running nvim against the pin, and checks BOTH resolution shapes the
       # suites use. A step named "verify" that only prints a version is the
@@ -150,6 +166,22 @@ jobs:
           NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
           NVIM_DAP_REF:  "c9a0738e45f1bd41d792a126941348dce661cf9b"
         run: ./.github/install-deps.sh
+
+      # A runner's Neovim ships parsers for c, lua, vim, vimdoc, markdown and
+      # query ONLY. Everything else is something a developer installed once and
+      # stopped seeing — which is exactly how this stayed invisible: the suite
+      # was green on every machine with a parser lying around, and the first
+      # runner without one failed the rendering cells while reporting the scan
+      # as "complete". It completed, having found nothing.
+      #
+      # `go` only. The tests view delegates discovery to auto-run, and
+      # smoke-adr0048 is the one suite here that builds a language fixture — a Go
+      # one. There are no JS/TS fixtures anywhere in this tree, so auto-run's
+      # other three grammars are not this repo's dependency.
+      - name: install tree-sitter parsers
+        env:
+          LANGS: "go"
+        run: ./.github/install-parsers.sh
 
       - name: report which auto-core is under test
         run: |
