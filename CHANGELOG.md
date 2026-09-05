@@ -2,6 +2,48 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.19] — 2026-09-05 — CI on every PR, and a dependency candidate must be able to SERVE
+
+Patch. No public Lua surface changed.
+
+**This repo now has an automated gate** — the largest test tree in the
+family, 17 files, previously run only where someone happened to run it.
+`tests/run-all.sh` already turns a silent abort into a loud failure by
+treating a missing summary line as a hard failure; CI supplies the
+environment and lets the runner be the judge.
+
+The dependency list is enumerated from EVERY file under `tests/`, not
+from `smoke.lua`'s header — reading one file per repo and generalising
+is what hid a dependency during the sibling rollout, and it is the same
+error behind the guard bug below. The naive answers are wrong in both
+directions: `neo-tree` is not a dependency (the fork ships in-tree under
+`lua/auto-finder/neotree`), `gitgraph` is named only in a comment about
+a path not driven headless, and `api.nvim` is a grep matching
+`vim.api.nvim_*`. auto-core and worktree are needed in BOTH resolution
+shapes and are one clone plus a symlink, so the two cannot resolve to
+different code.
+
+**CI builds the tree-sitter parser the suite needs.** A runner's Neovim
+ships parsers for c, lua, vim, vimdoc, markdown and query only, and a Go
+parser is something a developer installs once and stops seeing — so the
+suite was green on every machine it had ever run on, and the first
+machine without one failed five rendering cells WHILE REPORTING THE SCAN
+AS COMPLETE. It completed, having found nothing. The step builds from a
+pinned grammar, asks Neovim where its data dir is rather than assuming,
+and verifies by PARSING: a file-exists check passes on a parser that
+cannot load, which produces the same empty tree as no parser at all.
+
+**`fix/adr0060-repos-suite` — a dependency candidate must be able to
+SERVE the request.** Four suites were red on one root cause: the sibling
+pick chose by path existence, so a checkout that predates the symbol
+under test won and the suite aborted mid-run
+(`could not load auto-core.docstore.write_json`, `module 'worktree.pr'
+not found`). Candidates now satisfy a per-plugin `{file, symbol}` table
+before they win precedence.
+
+*(Changelog note: `v0.4.17` and `v0.4.18` shipped without entries. This
+release does not backfill them.)*
+
 ## [v0.4.16] — 2026-09-03 — ADR-0081 P5: the draft moves to auto-core; drafts and push state in the tree
 
 Patch. `authoring`'s public functions keep their names; the store behind
