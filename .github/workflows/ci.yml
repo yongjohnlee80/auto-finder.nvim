@@ -77,7 +77,19 @@ jobs:
       # regression — is paid by the `drift` job below, not by weakening this.
       - name: install plugin dependencies
         env:
-          AUTO_CORE_REF: "bc4d998bc22f0644b80e3e89cfe3e1b92d71d32a"  # main @ v0.2.15
+          # Bumped v0.2.15 -> v0.2.18 DELIBERATELY, because this repo's tests
+          # now require it: p40e pins "assignment does not move a task", which
+          # auto-core only started guaranteeing at 86b0897 (ADR-0035 r5). The
+          # old pin predates that contract, so the cell failed on CI while
+          # passing everywhere else — the pin asserting an auto-core three
+          # releases old.
+          #
+          # A pin is still MANUAL and must stay so: a gating job that changes
+          # under a PR reintroduces exactly the mystery failure on unrelated
+          # work that pinning exists to prevent. This is a reviewed bump to a
+          # TAGGED release, not an automatic one, and the drift job remains the
+          # thing that notices when it goes stale again. (gold-man, #28 r0 Q2.)
+          AUTO_CORE_REF: "f07e2c2c66a6859408b7876ea1cd82ce2d8c3f07"  # main @ v0.2.18
           WORKTREE_REF:  "1aedccca735b42b43b68f4e4f246669075ce03ae"
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
           PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
