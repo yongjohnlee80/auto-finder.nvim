@@ -578,6 +578,125 @@ is in **[`AUTOMATION.md`](./AUTOMATION.md)**.
   (`v0.4.x`) until explicit approval to bump. See `CHANGELOG.md`
   for release-by-release notes.
 
+### Continuous integration
+
+`.github/workflows/ci.yml` runs two jobs, and the split between them is
+the point.
+
+**`lua` — the gate.** Every push to `main` and every pull request. It
+installs a pinned toolchain and hands the verdict to `tests/run-all.sh`.
+Everything is pinned, so a red run means *this change* rather than
+something that moved underneath it:
+
+| Pinned by | What | Why |
+|---|---|---|
+| commit SHA | `actions/checkout` | a tag can be moved to different code under the same name |
+| version **and SHA-256** | Neovim `v0.12.5` | a release asset can be replaced under the same tag and name, so the version alone is not reproducible |
+| commit SHA | `auto-core.nvim`, `worktree.nvim`, `auto-run.nvim`, `plenary.nvim`, `nui.nvim`, `nvim-dap` | reproducibility; the pin's age is reported (see below) |
+
+A runner's Neovim ships tree-sitter parsers for `c`, `lua`, `vim`,
+`vimdoc`, `markdown` and `query` **only** — every other parser is something
+a developer installed once and stopped seeing. So a suite that renders
+tree-sitter output is green on every machine with a parser lying around and
+red on the first runner without one. `.github/install-parsers.sh` builds
+`go`, and only `go` from pinned grammar sources.
+`smoke-adr0048` is the one suite here that builds a language
+fixture, and it is a Go one; there are no JS/TS fixtures anywhere in this
+tree, so auto-run's other three grammars are not this repo's dependency.
+
+**`drift` — the early warning.** The same suite, with **auto-core resolved
+at its default branch** instead of the commit `lua` pins. A regression in
+auto-core reaches its consumers before anyone notices, and a consumer
+pinned to a frozen auto-core is precisely the thing that cannot notice.
+Both properties are wanted and they conflict, so they are split rather
+than traded.
+
+`drift` runs on a **schedule (Mondays, 06:00 UTC) and manual dispatch
+only** — deliberately *not* on push or pull request. On push it would
+redden the merge run for an upstream change unrelated to the PR being
+merged, and would put a code path on the merge that no PR run exercised.
+
+#### `tests/run-all.sh` is the whole verdict
+
+CI does not reimplement the gate; it supplies the environment and lets the
+runner be the judge. `run-all.sh` runs every suite and treats a **missing**
+`N passed, M failed` summary line as a hard failure, rather than parsing
+whatever partial PASS lines a suite emitted before it stopped. That
+sentinel is the only thing that catches a C-level crash mid-run, which is
+why running a single suite by hand is **not** a substitute:
+
+```sh
+./tests/run-all.sh                              # the gate
+nvim --headless -u NONE -l tests/smoke.lua      # one suite, while iterating
+```
+
+#### A failing `drift` run has an addressee
+
+A red row in the Actions tab is not a signal — nobody is obliged to open
+it, and the one time a drift job caught a real regression in this family,
+it was caught because somebody dispatched it by hand while investigating
+something unrelated. Left to the schedule it would have gone red and sat
+there. So on failure the job opens an **issue**, which has an addressee
+that outlives a run's log retention and records *when* divergence started:
+
+- **One issue per repo**, found by the **`ci-drift` label**, not by title.
+  Title matching breaks the moment somebody edits the title — the next
+  failure opens a duplicate instead of commenting.
+- Reopened and commented rather than duplicated, so a month of Mondays is
+  one thread instead of four issues nobody triages.
+- **Closed automatically on the next green** drift run, with a comment
+  saying the divergence cleared.
+
+A `ci-drift` issue does **not** mean this plugin is broken for its users:
+the gating job pins auto-core and is green. It means auto-core has moved in
+a way this suite does not accept yet, and one of the two has to change
+before the pin is bumped.
+
+#### Exercising the notifier, and the pin's age
+
+`workflow_dispatch` takes a **`force_drift_failure`** boolean that fails the
+drift job deliberately:
+
+```sh
+gh workflow run ci.yml --repo yongjohnlee80/auto-finder.nvim --ref main \
+  -f force_drift_failure=true
+```
+
+The whole premise of the notifier is that an unread signal is not a signal
+— so an untested notifier is the same bug one layer up, and there has to be
+a way to make it fire without waiting for auto-core to break something.
+
+Proven here, both halves, on the real runner: a forced dispatch opened
+[#33](https://github.com/yongjohnlee80/auto-finder.nvim/issues/33)
+and the next green drift run closed it again.
+
+The `lua` job also reports **how stale the auto-core pin is**, as routine
+output rather than something discovered while debugging.
+This repo's pin comment once read
+`# main @ v0.2.15` while sitting eighteen commits and three releases
+behind, and the way that surfaced was a cell failing on CI while passing
+everywhere else.
+It is
+reported and never acted on: **bumping the pin is a deliberate, reviewed
+change, never automatic.** A gating job that changes under a PR
+reintroduces exactly the mystery failure on unrelated work that pinning was
+adopted to prevent.
+
+Two guards keep that report honest, and both exist because the first
+version was wrong:
+
+- It reads the compare API's **`ahead_by`**, not `behind_by`. For
+  `compare/PIN...main`, `behind_by` is always `0` when the pin is an
+  ancestor — the first version printed `0` on a pin eight commits stale,
+  ran green, and would have called the pin current for as long as the repo
+  existed. An unparseable answer now emits a `::warning` saying staleness
+  was **not determined**, because `0` reads as "current".
+- It **counts the `AUTO_CORE_REF` values in the file** and fails with
+  `::error` if there is more than one. When this design was rolled out
+  across the family, the step arrived carrying the pilot repo's SHA — every
+  copy would have reported the age of a pin it does not use, in a step
+  whose whole job is noticing staleness, with nothing about the copy
+  looking wrong.
 ## License
 
 MIT — © 2026 Yong Sung John Lee
