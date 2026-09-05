@@ -2,6 +2,56 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.20] — 2026-09-05 — two things the suite believed that were no longer true
+
+Patch. Tests and CI only — no Lua surface changed.
+
+**A cross-repo regression this repo's own CI could not see.** auto-core
+decoupled assignment from the status transition (`86b0897`, an ADR-0035
+r5 amendment: *"starting work should not be claimed purely because
+ownership changed"*). The `[40]` fixture had been assigning a task and
+relying on that side effect — its comment read "auto-engages
+in-progress" — so the task stayed in `open` and FOUR assertions failed
+from one cause: no In Progress header, the two section-order checks
+referencing it, and `p40-open` rendering as ordinal 2 because Open then
+held two rows. The fixture now assigns AND engages explicitly, which is
+the better shape regardless: a fixture should say what it wants rather
+than inherit it from a side effect of something else.
+
+It was found by the **`drift` job on its first real use**, not by any PR
+gate — the gating job pinned auto-core three releases back and was green
+throughout. That job exists precisely because a consumer pinned to a
+frozen dependency is the thing that cannot notice an upstream
+regression.
+
+**`[40e]` now pins the panel-visible half of that contract**: an
+assigned task still renders under Open, above the In Progress header.
+auto-core asserts the decoupling at the model layer and has no panel, so
+the consequence a user sees has no other home. It is not covered by the
+fixture above — that fixture now ARRANGES the state it wants and
+observes the decoupling nowhere. Setup is not pinning.
+
+**The gating auto-core pin moves v0.2.15 → v0.2.18, deliberately.** The
+new cell requires a contract the old pin predates by fifteen commits, so
+it failed on CI while passing everywhere else. A pin stays MANUAL — a
+gating job that changes under a PR reintroduces the mystery failure on
+unrelated work that pinning exists to prevent — and it is pinned to a
+TAGGED release rather than to `main`, because a tag is something a human
+chose to publish.
+
+**A tripwire for a hijack four probes depend on without knowing it.**
+With the panel focused, `topleft split <file>` creates NO window — the
+file is hijacked into the panel — so four probes have been closing THE
+PANEL in their cleanup, seven times per run. Harmless today; it kept
+auto-core's `WinClosed` transition parked for eleven days. The cell
+asserts the MECHANISM rather than the count, because a count breaks on
+any unrelated probe being added, which trains the next reader to edit
+the number instead of reading it. Fixing the probes is tracked
+separately: the choice between opening from a non-panel window,
+suppressing the hijack, or restructuring what those sections assert is a
+design decision, and `:noautocmd` is unavailable because they assert on
+`BufAdd` / `BufEnter`.
+
 ## [v0.4.19] — 2026-09-05 — CI on every PR, and a dependency candidate must be able to SERVE
 
 Patch. No public Lua surface changed.
