@@ -159,15 +159,35 @@ jobs:
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.
-          cmp="$(gh api "repos/yongjohnlee80/auto-core.nvim/compare/${AUTO_CORE_REF}...main" \
-                  --jq '{behind: .behind_by, ahead: .ahead_by}' 2>/dev/null || echo '{}')"
-          behind="$(printf '%s' "$cmp" | sed -n 's/.*"behind":[ ]*\([0-9]*\).*/\1/p')"
+          # AHEAD_BY, not behind_by. For `compare/BASE...HEAD` GitHub reports
+          # ahead_by as "commits HEAD has that BASE does not" — which with
+          # BASE=pin, HEAD=main is the number wanted here — and behind_by as
+          # the reverse, which for an ancestor pin is ALWAYS 0.
+          #
+          # The first version of this step read behind_by and printed
+          # "commits ... that this pin does NOT have: 0" on a pin eight commits
+          # stale. It ran green and said the pin was current: an instrument
+          # reporting the reassuring answer for every input, which is worse than
+          # no instrument. Caught by reading the step's OUTPUT rather than its
+          # exit status.
+          missing="$(gh api \
+            "repos/yongjohnlee80/auto-core.nvim/compare/${AUTO_CORE_REF}...main" \
+            --jq '.ahead_by' 2>/dev/null || true)"
           echo "auto-core pin: ${AUTO_CORE_REF}"
-          echo "commits on auto-core main that this pin does NOT have: ${behind:-unknown}"
-          if [ -n "$behind" ] && [ "$behind" -gt 0 ]; then
-            msg="the gating job tests a pinned auto-core; the drift job is what notices when the pin goes stale, and bumping it is a deliberate reviewed change, never automatic"
-            echo "::notice title=auto-core pin is ${behind} commits behind main::${msg}"
-          fi
+          case "$missing" in
+            ''|*[!0-9]*)
+              # Never silently 0: an unparseable answer is UNKNOWN, and it says
+              # so, because "0" here reads as "the pin is current".
+              echo "::warning title=auto-core pin age unknown::the compare API did not return a usable ahead_by; pin staleness was NOT determined"
+              ;;
+            *)
+              echo "commits on auto-core main that this pin does NOT have: ${missing}"
+              if [ "$missing" -gt 0 ]; then
+                msg="the gating job tests a pinned auto-core; the drift job is what notices when the pin goes stale, and bumping it is a deliberate reviewed change, never automatic"
+                echo "::notice title=auto-core pin is ${missing} commits behind main::${msg}"
+              fi
+              ;;
+          esac
 
       - name: tests/run-all.sh
         run: ./tests/run-all.sh
