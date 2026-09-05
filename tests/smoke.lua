@@ -2757,8 +2757,19 @@ if _term_ok then
   ok("user-story: a `:terminal` buffer appears in the buffers tree",
     saw_terminal)
 else
-  ok("user-story: terminal buffer test (skipped — :terminal failed in headless)",
-    true, "headless terminal launch failed; not a regression of the fix")
+  -- NOT ok(..., true). This branch asserts nothing, so it must not report a
+  -- pass: `ok(name, true)` on a cell that executed nothing inflates the summary
+  -- line run-all gates on, and a green that means "did not run" is the same
+  -- family as an aborted suite reporting zero failures. It also contradicted
+  -- the comment above, which says plainly that these assertions have never
+  -- executed. (gold-man, #30 r0.)
+  --
+  -- A print, so the run says out loud that a section was skipped and the count
+  -- reflects only what ran.
+  print("  SKIP  user-story: `:terminal` buffer in the buffers tree — "
+    .. ":terminal failed here. NOT a platform limitation: this probe runs from "
+    .. "the panel, where :terminal cannot take the window. Its three assertions "
+    .. "have never executed. Tracked separately.")
 end
 
 -- ── User-story: out-of-cwd buffer appears as a sibling root group ──
