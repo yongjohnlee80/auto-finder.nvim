@@ -2,6 +2,53 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.23] — 2026-09-07 — authoring is a facade; the domain layer moved down
+
+Patch. No behaviour changed. **Requires auto-core >= v0.2.22.**
+
+`views/repos/authoring.lua` went from 594 lines to 161. Every name it defined
+now lives in `auto-core.review.draft` and reads through by NAME — a function
+added there is reachable here the moment it exists, and one renamed there fails
+loudly here rather than silently resolving to a stale local copy.
+`authoring.scope` *is* `auto-core.review.draft.scope`, the same function object,
+so no caller needed an edit.
+
+**`submit` stays here.** It is the only function that reaches sideways rather
+than down: it needs `worktree.review` to write the pair, and auto-core depends
+on neither of its consumers.
+
+Why the rest went: the draft STORE moved to auto-core in ADR-0081 §2.2, for a
+reason its own comment stated — *"the plugin holding it was the one no other
+plugin may depend on."* The domain layer over that store stayed here, so the
+trap stayed with it, and it closed the moment worktree.nvim's graph wanted to
+open a commit for review and had to reach UP into auto-finder.
+
+One real defect surfaced by the cut, worth recording because a careful audit
+missed it: `submit` called `_kb_root()`, a file-local that moved down with
+everything else. **A local does not read through a metatable**, so the half left
+behind broke — `attempt to call global '_kb_root' (a nil value)` — while the
+moved half was, correctly, complete and self-contained. `adr0065-p3-submit` and
+`adr0060-repos-render` ABORTED entirely, which the summary-sentinel rule counts
+as failed rather than as partial passes. Auditing one side of a cut does not
+establish that the other side still resolves. `kb_root` is public in auto-core
+v0.2.22 now, and `submit` asks for it rather than this plugin keeping a second
+copy.
+
+### The p40e smoke failures were never ours
+
+Two `tests/smoke.lua` p40e assertions (`todos.assign` auto-transitioning
+`open → in-progress`, which ADR-0035 r5 removed) had been reported as a
+pre-existing defect. They are **version lag in the suite's sibling
+resolution**: `tests/*.lua` resolve auto-core from `../auto-core.nvim/main`,
+and that shared worktree is pinned at auto-core **v0.1.62** by uncommitted work
+that blocks a fast-forward.
+
+    stale sibling  (auto-core 0.1.62) — 712 passed, 2 failed
+    current sibling (auto-core 0.2.22) — 714 passed, 0 failed
+
+Nothing to fix in either plugin. An agent running this suite against that
+worktree silently gets a years-stale auto-core and two phantom failures.
+
 ## [v0.4.22] — 2026-09-07 — the full-context toggle changed a label, not the diff
 
 Patch. No public Lua surface changed.
