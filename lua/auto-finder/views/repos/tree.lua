@@ -1134,11 +1134,28 @@ function M.open_diff(row, opts)
     end,
   })
 
+  -- Whole-file context (`X`) is not something the view can synthesise from the
+  -- patch: `auto-core.git.diff._sides_full` shells out to `git -C <dir> show
+  -- <rev>:<path>` for each side, so it needs a directory AND a revision. Given
+  -- neither it cannot read either side, falls through its
+  -- `if not blines and not alines` guard, and returns the HUNK render — while
+  -- the footer still reads `[context: full]`. The toggle then looked broken
+  -- because the only thing it changed was a label.
+  --
+  -- UNCOMMITTED has no sha: `uncommitted` routes _sides_full to `HEAD` for the
+  -- old side and the file on disk for the new one, which is the correct pair
+  -- for a working tree.
+  local diff_dir = (row.worktree and row.worktree.path)
+    or (row.repo and (row.repo.sample_worktree or row.repo.path or row.repo.common_dir))
+
   local handle, err = dv.open({
     files = files,
     annotations = annotations,
     annotate = annotate,
     keymaps = keymaps,
+    worktree = diff_dir,
+    sha = sha,
+    uncommitted = uncommitted or nil,
     -- Reopen where a prior session left off (requirement 6). nil on a first
     -- open; set only when `resume_diff` re-enters here.
     initial = (opts and opts.initial) or (row.file and { path = row.file.path }) or nil,
@@ -1377,7 +1394,14 @@ function M.open_pr_diff(row, opts)
   end
 
   local authoring = require("auto-finder.views.repos.authoring")
-  local wt_path = wt and wt.path or nil
+  -- A PR row does not always have a worktree — `pr_for_worktree` matches on
+  -- branch name, and the PR tree renders rows for PRs whose branch was never
+  -- checked out here. `wt.path or nil` then handed the view no directory and
+  -- whole-file context died the same silent death `open_diff` suffered: the
+  -- repo's own checkout answers `git show <rev>:<path>` just as well.
+  local wt_path = (wt and wt.path)
+    or (row.repo and (row.repo.sample_worktree or row.repo.path))
+    or nil
   local default_sha = commits[1] and commits[1].sha or "HEAD"
   local draft = authoring.draft(row.repo.slug, default_sha, { cwd = wt_path })
   draft.pr = pr.number
@@ -1466,6 +1490,11 @@ function M.open_pr_diff(row, opts)
     annotate = annotate,
     keymaps = keymaps,
     worktree = wt_path,
+    -- Every entry in `all_files` carries its own `commit_sha`, which `_show`
+    -- prefers. This is the floor under that: a file that somehow arrives
+    -- without one still resolves a revision instead of silently dropping to
+    -- the hunk render.
+    sha = default_sha,
     context = opts.context or "hunk",
     initial = opts.initial,
     on_close = function(pos)

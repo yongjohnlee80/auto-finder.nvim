@@ -186,6 +186,9 @@ SUITES=(
   "adr0083-resume|tests/adr0083-diff-resumption.lua"
   # ADR-0083 - PR row rendering, child reviews, dissociation, and PR actions.
   "adr0083-pr-tree|tests/adr0083-repos-pr-tree.lua"
+  # ADR-0083 - the full-context toggle must RENDER full context, not just
+  # flip a label. Drives `X` against a real git repo.
+  "adr0083-fullctx|tests/adr0083-diffview-full-context.lua"
 )
 
 # The XDG contract binds EVERY runnable entrypoint, not only the ones
