@@ -2,6 +2,51 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.22] — 2026-09-07 — the full-context toggle changed a label, not the diff
+
+Patch. No public Lua surface changed.
+
+**Pressing `X` in the repos diff view flipped the footer to `[context: full]`
+and rendered exactly the same hunks.** Caught in a real review session: both
+panes still jumped line 6 to line 610 across a gap while the footer claimed
+full context.
+
+`auto-core.git.diff._sides_full` cannot synthesise whole-file context from a
+patch — it shells out to `git -C <dir> show <rev>:<path>` for each side. The
+hole was on this side: `M.open_diff`'s `dv.open` call passed `files`,
+`annotations`, `annotate`, `keymaps`, `initial`, `on_close` and `title`, and
+**none of `worktree`, `sha` or `uncommitted`**. So `_state.worktree` and
+`_state.sha` were nil on every commit diff and "full" was unreachable by
+construction — the toggle's only observable effect was a label.
+
+Measured before the fix, on a real commit:
+
+```
+file: dao/bigquery/bigquery_integration_test.go   hunks: 2
+hunk rows                     =  29
+full, as open_diff called it  =  29   <- identical
+full, with worktree + sha     = 154
+```
+
+`open_pr_diff` had the same hole one step out. Its worktree came from
+`wt and wt.path or nil`, and a PR row does not always have one —
+`pr_for_worktree` matches on branch name, so the tree renders rows for PRs
+whose branch was never checked out locally. Both call sites now fall back to
+the repo's own checkout (`sample_worktree`, then `path`), which answers
+`git show <rev>:<path>` just as well.
+
+Pairs with `auto-core` **v0.2.20**, which makes the same failure *visible*
+rather than silent: `sides()` now reports a `degraded` field and the footer
+prints `[context: full UNAVAILABLE]` when the file cannot be read.
+
+New `tests/adr0083-diffview-full-context.lua` drives the real `X` keystroke
+against a real two-commit git repo whose edits sit 36 lines apart, and asserts
+on the **rendered row count** rather than the state flag — the flag was never
+the thing that was broken. It opens with a baseline check that the fixture
+actually has a gap, so the assertions cannot pass by observing nothing.
+Mutation-checked both ways: reverting the `open_diff` pass-through reds 4
+cells, reverting the PR fallback reds 2, and neither disturbs the other's.
+
 ## [v0.4.21] — 2026-09-05 — four probes stop closing the panel they were told not to touch
 
 Patch. Tests only — no Lua surface changed.
