@@ -82,7 +82,17 @@ for _, km in ipairs(keymaps) do
 end
 
 ok("ADR-0083: 'O' keymap bound on repos panel", km_map["O"] ~= nil)
-ok("ADR-0083: 'O' keymap describes PR diff", km_map["O"] and km_map["O"].desc:find("diff PR", 1, true) ~= nil)
+-- `O` is the GROUPED diff and covers THREE row kinds as of 2026-09-08 — a PR,
+-- a worktree against its base, and a single commit. The description has to
+-- name the two range targets, because it is what `?` and which-key show and a
+-- reader who only sees "diff PR" will not discover the worktree case.
+--
+-- A description is a proxy for behaviour, so it is not left as the only
+-- evidence: tests/adr0083-worktree-diff.lua dispatches the key for real.
+ok("ADR-0083: 'O' keymap describes the grouped diff over PR *and* worktree",
+  km_map["O"] and km_map["O"].desc:find("PR", 1, true) ~= nil
+    and km_map["O"].desc:find("worktree", 1, true) ~= nil,
+  km_map["O"] and km_map["O"].desc or "nil")
 ok("ADR-0083: 'P' keymap bound on repos panel", km_map["P"] ~= nil)
 ok("ADR-0083: 'P' keymap describes PR feedback / push", km_map["P"] and km_map["P"].desc:find("post inline feedback", 1, true) ~= nil)
 ok("ADR-0083: 'G' keymap bound on repos panel", km_map["G"] ~= nil)

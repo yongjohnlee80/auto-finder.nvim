@@ -184,6 +184,12 @@ SUITES=(
   "adr0083-attach|tests/adr0083-repos-task-attach.lua"
   # ADR-0083 - diff resumption and session persistence.
   "adr0083-resume|tests/adr0083-diff-resumption.lua"
+  # 2026-09-08 - the Git Diff View over a WORKTREE's branch (requirement 2).
+  # Built on a real bare-ish git layout rather than a mocked backend: the whole
+  # question is which commits `<base>..<branch>` resolves to, and a stubbed
+  # `pr_diff` answers it by construction. That mock is exactly what hid the
+  # abbreviated-sha defect fixed in worktree.nvim#21.
+  "adr0083-wtdiff|tests/adr0083-worktree-diff.lua"
   # ADR-0083 - PR row rendering, child reviews, dissociation, and PR actions.
   "adr0083-pr-tree|tests/adr0083-repos-pr-tree.lua"
   # ADR-0083 - the full-context toggle must RENDER full context, not just

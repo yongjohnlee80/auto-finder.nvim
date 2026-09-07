@@ -62,6 +62,55 @@ local function _repos()
   return r
 end
 
+---_base_branch resolves the branch a repo's work diverges FROM.
+---
+---Delegated, never re-derived. `worktree.repos.base_branch` already asks
+---`origin/HEAD` first and falls back through local `main` / `master`, and it
+---caches per common-dir; the tree renders "(base)" markers from the same
+---answer, so a second implementation here would let the marker and the diff
+---range disagree about which branch is the base.
+---
+---This replaces two call sites that asked for `backend.resolve_base` — a
+---function worktree.nvim has never exported. Both were written
+---`type(...) == "function" and ...`, so they never errored and never ran:
+---the base silently defaulted to the literal "main" on every repo, including
+---ones whose default branch is not called that.
+---@param repo table
+---@return string? branch
+local function _base_branch(repo)
+  local backend = _repos()
+  if backend and type(backend.base_branch) == "function" then
+    local ok, b = pcall(backend.base_branch, repo)
+    if ok and type(b) == "string" and b ~= "" then return b end
+  end
+  return nil
+end
+
+---_range_commits lists the commits `head` adds on top of `base`, oldest first,
+---each with its changed files.
+---
+---The name is deliberately about the RANGE rather than about PRs. The backend
+---function is called `pr_diff` because a PR was its first caller, but nothing
+---in it is PR-specific: it runs `git log <base>..<head>`. A branch with no PR
+---asks the same question.
+---@param repo table
+---@param base string
+---@param head string
+---@return table[] commits
+local function _range_commits(repo, base, head)
+  local backend = _repos()
+  if backend and type(backend.pr_diff) == "function" then
+    local ok, c = pcall(backend.pr_diff, repo, base, head)
+    if ok and type(c) == "table" then return c end
+  end
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if ok_pr and type(pr_mod) == "table" and type(pr_mod.pr_diff_commits) == "function" then
+    local ok, c = pcall(pr_mod.pr_diff_commits, repo, base, head)
+    if ok and type(c) == "table" then return c end
+  end
+  return {}
+end
+
 -- ─── cache ────────────────────────────────────────────────────
 
 M._expanded = {}
@@ -1306,45 +1355,64 @@ function M._finish_submit(row, sha)
   end
 end
 
----open_pr_diff opens multi-commit PR diffview (ADR-0083 §2.6 Action 2).
----@param row table
----@param opts table?
-function M.open_pr_diff(row, opts)
+---The panel's FORMAL name, and the only place it is spelled.
+---
+---Johno, 2026-09-08: this panel and auto-agents' diff queue were both called
+---some variant of "diff view", which made a request like "close the diff view"
+---ambiguous and a keymap description misleading. They review different things
+---and now say so: THIS one shows commits against a base branch, so it is the
+---**Git Diff View**; auto-agents' queue of proposed agent edits is the **Agent
+---Edits Queue**.
+---
+---Exported rather than inlined at the float so a consumer naming the panel —
+---AutoVim's navigation modal does — reads the name from here instead of
+---keeping a second copy that can drift.
+M.PANEL_TITLE = "Git Diff View"
+
+---Deliberate shift off centre.
+---
+---Both panels are near-full-screen and both centred, so opening one over the
+---other read as a redraw rather than as a different panel. This one sits DOWN
+---and RIGHT; the Agent Edits Queue sits up and left by the same amount, giving
+---a visible offset in both axes without either leaving the middle of the
+---screen. auto-core clamps these to the available margin, so a small terminal
+---degrades to centred instead of pushing a pane off screen, and an auto-core
+---predating the option ignores them.
+M.PANEL_ROW_OFFSET = 2
+M.PANEL_COL_OFFSET = 6
+
+---Open a diffview over a RANGE of commits, with review authoring attached.
+---
+---One implementation, two callers: `open_pr_diff` (a PR's commits) and
+---`open_worktree_diff` (a branch's commits against its base). The two differ
+---only in how they NAME the range and where they resolve it from — everything
+---after that (expanding commits to files, gathering existing review
+---annotations, the authoring draft, the `s` submit key, the resume snapshot)
+---is identical. Written twice it would have drifted: the PR path already
+---carried three fixes the second one would not have had.
+---
+---@param spec table
+---  repo         table    the repo row's repo
+---  commits      table[]  ordered oldest-first; each { sha, short?, subject? }
+---  title        string   the float's title, already formatted
+---  target_kind  string   "pr" | "worktree" — recorded in the resume snapshot
+---  wt           table?   the worktree row, when there is one
+---  wt_path      string?  a directory that can answer `git show <rev>:<path>`
+---  pr           table?   PR metadata; PR-only annotation lookup + submit tag
+---  reviews_for  fun():table[]  existing review metadata for this range
+---  empty_msg    string   notified when the range has no changed files
+---@param opts table?  { context?, initial? }
+---@return boolean ok, any float_or_err
+local function _open_range_diff(spec, opts)
   opts = opts or {}
   local backend = _repos()
-  if not (backend and row and row.repo) then return false, "missing backend or repo" end
-
-  local pr = row.pr
-  local wt = row.worktree
-  if not pr and wt and type(backend.pr_for_worktree) == "function" then
-    pr = backend.pr_for_worktree(row.repo, wt)
-  end
-  if not pr then
-    logger.notify("repos: put the cursor on a PR or a worktree with a PR to open PR diff",
-      { level = vim.log.levels.WARN })
-    return false, "no PR found"
-  end
-
-  local base_branch = pr.base or pr.base_ref
-    or (type(backend.resolve_base) == "function" and backend.resolve_base(row.repo.common_dir))
-    or "main"
-  local pr_branch = pr.branch or (wt and wt.branch) or ("pr-" .. tostring(pr.number))
-
-  local commits = {}
-  if type(backend.pr_diff) == "function" then
-    commits = backend.pr_diff(row.repo, base_branch, pr_branch)
-  else
-    local ok_pr, pr_mod = pcall(require, "worktree.pr")
-    if ok_pr and type(pr_mod.pr_diff_commits) == "function" then
-      commits = pr_mod.pr_diff_commits(row.repo, base_branch, pr_branch)
-    end
-  end
+  local repo = spec.repo
 
   local all_files = {}
-  for _, c in ipairs(commits) do
+  for _, c in ipairs(spec.commits) do
     local files = {}
     if type(backend.diff) == "function" then
-      local dok, dfiles = pcall(backend.diff, row.repo, c.sha)
+      local dok, dfiles = pcall(backend.diff, repo, c.sha)
       if dok and type(dfiles) == "table" then files = dfiles end
     end
     for _, f in ipairs(files) do
@@ -1356,25 +1424,15 @@ function M.open_pr_diff(row, opts)
   end
 
   if #all_files == 0 then
-    logger.notify(string.format("repos: no changed files found for PR #%s", tostring(pr.number)),
-      { level = vim.log.levels.WARN })
+    logger.notify(spec.empty_msg, { level = vim.log.levels.WARN })
     return false, "no diff"
   end
 
   local annotations = {}
   local ok_rev, review = pcall(require, "worktree.review")
   if ok_rev then
-    local pr_revs = {}
-    if type(backend.reviews_for_pr) == "function" then
-      pr_revs = backend.reviews_for_pr(row.repo, pr.number)
-    else
-      for _, c in ipairs(commits) do
-        local revs = backend.reviews(row.repo, c.sha)
-        for _, r in ipairs(revs) do table.insert(pr_revs, r) end
-      end
-    end
-    for _, r_meta in ipairs(pr_revs) do
-      local ok_doc, doc = pcall(review.load, row.repo.slug, r_meta.commit or r_meta.sha, r_meta.revision)
+    for _, r_meta in ipairs(spec.reviews_for() or {}) do
+      local ok_doc, doc = pcall(review.load, repo.slug, r_meta.commit or r_meta.sha, r_meta.revision)
       if ok_doc and doc then
         for path, list in pairs(review.by_path(doc)) do
           annotations[path] = annotations[path] or {}
@@ -1390,21 +1448,13 @@ function M.open_pr_diff(row, opts)
   local ok_dv, dv = pcall(require, "auto-core.ui.diffview")
   if not ok_dv then
     logger.notify("repos: auto-core.ui.diffview is unavailable", { level = vim.log.levels.ERROR })
-    return
+    return false, "diffview unavailable"
   end
 
   local authoring = require("auto-finder.views.repos.authoring")
-  -- A PR row does not always have a worktree — `pr_for_worktree` matches on
-  -- branch name, and the PR tree renders rows for PRs whose branch was never
-  -- checked out here. `wt.path or nil` then handed the view no directory and
-  -- whole-file context died the same silent death `open_diff` suffered: the
-  -- repo's own checkout answers `git show <rev>:<path>` just as well.
-  local wt_path = (wt and wt.path)
-    or (row.repo and (row.repo.sample_worktree or row.repo.path))
-    or nil
-  local default_sha = commits[1] and commits[1].sha or "HEAD"
-  local draft = authoring.draft(row.repo.slug, default_sha, { cwd = wt_path })
-  draft.pr = pr.number
+  local default_sha = spec.commits[1] and spec.commits[1].sha or "HEAD"
+  local draft = authoring.draft(repo.slug, default_sha, { cwd = spec.wt_path })
+  if spec.pr then draft.pr = spec.pr.number end
 
   local annotate = {
     on_add = function(a)
@@ -1441,6 +1491,9 @@ function M.open_pr_diff(row, opts)
           logger.notify("repos: no findings to submit", { level = vim.log.levels.WARN })
           return
         end
+        -- Findings are grouped by the commit they were anchored on, NOT by the
+        -- range: a review belongs to a commit, and the range is only how the
+        -- reader arrived at it.
         local by_commit = {}
         for _, item in ipairs(draft.items) do
           local sha = item.commit or default_sha
@@ -1452,10 +1505,10 @@ function M.open_pr_diff(row, opts)
             schema = review.SCHEMA,
             commit = sha,
             revision = 1,
-            repo = { url = row.repo.url, owner = row.repo.slug, name = row.repo.label },
+            repo = { url = repo.url, owner = repo.slug, name = repo.label },
             reviewer = vim.g.auto_agents_name or "reviewer",
             reviewer_slug = vim.g.auto_agents_name or "reviewer",
-            pr = pr.number,
+            pr = spec.pr and spec.pr.number or nil,
             comments = {},
           }
           for _, it in ipairs(items) do
@@ -1467,8 +1520,12 @@ function M.open_pr_diff(row, opts)
               side = it.side or "RIGHT",
             })
           end
-          local md_body = string.format("# Review for commit %s (PR #%s)\n\nSubmitted from repos panel.\n", sha:sub(1, 7), tostring(pr.number))
-          local ok_save, serr = review.save_pair(row.repo.slug, rev_payload, md_body)
+          local md_body = spec.pr
+            and string.format("# Review for commit %s (PR #%s)\n\nSubmitted from repos panel.\n",
+              sha:sub(1, 7), tostring(spec.pr.number))
+            or string.format("# Review for commit %s (%s)\n\nSubmitted from repos panel.\n",
+              sha:sub(1, 7), spec.range_label or "range")
+          local ok_save, serr = review.save_pair(repo.slug, rev_payload, md_body)
           if not ok_save then
             logger.notify(string.format("repos: failed to save review for %s — %s", sha:sub(1, 7), tostring(serr)), { level = vim.log.levels.ERROR })
           end
@@ -1477,19 +1534,20 @@ function M.open_pr_diff(row, opts)
         M.invalidate(nil)
         _rerender()
         dv.close("submit")
-        logger.notify(string.format("repos: submitted review for PR #%s", tostring(pr.number)), { level = vim.log.levels.INFO })
+        logger.notify(spec.submitted_msg, { level = vim.log.levels.INFO })
       end,
     },
   }
 
-  local title = string.format(" PR #%s: %s ", tostring(pr.number), pr.title or "")
   local float, err = dv.open({
-    title = title,
+    title = spec.title,
     files = all_files,
     annotations = annotations,
     annotate = annotate,
     keymaps = keymaps,
-    worktree = wt_path,
+    worktree = spec.wt_path,
+    row_offset = M.PANEL_ROW_OFFSET,
+    col_offset = M.PANEL_COL_OFFSET,
     -- Every entry in `all_files` carries its own `commit_sha`, which `_show`
     -- prefers. This is the floor under that: a file that somehow arrives
     -- without one still resolves a revision instead of silently dropping to
@@ -1512,11 +1570,11 @@ function M.open_pr_diff(row, opts)
       end
 
       M._resume = {
-        repo_slug = row.repo and row.repo.slug,
-        common_dir = row.repo and row.repo.common_dir,
-        worktree_path = wt_path,
-        target_kind = "pr",
-        pr_number = pr.number,
+        repo_slug = repo and repo.slug,
+        common_dir = repo and repo.common_dir,
+        worktree_path = spec.wt_path,
+        target_kind = spec.target_kind,
+        pr_number = spec.pr and spec.pr.number or nil,
         sha = default_sha,
         active_file = cur_file,
         active_idx = cur_idx,
@@ -1524,7 +1582,7 @@ function M.open_pr_diff(row, opts)
         file_positions = file_positions,
         context = pos and pos.context,
         timestamp = os.time(),
-        row = row,
+        row = spec.row,
         pos = pos,
       }
       M._persist_resume()
@@ -1535,6 +1593,152 @@ function M.open_pr_diff(row, opts)
     return false, err
   end
   return true, float
+end
+
+---open_pr_diff opens multi-commit PR diffview (ADR-0083 §2.6 Action 2).
+---@param row table
+---@param opts table?
+function M.open_pr_diff(row, opts)
+  opts = opts or {}
+  local backend = _repos()
+  if not (backend and row and row.repo) then return false, "missing backend or repo" end
+
+  local pr = row.pr
+  local wt = row.worktree
+  if not pr and wt and type(backend.pr_for_worktree) == "function" then
+    pr = backend.pr_for_worktree(row.repo, wt)
+  end
+  if not pr then
+    logger.notify("repos: put the cursor on a PR or a worktree with a PR to open PR diff",
+      { level = vim.log.levels.WARN })
+    return false, "no PR found"
+  end
+
+  local base_branch = pr.base or pr.base_ref or _base_branch(row.repo) or "main"
+  local pr_branch = pr.branch or (wt and wt.branch) or ("pr-" .. tostring(pr.number))
+  local commits = _range_commits(row.repo, base_branch, pr_branch)
+
+  -- A PR row does not always have a worktree — `pr_for_worktree` matches on
+  -- branch name, and the PR tree renders rows for PRs whose branch was never
+  -- checked out here. `wt.path or nil` then handed the view no directory and
+  -- whole-file context died the same silent death `open_diff` suffered: the
+  -- repo's own checkout answers `git show <rev>:<path>` just as well.
+  local wt_path = (wt and wt.path)
+    or (row.repo and (row.repo.sample_worktree or row.repo.path))
+    or nil
+
+  return _open_range_diff({
+    repo        = row.repo,
+    row         = row,
+    wt          = wt,
+    wt_path     = wt_path,
+    commits     = commits,
+    target_kind = "pr",
+    pr          = pr,
+    range_label = string.format("PR #%s", tostring(pr.number)),
+    title       = string.format(" %s — PR #%s: %s ", M.PANEL_TITLE, tostring(pr.number), pr.title or ""),
+    empty_msg   = string.format("repos: no changed files found for PR #%s", tostring(pr.number)),
+    submitted_msg = string.format("repos: submitted review for PR #%s", tostring(pr.number)),
+    reviews_for = function()
+      if type(backend.reviews_for_pr) == "function" then
+        return backend.reviews_for_pr(row.repo, pr.number)
+      end
+      local out = {}
+      for _, c in ipairs(commits) do
+        for _, r in ipairs(backend.reviews(row.repo, c.sha) or {}) do
+          table.insert(out, r)
+        end
+      end
+      return out
+    end,
+  }, opts)
+end
+
+---open_worktree_diff opens the Git Diff View over everything a worktree's
+---branch adds on top of its base branch, grouped by commit.
+---
+---Johno, 2026-09-08: "let's allow opening diff_view on worktree as well in
+---addition to PR diff_view. This will work the same way as PR diff_view,
+---grouping file changes with commits."
+---
+---The PR diff answers "what does this PR change", which is the same question
+---as "what does this branch change" — a PR is just a branch with a number
+---attached. So a branch that has no PR yet, or will never have one, was
+---unreviewable for no reason other than the missing number. This is the same
+---machinery pointed at `<base>..<branch>` directly.
+---
+---THE BASE BRANCH DECLINES, and says why. `main..main` is empty, so the base
+---worktree would otherwise open an empty diff and report "no changed files",
+---which reads like a failure rather than the tautology it is.
+---@param row table
+---@param opts table?
+function M.open_worktree_diff(row, opts)
+  opts = opts or {}
+  local backend = _repos()
+  if not (backend and row and row.repo) then return false, "missing backend or repo" end
+
+  local wt = row.worktree
+  if not wt then
+    logger.notify("repos: put the cursor on a worktree to open its diff",
+      { level = vim.log.levels.WARN })
+    return false, "no worktree"
+  end
+
+  local base = _base_branch(row.repo)
+  if not base then
+    logger.notify("repos: cannot resolve this repository's base branch — nothing to diff against",
+      { level = vim.log.levels.WARN })
+    return false, "no base branch"
+  end
+
+  -- The name for the LEFT of the arrow. A detached worktree has no branch, so
+  -- it is named by its directory — which is what the tree row shows too.
+  local head = wt.branch or wt.head
+  local label = wt.branch or vim.fn.fnamemodify(wt.path, ":t")
+
+  -- `is_base` is the backend's own answer, and it is the one the tree renders
+  -- "(base)" from; falling back to a name comparison covers a worktree object
+  -- built without it (the resume path constructs one from a path alone).
+  if wt.is_base or (wt.branch ~= nil and wt.branch == base) then
+    logger.notify(string.format(
+      "repos: %s IS the base branch — there is nothing to diff it against", base),
+      { level = vim.log.levels.INFO })
+    return false, "worktree is the base branch"
+  end
+
+  if not head then
+    logger.notify("repos: this worktree has no branch or HEAD to diff",
+      { level = vim.log.levels.WARN })
+    return false, "no head"
+  end
+
+  local commits = _range_commits(row.repo, base, head)
+
+  return _open_range_diff({
+    repo        = row.repo,
+    row         = row,
+    wt          = wt,
+    wt_path     = wt.path or (row.repo.sample_worktree or row.repo.path),
+    commits     = commits,
+    target_kind = "worktree",
+    pr          = nil,
+    range_label = string.format("%s -> %s", label, base),
+    -- Johno: "the title should indicate that as well such as {worktree name}
+    -- -> {target branch}".
+    title       = string.format(" %s — %s → %s ", M.PANEL_TITLE, label, base),
+    empty_msg   = string.format(
+      "repos: %s adds no commits on top of %s — nothing to diff", label, base),
+    submitted_msg = string.format("repos: submitted review for %s → %s", label, base),
+    reviews_for = function()
+      local out = {}
+      for _, c in ipairs(commits) do
+        for _, r in ipairs(backend.reviews(row.repo, c.sha) or {}) do
+          table.insert(out, r)
+        end
+      end
+      return out
+    end,
+  }, opts)
 end
 
 ---post_pr_feedback posts review findings to PR inline (ADR-0083 §2.6 Action 4).
@@ -1606,7 +1810,10 @@ function M.create_pr_for_worktree(row)
   local repo = row.repo
   local wt = row.worktree
   local branch = wt.branch or "HEAD"
-  local base = (type(backend.resolve_base) == "function" and backend.resolve_base(repo.common_dir)) or "main"
+  -- `_base_branch`, not `backend.resolve_base` — worktree.nvim has never
+  -- exported the latter, so this line opened every PR against the literal
+  -- "main" regardless of what the repo's default branch actually is.
+  local base = _base_branch(repo) or "main"
 
   vim.ui.input({ prompt = string.format("PR Title for %s: ", branch) }, function(title)
     if not title or title == "" then return end
@@ -1750,6 +1957,10 @@ local function _info(row)
       "  watched:  " .. tostring(row.worktree.watched),
       "  is base:  " .. tostring(row.worktree.is_base),
       "",
+      row.worktree.is_base
+        and "This IS the base branch, so there is nothing to diff it against."
+        or ("O opens the Git Diff View for everything this branch adds on top of "
+            .. tostring(_base_branch(row.repo) or "its base") .. "."),
       "An unwatched worktree costs no git calls; w toggles it.",
     }
   elseif row.kind == "pr" then
@@ -2384,14 +2595,26 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: expand / open")
   set("o", function() M.open_diff(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: diff this commit")
+  -- `O` is the GROUPED diff: every commit in a range, in one view. `o` is the
+  -- single thing under the cursor. Three row kinds answer `O`, in the order a
+  -- reader would expect the most specific to win:
+  --
+  --   pr        the PR's commits against its base
+  --   worktree  the branch's commits against its base (Johno, 2026-09-08 —
+  --             "let's assign 'O' key on the worktree or branch to open the
+  --             diff_view"). A PR is a branch with a number attached, so a
+  --             branch without one was unreviewable for no reason but that.
+  --   anything  fall through to `o`'s behaviour rather than doing nothing
   set("O", function()
     local row = _row_under_cursor(panel_winid)
     if row and row.kind == "pr" then
       M.open_pr_diff(row)
+    elseif row and row.kind == "worktree" then
+      M.open_worktree_diff(row)
     else
       M.open_diff(row)
     end
-  end, "auto-finder.repos: diff PR across all commits / diff commit")
+  end, "auto-finder.repos: grouped diff — PR / worktree against its base / commit")
   set("w", function() M.toggle_watch(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: watch / unwatch this worktree")
   set("m", function() M.load_more(_row_under_cursor(panel_winid)) end,
@@ -2619,6 +2842,14 @@ function M.resume_diff()
       row.pr = { number = r.pr_number }
     end
     ok_open, open_err = M.open_pr_diff(row, { initial = initial })
+  elseif r.target_kind == "worktree" then
+    -- The row reconstruction above re-resolves the worktree from the backend
+    -- by path, which is what supplies `branch` and `is_base` — a resumed
+    -- worktree diff needs the branch to name its range. When the backend
+    -- cannot answer, the row falls back to a path-only worktree and this
+    -- declines with "no branch or HEAD to diff", which the caller below turns
+    -- into a cleared resume state rather than an empty diff.
+    ok_open, open_err = M.open_worktree_diff(row, { initial = initial })
   else
     ok_open, open_err = M.open_diff(row, { initial = initial })
   end
