@@ -1934,6 +1934,9 @@ end
 ---     subscriber routes a one-shot mailbox message into the
 ---     recipient's inbox carrying title, id, file path, and
 ---     the notes as `reason:`.
+---  5. Move an `open` task to `in-progress` (Johno, 2026-09-08). See the
+---     comment at the call site for why this is not the auto-transition
+---     ADR-0035 r5 removed.
 ---
 ---No-op on non-task rows (vars / malformed / headers).
 ---@param row table?
@@ -1987,6 +1990,11 @@ local function _assign_task(row)
       -- cleanly without touching the task. (The earlier variant that
       -- `return`ed on BOTH nil and "" made an instruction-less
       -- assignment a silent no-op — no bucket move, no notification.)
+      --
+      -- "lands the open → in-progress move" was true when written, became
+      -- false at ADR-0035 r5, and is true again as of 2026-09-08 — but now
+      -- because THIS function makes the move explicitly below, not because
+      -- `todo.assign` does it as a side effect.
       if notes == nil then return end  -- ESC / cancel — leave task untouched
       local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
@@ -1998,11 +2006,43 @@ local function _assign_task(row)
           "assign failed: " .. tostring(err))
         return
       end
+
+      -- ASSIGNING FROM THIS PANEL STARTS THE WORK (Johno, 2026-09-08: "once
+      -- the task is assigned, the auto-finder should trigger the task to move
+      -- to 'in-progress' via auto-core command").
+      --
+      -- This does NOT reinstate the auto-transition ADR-0035 r5 removed. That
+      -- amendment was about `todo.assign` itself: an agent handing a task to a
+      -- peer is delegating, and it must not claim on the peer's behalf that
+      -- work has started. An OPERATOR pressing `A` here is doing something
+      -- else — picking a live agent, typing a directive, and dispatching it —
+      -- and the task being left in `open` afterwards meant the panel showed
+      -- nothing happening while an agent was already working on it.
+      --
+      -- So `todo.assign` stays status-neutral and the UI action that means
+      -- "start this" is explicit, which is exactly the shape r5 asked for.
+      -- Only from `open`: a task already `in-progress`, `blocked` or
+      -- `completed` is not moved backwards by a re-assignment.
+      local moved = false
+      if row.task.status == "open" then
+        local _, serr = todo.status(row.task.id, "in-progress")
+        if serr then
+          -- The assignment LANDED and the recipient was notified; only the
+          -- bucket move failed. Report it without pretending the whole
+          -- action failed, and without claiming the move happened.
+          require("auto-finder.log").error("view.todos",
+            "assigned, but could not move to in-progress: " .. tostring(serr))
+        else
+          moved = true
+        end
+      end
+
       require("auto-finder.log").notify(
-        string.format("assigned '%s' to %s%s",
+        string.format("assigned '%s' to %s%s%s",
           row.task.title or row.task.id,
           choice.name,
-          instruction and (" — " .. instruction) or ""),
+          instruction and (" — " .. instruction) or "",
+          moved and " (→ in-progress)" or ""),
         { component = "view.todos", level = "info", notify = true })
       if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
         _render(M._bufnr)

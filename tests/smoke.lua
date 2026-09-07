@@ -5915,6 +5915,14 @@ section(function()
   -- nowhere. Setup is not pinning. Without this cell, someone "fixing" the
   -- panel by re-adding the move — here, or by asking auto-core to revert
   -- deliberate work — meets nothing. (gold-man, #28 r0.)
+  --
+  -- 2026-09-08: the `A` ACTION now does move an open task to in-progress
+  -- (Johno's requirement 5), and this cell still holds — deliberately. The
+  -- two are different subjects. `todo.assign` is the model operation an agent
+  -- calls when it delegates, and it must not claim on a peer's behalf that
+  -- work started; the `A` action is an operator picking a live agent and
+  -- dispatching a directive, which is a decision to start. See [40f] below
+  -- for the other half, and the comment at `_assign_task`'s status call.
   local id_asg = todo.add({ id = "2026-05-30-p40-assigned-only",
                             title = "assigned but not started" })
   todo.assign(id_asg, "agent:phase1")
@@ -5944,6 +5952,104 @@ section(function()
       and asg_row.lnum > ln_open and asg_row.lnum < ln_ip,
     ("row lnum=%s, Open header=%s, In Progress header=%s")
       :format(tostring(asg_row and asg_row.lnum), tostring(ln_open), tostring(ln_ip)))
+
+  -- 40f. THE `A` ACTION STARTS THE WORK (Johno, 2026-09-08: "once the task is
+  -- assigned, the auto-finder should trigger the task to move to
+  -- 'in-progress' via auto-core command").
+  --
+  -- Paired with 40e on purpose. 40e pins that `todo.assign` moves nothing;
+  -- this pins that the OPERATOR ACTION does. Either cell alone would be
+  -- satisfied by putting the move in the wrong layer — 40e by never moving
+  -- anything, this one by reinstating the auto-transition ADR-0035 r5
+  -- removed. Together they say WHERE the decision to start work is made.
+  --
+  -- Driven through the bound `A` keymap rather than by calling the local, so
+  -- what is exercised is the path a keypress takes.
+  local saved_sel, saved_inp = vim.ui.select, vim.ui.input
+  local saved_aa = package.loaded["auto-agents"]
+  package.loaded["auto-agents"] = {
+    spawned_agents = function()
+      return { { slot = 5, name = "gold-man", kind = "claude",
+                 mailbox_id = "agent:gold-man" } }
+    end,
+  }
+  vim.ui.select = function(items, _, cb) cb(items[1]) end
+  vim.ui.input = function(_, cb) cb("start with the tests") end
+
+  local id_start = todo.add({ id = "2026-05-30-p40-A-starts-work",
+                              title = "dispatched by the operator" })
+  todo.refresh()
+  vim.wait(150, function() return false end)
+  if type(view.refresh) == "function" then pcall(view.refresh)
+  else view.get_buffer(panel_win) end
+  vim.wait(80, function() return false end)
+
+  local start_row, start_lnum
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id == id_start then
+      start_row, start_lnum = row, row.lnum
+    end
+  end
+  ok("p40f: fixture precondition — the new task renders, and is open",
+    start_row ~= nil and start_row.task.status == "open",
+    "row=" .. tostring(start_row ~= nil))
+
+  local akm
+  for _, k in ipairs(vim.api.nvim_buf_get_keymap(bufnr, "n")) do
+    if k.lhs == "A" then akm = k end
+  end
+  ok("p40f: A is bound on the todos panel",
+    akm ~= nil and type(akm.callback) == "function")
+
+  if start_row and start_lnum and akm and vim.api.nvim_win_is_valid(panel_win) then
+    vim.api.nvim_win_set_cursor(panel_win, { start_lnum, 0 })
+    pcall(akm.callback)
+    vim.wait(200, function() return false end)
+    local t_after = todo.get(id_start)
+    ok("p40f: *** the assignee landed ***",
+      t_after ~= nil and t_after.assignee == "agent:gold-man",
+      tostring(t_after and t_after.assignee))
+    ok("p40f: *** and A moved the task to in-progress ***",
+      t_after ~= nil and t_after.status == "in-progress",
+      tostring(t_after and t_after.status))
+  else
+    ok("p40f: *** the assignee landed ***", false, "could not stage the row")
+    ok("p40f: *** and A moved the task to in-progress ***", false, "could not stage the row")
+  end
+
+  -- A task that is ALREADY in-progress is not moved "again", and neither is
+  -- one that has moved past it: a re-assignment records ownership and
+  -- notifies, it does not rewind the lifecycle.
+  local id_done = todo.add({ id = "2026-05-30-p40-A-no-rewind",
+                             title = "already finished" })
+  todo.status(id_done, "completed")
+  todo.refresh()
+  vim.wait(150, function() return false end)
+  if type(view.refresh) == "function" then pcall(view.refresh) end
+  vim.wait(80, function() return false end)
+  local done_lnum
+  for _, row in ipairs(view._rows or {}) do
+    if row.kind == "task" and row.task and row.task.id == id_done then
+      done_lnum = row.lnum
+    end
+  end
+  if done_lnum and akm and vim.api.nvim_win_is_valid(panel_win) then
+    vim.api.nvim_win_set_cursor(panel_win, { done_lnum, 0 })
+    pcall(akm.callback)
+    vim.wait(200, function() return false end)
+    local t_done = todo.get(id_done)
+    ok("p40f: *** A on a COMPLETED task assigns without rewinding it ***",
+      t_done ~= nil and t_done.status == "completed"
+        and t_done.assignee == "agent:gold-man",
+      ("status=%s assignee=%s"):format(tostring(t_done and t_done.status),
+        tostring(t_done and t_done.assignee)))
+  else
+    ok("p40f: *** A on a COMPLETED task assigns without rewinding it ***",
+      false, "could not stage the completed row")
+  end
+
+  vim.ui.select, vim.ui.input = saved_sel, saved_inp
+  package.loaded["auto-agents"] = saved_aa
 
   if vim.api.nvim_win_is_valid(panel_win) then
     pcall(vim.api.nvim_win_close, panel_win, true)
