@@ -98,8 +98,16 @@ jobs:
           # work that pinning exists to prevent. This is a reviewed bump to a
           # TAGGED release, not an automatic one, and the drift job remains the
           # thing that notices when it goes stale again. (gold-man, #28 r0 Q2.)
-          AUTO_CORE_REF: "f07e2c2c66a6859408b7876ea1cd82ce2d8c3f07"  # main @ v0.2.18
-          WORKTREE_REF:  "1aedccca735b42b43b68f4e4f246669075ce03ae"
+          # BUMPED 2026-09-08 from f07e2c2 (v0.2.18). The pin was stale enough to
+          # be red: `auto-finder.repos.authoring` requires
+          # `auto-core.review.draft`, which arrived in auto-core v0.2.22 — so
+          # six suites either failed or aborted MID-RUN with
+          # "auto-core.review.draft is required (auto-core >= v0.2.22)", on
+          # `main` as well as on PRs. A gate that is red for a reason unrelated
+          # to the change under test cannot distinguish a new failure from the
+          # standing one.
+          AUTO_CORE_REF: "5bba92e0bbcf46dc9f486373958f06dd7803627c"  # main @ v0.2.24
+          WORKTREE_REF:  "d9fed95f6d459cedc147a90c120a2351ce1d3a30"
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
           PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
           NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
@@ -155,7 +163,8 @@ jobs:
       - name: report how stale the auto-core pin is
         env:
           GH_TOKEN: ${{ github.token }}
-          AUTO_CORE_REF: "f07e2c2c66a6859408b7876ea1cd82ce2d8c3f07"
+          # Kept in step with the install pin above — the guard below asserts it.
+          AUTO_CORE_REF: "5bba92e0bbcf46dc9f486373958f06dd7803627c"
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.
@@ -247,7 +256,7 @@ jobs:
       - name: install plugin dependencies (auto-core at HEAD)
         env:
           AUTO_CORE_REF: ""   # empty => default branch
-          WORKTREE_REF:  "1aedccca735b42b43b68f4e4f246669075ce03ae"
+          WORKTREE_REF:  "d9fed95f6d459cedc147a90c120a2351ce1d3a30"
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
           PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
           NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
