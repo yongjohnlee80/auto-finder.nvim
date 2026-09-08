@@ -196,12 +196,18 @@ local _file_buf_trigger, _file_buf_cancel =
 -- edit) collapses to one `auto-finder.core.repos:changed` — the render re-reads
 -- the whole worktree, so one refresh per burst is all the panel needs. Created
 -- once at module scope so re-arming `ensure_started` reuses the same timer.
-local _repos_file_refresh = require("auto-finder.shared.debounce").coalesce(
-  function(path)
-    require("auto-finder.core.repos").invalidate()
-    require("auto-finder.core.events").publish(
-      "auto-finder.core.repos:changed", { kind = "core.file:changed", path = path })
-  end, FILES_DEBOUNCE_MS)
+-- Capture the CANCEL companion too. A pending deferred fire that lands after
+-- `core.stop` would invalidate and publish repos:changed from a retired
+-- lifecycle — the same stale-refresh class this task fixes, reintroduced at
+-- teardown (lector PR #42 #1). `stop()` cancels it, matching the files
+-- coalescer's own `_file_buf_cancel` treatment.
+local _repos_file_refresh, _repos_file_refresh_cancel =
+  require("auto-finder.shared.debounce").coalesce(
+    function(path)
+      require("auto-finder.core.repos").invalidate()
+      require("auto-finder.core.events").publish(
+        "auto-finder.core.repos:changed", { kind = "core.file:changed", path = path })
+    end, FILES_DEBOUNCE_MS)
 
 local function _enqueue_file_event(path, kind)
   -- Mutate the cache immediately so `get` reflects reality even
@@ -550,6 +556,9 @@ function M.stop()
   -- next ensure_started starts from a clean slate.
   _file_buf_cancel()
   _file_buf = {}
+  -- And the repos file-refresh coalescer (lector PR #42 #1): a fire still
+  -- pending here would publish repos:changed after teardown.
+  _repos_file_refresh_cancel()
   local ok_warm, warm = pcall(require, "auto-finder.core.warm")
   if ok_warm and type(warm.stop) == "function" then
     warm.stop()
