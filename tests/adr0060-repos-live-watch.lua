@@ -227,6 +227,66 @@ do
     ("repos_changed %d -> %d (want +1)"):format(before, repos_changed))
 end
 
+-- ─── [6] no DOUBLE working-tree watch when a watched worktree becomes cwd ────
+--   (lector PR #42 finding 2)
+
+print("\n[6] a watched worktree that becomes cwd keeps ONE working-tree watch")
+do
+  local watchers = require("auto-finder.core.watchers")
+  -- fwt is watched (from [4]) and is NOT cwd. Its working-tree watch is
+  -- repos-owned.
+  ok("[6] precondition: fwt is watched and repos-owned, cwd does not cover it",
+    watchers._repo_fs[fwt] ~= nil and watchers._handles[fwt] == nil,
+    ("repo_fs=%s files=%s"):format(tostring(watchers._repo_fs[fwt] ~= nil),
+      tostring(watchers._handles[fwt] ~= nil)))
+
+  -- Simulate cd INTO the watched worktree WITHOUT a full reload — a bare
+  -- ensure_started re-arm, which is what happens on several refresh triggers.
+  local prev = vim.fn.getcwd()
+  vim.fn.chdir(fwt)
+  require("auto-finder.core").ensure_started({})
+
+  ok("[6] *** the files panel now owns fwt's working-tree watch ***",
+    watchers._handles[fwt] ~= nil)
+  ok("[6] *** and the repos-owned duplicate is RETIRED (no double watcher) ***",
+    watchers._repo_fs[fwt] == nil,
+    ("repo_fs=%s files=%s"):format(tostring(watchers._repo_fs[fwt] ~= nil),
+      tostring(watchers._handles[fwt] ~= nil)))
+  ok("[6] fwt still has exactly one working-tree watch",
+    watchers.has_worktree_fs_watch(fwt) == true)
+
+  -- cd AWAY via the realistic path (reload = stop + start, which cwd changes
+  -- take). The repos handle re-owns it, and there is still exactly one.
+  vim.fn.chdir(prev)
+  require("auto-finder.core").reload({})
+  vim.wait(200, function() return watchers._repo_fs[fwt] ~= nil end)
+  ok("[6] *** after cd away, the repos handle re-owns fwt, still exactly one ***",
+    watchers._repo_fs[fwt] ~= nil and watchers._handles[fwt] == nil,
+    ("repo_fs=%s files=%s"):format(tostring(watchers._repo_fs[fwt] ~= nil),
+      tostring(watchers._handles[fwt] ~= nil)))
+end
+
+-- ─── [7] a pending file-refresh does NOT publish after core.stop ─────────────
+--   (lector PR #42 finding 1)
+
+print("\n[7] stop() cancels a pending coalesced repos refresh")
+do
+  -- Arm a pending coalesced refresh (a file event under the watched worktree),
+  -- then stop the core immediately. The deferred fire must NOT publish after
+  -- teardown — a retired lifecycle publishing into the bus is exactly the
+  -- stale-refresh class this whole task is about.
+  watch.set(fwt, true)
+  vim.wait(150, function() return false end)  -- settle any prior debounce
+  local before = repos_changed
+  events.publish("core.file:upsert", { path = fwt .. "/pending.txt", change = "upsert" })
+  -- Do NOT wait for the debounce; stop while the fire is still pending.
+  require("auto-finder.core").stop()
+  vim.wait(300, function() return false end)  -- well past the debounce window
+  ok("[7] *** no repos:changed is published after stop ***",
+    repos_changed == before,
+    ("repos_changed %d -> %d (want unchanged; a fire after stop is the leak)"):format(before, repos_changed))
+end
+
 require("auto-finder.core").stop()
 vim.fn.delete(sb, "rf")
 io.stdout:write(string.format("\n%d passed, %d failed\n", pass, fail))

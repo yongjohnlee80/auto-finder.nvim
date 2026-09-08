@@ -234,17 +234,31 @@ function M.reconcile_watched()
     end
   end
 
-  -- Working-tree fs.watch: arm only where the files panel is not already
-  -- covering the path (that map is `M._handles`, keyed by the same absolute
-  -- path). Skipping the overlap keeps `cwd` on a single handle and leaves the
-  -- files-panel watcher's lifecycle untouched.
+  -- Working-tree fs.watch: exactly one handle per path, and the files-panel
+  -- `M._handles` map is authoritative when it covers a path (that is the same
+  -- recursive working-tree watch, owned by the cwd lifecycle).
   if fs_watch then
+    -- (a) OWNERSHIP TRANSFER: a path we armed while it was not cwd, that has
+    --     since become cwd, is now covered by the files handle. Retire our
+    --     duplicate rather than run two recursive watchers on one tree (lector
+    --     PR #42 #2). Runs before arming so the arm loop sees a clean state.
+    for path, h in pairs(M._repo_fs) do
+      if M._handles[path] then
+        pcall(fs_watch.stop, h)
+        M._repo_fs[path] = nil
+      end
+    end
+    -- (b) ARM a repos-owned handle only for a wanted path the files panel is
+    --     NOT covering. When a path stops being cwd (its files handle is gone)
+    --     this re-arms it, so a watched worktree is never left without a
+    --     working-tree watch.
     for path in pairs(want) do
       if not M._repo_fs[path] and not M._handles[path] then
         local h = fs_watch.start(path, { recursive = true })
         if h then M._repo_fs[path] = h end
       end
     end
+    -- (c) STOP a repos-owned handle for a path no longer watched.
     for path, h in pairs(M._repo_fs) do
       if not want[path] then
         pcall(fs_watch.stop, h)
