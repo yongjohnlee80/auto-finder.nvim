@@ -191,6 +191,18 @@ local _file_buf_trigger, _file_buf_cancel =
   require("auto-finder.shared.debounce").coalesce(
     _flush_file_events, FILES_DEBOUNCE_MS)
 
+-- ADR-0060 §2.3: the repos-panel refresh for a working-tree edit under a
+-- watched worktree, coalesced. A burst of `core.file:*` (a checkout, a mass
+-- edit) collapses to one `auto-finder.core.repos:changed` — the render re-reads
+-- the whole worktree, so one refresh per burst is all the panel needs. Created
+-- once at module scope so re-arming `ensure_started` reuses the same timer.
+local _repos_file_refresh = require("auto-finder.shared.debounce").coalesce(
+  function(path)
+    require("auto-finder.core.repos").invalidate()
+    require("auto-finder.core.events").publish(
+      "auto-finder.core.repos:changed", { kind = "core.file:changed", path = path })
+  end, FILES_DEBOUNCE_MS)
+
 local function _enqueue_file_event(path, kind)
   -- Mutate the cache immediately so `get` reflects reality even
   -- mid-debounce. Only the emit is debounced.
@@ -440,6 +452,17 @@ function M.ensure_started(cfg)
     require("auto-finder.core.warm").start(cwd)
   end)
 
+  -- ── ADR-0060 §2.3: arm a live watcher for every WATCHED worktree ──
+  --
+  -- Watches persist across restarts, so the persisted set must arm here (not
+  -- only when the user next toggles) or a watched worktree comes up stale
+  -- after every restart. `reconcile_watched` reads worktree.nvim's registry
+  -- and is idempotent, so a re-arm is a no-op. `worktree.watch:changed` (the
+  -- fold above) then keeps it in step as the user watches/unwatches.
+  pcall(function()
+    require("auto-finder.core.watchers").reconcile_watched()
+  end)
+
   -- ── Phase 6: Buf* autocmd wiring → core.buffers cache ──
   --
   -- The buffers cache tracks every nvim buffer (listed +
@@ -463,6 +486,46 @@ function M.ensure_started(cfg)
     pcall(function()
       require("auto-finder.core.repos").invalidate()
     end)
+  end)
+
+  -- ── ADR-0060 §2.3: keep the per-worktree watchers in step with the watch set ──
+  --
+  -- When a watch is toggled, `worktree.watch:changed` fires. The fold above
+  -- already turns that into a repos:changed (so the tree redraws the watch
+  -- marker and the newly-visible / hidden commits). Here we ALSO reconcile the
+  -- live watchers, so a worktree the user just started watching gets its
+  -- watcher armed — and one they stopped watching gets it released. Same
+  -- upstream topic, a distinct internal concern, one subscriber each.
+  _sub("internal_repo_watch", "worktree.watch:changed", function()
+    pcall(function()
+      require("auto-finder.core.watchers").reconcile_watched()
+    end)
+  end)
+
+  -- ── ADR-0060 §2.3: a working-tree edit UNDER a watched worktree refreshes repos ──
+  --
+  -- The UNCOMMITTED row reflects `git status`, and an unstaged edit touches
+  -- neither `.git/HEAD` nor the index — so the git watcher never sees it, and
+  -- the row could not appear/disappear on its own (requirement 4). The
+  -- working-tree fs.watch armed by `reconcile_watched` publishes `core.file:*`;
+  -- fold it to repos:changed, but ONLY when the path lies under a watched
+  -- worktree. The predicate is the point: `core.file:*` is a high-frequency
+  -- topic (every save in the files-panel cwd fires it), and the repos panel
+  -- must not invalidate on churn in a worktree it is not watching. `.git/`
+  -- paths never arrive here — fs.watch ignores them — so a commit does not
+  -- double-fire through this path and the git one.
+  --
+  -- COALESCED: a `git checkout` / `merge` / mass edit touches many files, each a
+  -- `core.file:*`. Firing repos:changed per file would schedule one rerender
+  -- each; the coalescer collapses a burst to a single refresh (latest-wins),
+  -- which is all the panel needs — the render re-reads the whole worktree
+  -- anyway. Matches the files path's own `FILES_DEBOUNCE_MS` treatment.
+  _sub("upstream_file_repos", "core.file:*", function(payload)
+    if type(payload) ~= "table" or type(payload.path) ~= "string" then return end
+    local ok_w, watchers = pcall(require, "auto-finder.core.watchers")
+    if not ok_w or type(watchers.is_under_watched_worktree) ~= "function" then return end
+    if not watchers.is_under_watched_worktree(payload.path) then return end
+    _repos_file_refresh(payload.path)
   end)
 
   M._started = true
