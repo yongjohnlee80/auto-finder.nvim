@@ -190,6 +190,9 @@ SUITES=(
   # `pr_diff` answers it by construction. That mock is exactly what hid the
   # abbreviated-sha defect fixed in worktree.nvim#21.
   "adr0083-wtdiff|tests/adr0083-worktree-diff.lua"
+  # 2026-09-09 - a WATCHED worktree gets a live watcher (ADR-0060 §2.3). Real git
+  # layout; only the fs_event timing is simulated so the WIRING is deterministic.
+  "adr0060-livewatch|tests/adr0060-repos-live-watch.lua"
   # ADR-0083 - PR row rendering, child reviews, dissociation, and PR actions.
   "adr0083-pr-tree|tests/adr0083-repos-pr-tree.lua"
   # ADR-0083 - the full-context toggle must RENDER full context, not just
