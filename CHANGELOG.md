@@ -2,6 +2,70 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.26] — 2026-09-09 — the test suite no longer stages the plugin's own worktree
+
+Patch. Test-only; no behaviour changed.
+
+A suite in `tests/run-all.sh` was staging the plugin's **own** worktree files.
+The neo-tree fork's git-write verbs resolve their working directory from the
+editor's cwd (`commands.lua` `_cwd()` = `vim.loop.cwd()`), which is correct for a
+real user — but `adr0060-git-actions` section [7] drove those verbs for real
+against a bare stub, and `run-all.sh` cd's to the worktree root, so `git_add_all`
+ran a bare `git add -A` in the plugin worktree and staged everything. That once
+rode into a tagged release (a `PRs/` body into v0.4.13).
+
+Two additive, test-only fixes: [7] now stubs the single git-write owner
+(`auto-core.git.write`) and drives the verbs for **routing only** — asserting
+`git_add_all → stage_all` etc. rather than merely "callable without raising", so
+no real git touches any tree; and `run-all.sh` gained a durable **self-stage
+gate** that snapshots the worktree's git status before and after the whole run
+and fails on any change, so a future regression fails loudly instead of riding
+into a commit. PR #43, reviewed and approved by lector.
+
+## [v0.4.25] — 2026-09-09 — a watched worktree gets a live watcher
+
+Patch. **Requires auto-core >= v0.2.24 and worktree.nvim >= v0.5.13.**
+
+ADR-0060 §2.3's promised per-worktree watcher was never built, so marking a
+worktree watched armed **nothing** — the repos panel went stale on every
+external commit / file change and the only way to see the truth was to unwatch
+and watch again.
+
+The fix arms the missing watcher, reconciled against worktree.nvim's registry:
+a `git.watch` on each watched worktree's `git_dir` (commit / checkout / reset /
+merge) plus a working-tree `fs.watch` (so an unstaged edit can raise the
+UNCOMMITTED row on its own). Reconciled at startup and on every
+`worktree.watch:changed`, and the `core.file:*` → repos fold is scoped to
+watched paths and coalesced, so a checkout touching many files collapses to one
+refresh. Two watcher lifecycle edges (teardown cancel, cwd-transfer) are folded
+in the same release. **Known limitation:** an external push (refs/remotes) or
+`git add` (index-only) does not live-update the pushed/unpushed badge — both
+refresh on the next commit / checkout or a manual `R`. PR #42.
+
+## [v0.4.24] — 2026-09-08 — the Git Diff View opens on a worktree's branch, and A starts the work
+
+Patch. **Requires auto-core >= v0.2.24 and worktree.nvim >= v0.5.13.**
+
+`O` on a worktree row now diffs the branch against its base — a PR is just a
+branch with a number attached, so a branch with no PR (or that will never have
+one) is no longer unreviewable. `O` dispatches on row kind: a PR's commits, a
+worktree's commits against its base, else the single thing under the cursor. The
+range machinery is **extracted** into `_open_range_diff` (shared by both entry
+points), not copied. The panel is formally the Git Diff View (`M.PANEL_TITLE`).
+
+`A` now starts the work: after a successful assign, an `open` task moves to
+in-progress. This is an operator dispatch, distinct from the `todo.assign`
+auto-transition ADR-0035 r5 removed (delegating to a peer must not claim work
+started on their behalf); only from `open`, and a failed move is reported as a
+failed move.
+
+Two stale call sites fixed: `backend.resolve_base` was never exported by
+worktree.nvim, so both call sites silently defaulted the base to the literal
+`"main"` regardless of the repo's real default branch; both now go through
+`worktree.repos.base_branch`. Also: CI's auto-core pin was four patches behind
+its own requirement (v0.2.18 vs v0.2.22), leaving the gate red on `main` since
+before v0.4.23 — bumped here. PR #41.
+
 ## [v0.4.23] — 2026-09-07 — authoring is a facade; the domain layer moved down
 
 Patch. No behaviour changed. **Requires auto-core >= v0.2.22.**
