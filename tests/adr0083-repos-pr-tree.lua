@@ -1,4 +1,6 @@
--- ADR-0083: Repos tree PR row rendering, child reviews, dissociation, and PR actions
+-- ADR-0083 Amendment r9: PR as a [#N] BADGE on the worktree row (not its own
+-- row), reviews tagged → #N with a [posted] badge, S submits one review entry,
+-- P is push-only, and GetPR surfaces cancel / bad-input / errors.
 local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 local sib = vim.fn.fnamemodify(root, ":h:h")
@@ -7,12 +9,9 @@ for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
   if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
 end
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
-  -- A candidate must be able to SERVE the request, not merely exist. These
-  -- suites need worktree.pr / worktree.repos.reviews_index and
-  -- auto-core.docstore; a checkout predating them cannot answer at all, and
-  -- because the LAST prepend wins, a stale sibling shadowed a current copy —
-  -- the suites aborted mid-run rather than reporting a count. Direction and
-  -- precedence are unchanged; LAZY joins as the lowest-precedence candidate.
+  -- A candidate must be able to SERVE the request, not merely exist (see the
+  -- long note that used to live here: the LAST prepend wins, so a stale sibling
+  -- shadowed a current copy and the suite aborted mid-run).
   local req = ({
     ["worktree.nvim"]  = { "lua/worktree/repos.lua", "function M.reviews_index" },
     ["auto-core.nvim"] = { "lua/auto-core/docstore/init.lua", "function M.write_json" },
@@ -44,7 +43,6 @@ vim.o.columns, vim.o.lines = 200, 60
 local sb = vim.fn.tempname() .. "-adr0083-pr"
 dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h") .. "/_sandbox.lua")("adr0083-pr")
 
--- Load plugin commands
 pcall(vim.cmd, "runtime plugin/auto-finder.lua")
 
 local pass, fail = 0, 0
@@ -61,364 +59,273 @@ end
 local tree = require("auto-finder.views.repos.tree")
 local logger = require("auto-finder.log")
 local pr_mod = require("worktree.pr")
+local NS = vim.api.nvim_get_namespaces()["auto_finder_repos_tree"]
 
 -- Capture notifications
 local notes = {}
-local real_notify = logger.notify
 logger.notify = function(msg, opts)
   table.insert(notes, { msg = tostring(msg), level = opts and opts.level })
 end
+local function last_note() return notes[#notes] end
 
-local function last_note()
-  return notes[#notes]
+-- Extmark highlight groups painted on one buffer line (0-indexed).
+local function hls_on_line(bufnr, lnum)
+  local out = {}
+  local marks = vim.api.nvim_buf_get_extmarks(bufnr, NS, { lnum, 0 }, { lnum, -1 }, { details = true })
+  for _, m in ipairs(marks) do
+    if m[4] and m[4].hl_group then out[m[4].hl_group] = true end
+  end
+  return out
 end
 
--- 1. Keymap bindings in panel buffer
+-- The 0-indexed buffer line a row sits on (rows and lines are appended 1:1).
+local function line_of_row(pred)
+  for i, row in ipairs(tree._rows or {}) do
+    if pred(row) then return i - 1, row end
+  end
+  return nil, nil
+end
+
+-- ── 1. Keymaps ────────────────────────────────────────────────
 local pbuf = tree.get_buffer(nil)
-local keymaps = vim.api.nvim_buf_get_keymap(pbuf, "n")
 local km_map = {}
-for _, km in ipairs(keymaps) do
-  km_map[km.lhs] = km
-end
+for _, km in ipairs(vim.api.nvim_buf_get_keymap(pbuf, "n")) do km_map[km.lhs] = km end
 
-ok("ADR-0083: 'O' keymap bound on repos panel", km_map["O"] ~= nil)
--- `O` is the GROUPED diff and covers THREE row kinds as of 2026-09-08 — a PR,
--- a worktree against its base, and a single commit. The description has to
--- name the two range targets, because it is what `?` and which-key show and a
--- reader who only sees "diff PR" will not discover the worktree case.
---
--- A description is a proxy for behaviour, so it is not left as the only
--- evidence: tests/adr0083-worktree-diff.lua dispatches the key for real.
-ok("ADR-0083: 'O' keymap describes the grouped diff over PR *and* worktree",
-  km_map["O"] and km_map["O"].desc:find("PR", 1, true) ~= nil
-    and km_map["O"].desc:find("worktree", 1, true) ~= nil,
-  km_map["O"] and km_map["O"].desc or "nil")
-ok("ADR-0083: 'P' keymap bound on repos panel", km_map["P"] ~= nil)
-ok("ADR-0083: 'P' keymap describes PR feedback / push", km_map["P"] and km_map["P"].desc:find("post inline feedback", 1, true) ~= nil)
-ok("ADR-0083: 'G' keymap bound on repos panel", km_map["G"] ~= nil)
-ok("ADR-0083: 'G' keymap describes GetPR", km_map["G"] and km_map["G"].desc:find("GetPR", 1, true) ~= nil)
-ok("ADR-0083: 'N' keymap bound on repos panel", km_map["N"] ~= nil)
-ok("ADR-0083: 'N' keymap describes CreatePR", km_map["N"] and km_map["N"].desc:find("CreatePR", 1, true) ~= nil)
-ok("ADR-0083: 'd' keymap describes dissociate", km_map["d"] and km_map["d"].desc:find("dissociate", 1, true) ~= nil)
+ok("r9: 'O' keymap bound", km_map["O"] ~= nil)
+ok("r9: 'O' describes the grouped WORKTREE diff (no PR entry any more)",
+  km_map["O"] and km_map["O"].desc:find("worktree", 1, true) ~= nil, km_map["O"] and km_map["O"].desc)
+ok("r9: 'P' keymap bound", km_map["P"] ~= nil)
+ok("r9: 'P' describes PUSH ONLY, not feedback",
+  km_map["P"] and km_map["P"].desc:find("push", 1, true) ~= nil
+    and km_map["P"].desc:find("feedback", 1, true) == nil, km_map["P"] and km_map["P"].desc)
+ok("r9: 'S' keymap bound (submit review)", km_map["S"] ~= nil)
+ok("r9: 'S' describes submitting a review entry to its PR",
+  km_map["S"] and km_map["S"].desc:find("submit", 1, true) ~= nil, km_map["S"] and km_map["S"].desc)
+ok("r9: 'G' keymap describes GetPR", km_map["G"] and km_map["G"].desc:find("GetPR", 1, true) ~= nil)
+ok("r9: 'N' keymap describes CreatePR", km_map["N"] and km_map["N"].desc:find("CreatePR", 1, true) ~= nil)
+ok("r9: 'd' keymap describes dissociate", km_map["d"] and km_map["d"].desc:find("dissociate", 1, true) ~= nil)
 
--- 2. tree.HELP documentation
+-- ── 2. HELP ───────────────────────────────────────────────────
 local help_text = table.concat(tree.HELP, "\n")
-ok("ADR-0083: HELP documents 'O' keymap", help_text:find("O     diff PR across all commits", 1, true) ~= nil)
-ok("ADR-0083: HELP documents 'P' keymap", help_text:find("P     post inline feedback to PR", 1, true) ~= nil)
-ok("ADR-0083: HELP documents 'G' keymap", help_text:find("G     GetPR:", 1, true) ~= nil)
-ok("ADR-0083: HELP documents 'N' keymap", help_text:find("N     CreatePR:", 1, true) ~= nil)
+ok("r9: HELP documents 'O' as the worktree branch diff",
+  help_text:find("O     diff this worktree", 1, true) ~= nil)
+ok("r9: HELP documents 'P' as push",
+  help_text:find("P     push this repository", 1, true) ~= nil
+    and help_text:find("post inline feedback", 1, true) == nil)
+ok("r9: HELP documents 'S' as submit", help_text:find("S     submit this review", 1, true) ~= nil)
+ok("r9: HELP explains the [#N] worktree badge", help_text:find("[#N]", 1, true) ~= nil)
+ok("r9: HELP explains the review → #N / [posted] badges",
+  help_text:find("→ #N", 1, true) ~= nil and help_text:find("[posted]", 1, true) ~= nil)
 
--- 3. Commands registered
+-- ── 3. Commands ───────────────────────────────────────────────
 local cmds = vim.api.nvim_get_commands({})
-ok("ADR-0083: :AutoFinderGetPR command registered", cmds["AutoFinderGetPR"] ~= nil)
-ok("ADR-0083: :AutoFinderCreatePR command registered", cmds["AutoFinderCreatePR"] ~= nil)
-ok("ADR-0083: :AutoFinderPostPRFeedback command registered", cmds["AutoFinderPostPRFeedback"] ~= nil)
+ok("r9: :AutoFinderGetPR registered", cmds["AutoFinderGetPR"] ~= nil)
+ok("r9: :AutoFinderCreatePR registered", cmds["AutoFinderCreatePR"] ~= nil)
+ok("r9: :AutoFinderPostPRFeedback registered", cmds["AutoFinderPostPRFeedback"] ~= nil)
 
--- 4. Tree PR rendering with child reviews
+-- ── Fixtures ──────────────────────────────────────────────────
 local mock_repo = {
-  label = "test-repo",
-  slug = "test-repo",
-  common_dir = sb .. "/test-repo.git",
-  path = sb .. "/test-repo",
+  label = "test-repo", slug = "test-repo",
+  common_dir = sb .. "/test-repo.git", path = sb .. "/test-repo",
   url = "https://github.com/user/test-repo.git",
 }
-local mock_wt = {
-  path = sb .. "/test-repo/wt-pr42",
-  branch = "pr-42",
-  head = "c1a2b3c",
-  watched = true,
-}
-local mock_pr_open = {
-  number = 42,
-  title = "Add PR feature",
-  state = "open",
-  draft = false,
-  branch = "pr-42",
-  base = "main",
-  author = "alice",
+local mock_wt = { path = sb .. "/test-repo/wt-pr42", branch = "pr-42", head = "c1a2b3c", watched = true }
+local mock_pr = {
+  number = 42, title = "Add PR feature", state = "open", draft = false,
+  branch = "pr-42", base = "main", author = "alice",
   kb_doc = sb .. "/shared/prs/test-repo/pr-42.md",
 }
-local mock_pr_review = {
+local mock_review = {
   name = "test-repo@c1a2b3c.r1.review.json",
   path = sb .. "/agents/reviewer/reviews/test-repo@c1a2b3c.r1.review.json",
   document = sb .. "/agents/reviewer/reviews/2026-09-05-test-repo-c1a2b3c-r1-review.md",
   commit = "c1a2b3c000000000000000000000000000000000",
-  revision = 1,
-  pr = 42,
-  worst = "must-fix",
+  revision = 1, pr = 42, worst = "must-fix", severities = { ["must-fix"] = 1 },
 }
+vim.fn.mkdir(vim.fs.dirname(mock_pr.kb_doc), "p")
+vim.fn.writefile({ "# PR 42", "Body" }, mock_pr.kb_doc)
+vim.fn.mkdir(vim.fs.dirname(mock_review.path), "p")
+vim.fn.writefile({ vim.json.encode({
+  schema = "worktree.review/1", commit = mock_review.commit, revision = 1,
+  repo = { url = mock_repo.url, owner = "user", name = "test-repo" }, pr = 42,
+  comments = { { path = "foo.lua", line = 10, severity = "must-fix", body = "Fix this" } },
+}) }, mock_review.path)
+vim.fn.writefile({ "# Review r1" }, mock_review.document)
 
--- Create test directories and files
-vim.fn.mkdir(vim.fs.dirname(mock_pr_open.kb_doc), "p")
-vim.fn.writefile({ "# PR 42", "Body content" }, mock_pr_open.kb_doc)
-
-vim.fn.mkdir(vim.fs.dirname(mock_pr_review.path), "p")
-vim.fn.writefile({
-  vim.json.encode({
-    schema = "worktree.review/1",
-    commit = mock_pr_review.commit,
-    revision = 1,
-    repo = { url = mock_repo.url, owner = "user", name = "test-repo" },
-    pr = 42,
-    comments = {
-      { path = "foo.lua", line = 10, severity = "must-fix", body = "Fix this" },
-    },
-  })
-}, mock_pr_review.path)
-vim.fn.writefile({ "# Review r1" }, mock_pr_review.document)
-
--- Mock backend in auto-finder
+local posted_flag = false
 local repos_backend = {
   available = function() return true end,
   repos = function() return { mock_repo } end,
-  worktrees = function(r) return { mock_wt } end,
-  children = function(repo, wt, opts) return {}, {} end,
-  commit_divergence = function(r, wt) return { count = 0, items = {}, meta = { mode = "window", has_more = false } } end,
-  pr_for_worktree = function(r, wt) return mock_pr_open end,
-  reviews_for_pr = function(r, pr_num)
-    if tostring(pr_num) == "42" then return { mock_pr_review } end
-    return {}
-  end,
-  pr_diff = function(r, base_ref, pr_ref)
-    return {
-      {
-        sha = mock_pr_review.commit,
-        short = "c1a2b3c",
-        subject = "Commit 1",
-      },
-    }
-  end,
-  diff = function(r, sha)
-    return {
-      {
-        path = "foo.lua",
-        kind = "modified",
-        hunks = {},
-      },
-    }
-  end,
-  reviews = function(r, sha) return {} end,
-  reviews_all = function(r) return { mock_pr_review } end,
-  uncommitted = function(wt) return {} end,
-  working_status = function(wt) return {} end,
-  commits = function(r, wt, window) return {} end,
-  remove_review = function(r, path) return true end,
+  worktrees = function() return { mock_wt } end,
+  children = function() return {}, {} end,
+  pr_for_worktree = function() return mock_pr end,
+  reviews_index = function() return { mock_review } end,
+  reviews_all = function() return { mock_review } end,
+  reviews_for_pr = function(_, n) return tostring(n) == "42" and { mock_review } or {} end,
+  review_posted = function(_, meta) return posted_flag and meta.pr == 42 end,
+  uncommitted = function() return {} end,
+  remove_review = function() return true end,
 }
-
--- Inject mock backend
 package.loaded["worktree.repos"] = repos_backend
 
--- Open panel buffer and expand repo and worktree
+-- ── 4. The [#N] badge is on the WORKTREE row; there is NO pr row ──
 local tbuf = tree.get_buffer(nil)
 tree._expanded["repo:" .. mock_repo.common_dir] = true
 tree._expanded["wt:" .. mock_wt.path] = true
+tree._expanded["reviews:" .. mock_repo.common_dir] = true
 tree.invalidate(nil)
 tree.on_focus(nil, tbuf)
 
--- Inspect rows in tree
-local rows = tree._rows or {}
-local found_pr_row = nil
-local found_pr_review_row = nil
-for _, row in ipairs(rows) do
-  if row.kind == "pr" and row.pr and row.pr.number == 42 then
-    found_pr_row = row
-  elseif row.kind == "review" and row.parent_pr and row.parent_pr.number == 42 then
-    found_pr_review_row = row
-  end
-end
+local wt_lnum, wt_row = line_of_row(function(r) return r.kind == "worktree" end)
+ok("r9: worktree row rendered", wt_row ~= nil)
+ok("r9: *** worktree row carries a [#42] badge after the branch name ***",
+  wt_row and wt_row.text:find("pr-42", 1, true) ~= nil and wt_row.text:find("[#42]", 1, true) ~= nil,
+  wt_row and wt_row.text)
+ok("r9: [#42] sits BEFORE the watch marker",
+  wt_row and wt_row.text:find("%[#42%].*watched") ~= nil, wt_row and wt_row.text)
+ok("r9: *** there is NO standalone PR row any more ***",
+  select(1, line_of_row(function(r) return r.kind == "pr" end)) == nil)
+ok("r9: open PR badge is painted AutoCoreGitAdded on the worktree line",
+  wt_lnum and hls_on_line(tbuf, wt_lnum)["AutoCoreGitAdded"] == true)
 
-ok("ADR-0083: PR row rendered under worktree", found_pr_row ~= nil)
-ok("ADR-0083: PR row text has title and [OPEN] badge",
-  found_pr_row and found_pr_row.text:find("● PR #42: Add PR feature  [OPEN]", 1, true) ~= nil,
-  found_pr_row and found_pr_row.text)
-ok("ADR-0083: PR row highlight is AutoCoreGitAdded",
-  found_pr_row and found_pr_row.hl == "AutoCoreGitAdded")
+-- The review shows in the reviews SECTION, tagged → #42 (not under a PR row).
+local _, rev_row = line_of_row(function(r) return r.kind == "review" and r.review and r.review.pr == 42 end)
+ok("r9: review appears in the reviews section", rev_row ~= nil)
+ok("r9: *** review row is tagged → #42 ***",
+  rev_row and rev_row.text:find("→ #42", 1, true) ~= nil, rev_row and rev_row.text)
+ok("r9: review row carries the severity badge too",
+  rev_row and rev_row.text:find("[must-fix]", 1, true) ~= nil, rev_row and rev_row.text)
+ok("r9: review row has NO parent_pr (it is not under a PR entry)",
+  rev_row and rev_row.parent_pr == nil)
 
-ok("ADR-0083: PR child review row rendered under PR", found_pr_review_row ~= nil)
-ok("ADR-0083: child review row carries parent_pr",
-  found_pr_review_row and found_pr_review_row.parent_pr ~= nil and found_pr_review_row.parent_pr.number == 42)
+-- ── 5. Badge COLOUR carries PR state (draft / closed) ──
+mock_pr.draft = true
+tree.invalidate(nil); tree.on_focus(nil, tbuf)
+local d_lnum = line_of_row(function(r) return r.kind == "worktree" end)
+ok("r9: DRAFT PR badge is painted AutoCoreReviewFrame",
+  d_lnum and hls_on_line(tbuf, d_lnum)["AutoCoreReviewFrame"] == true)
 
--- 5. Draft and Closed badges
-mock_pr_open.draft = true
-tree.invalidate(nil)
-tree.on_focus(nil, tbuf)
-local rows_draft = tree._rows or {}
-for _, row in ipairs(rows_draft) do
-  if row.kind == "pr" and row.pr and row.pr.number == 42 then
-    ok("ADR-0083: Draft PR badge is [DRAFT]", row.text:find("[DRAFT]", 1, true) ~= nil)
-    ok("ADR-0083: Draft PR highlight is AutoCoreReviewFrame", row.hl == "AutoCoreReviewFrame")
-    break
-  end
-end
+mock_pr.draft = false; mock_pr.state = "closed"
+tree.invalidate(nil); tree.on_focus(nil, tbuf)
+local c_lnum = line_of_row(function(r) return r.kind == "worktree" end)
+ok("r9: CLOSED PR badge is painted AutoCoreGitDeleted",
+  c_lnum and hls_on_line(tbuf, c_lnum)["AutoCoreGitDeleted"] == true)
+mock_pr.state = "open"
 
-mock_pr_open.draft = false
-mock_pr_open.state = "closed"
-tree.invalidate(nil)
-tree.on_focus(nil, tbuf)
-local rows_closed = tree._rows or {}
-for _, row in ipairs(rows_closed) do
-  if row.kind == "pr" and row.pr and row.pr.number == 42 then
-    ok("ADR-0083: Closed PR badge is [CLOSED]", row.text:find("[CLOSED]", 1, true) ~= nil)
-    ok("ADR-0083: Closed PR highlight is AutoCoreGitDeleted", row.hl == "AutoCoreGitDeleted")
-    break
-  end
-end
-mock_pr_open.state = "open"
-tree.invalidate(nil)
-tree.on_focus(nil, tbuf)
+-- ── 6. [posted] badge comes from the backend receipt query ──
+posted_flag = false
+tree.invalidate(nil); tree.on_focus(nil, tbuf)
+local _, unposted = line_of_row(function(r) return r.kind == "review" end)
+ok("r9: an UNPOSTED review has no [posted] badge",
+  unposted and unposted.text:find("[posted]", 1, true) == nil, unposted and unposted.text)
+posted_flag = true
+tree.invalidate(nil); tree.on_focus(nil, tbuf)
+local _, posted = line_of_row(function(r) return r.kind == "review" end)
+ok("r9: *** a POSTED review shows [posted] (from review_posted, not the JSON) ***",
+  posted and posted.text:find("[posted]", 1, true) ~= nil, posted and posted.text)
+posted_flag = false
+tree.invalidate(nil); tree.on_focus(nil, tbuf)
 
--- 6. Dissociation via remove_review on review with parent_pr
+-- ── 7. Dissociation still works on a review carrying meta.pr ──
+local _, rrow = line_of_row(function(r) return r.kind == "review" and r.review and r.review.pr == 42 end)
 local confirm_called = false
-local mock_float = {
+package.loaded["auto-core.ui.float"] = {
   confirm = function(prompt, opts)
     confirm_called = true
-    ok("ADR-0083: dissociation prompt specifies PR number and keeping disk files",
+    ok("r9: dissociation prompt names PR #42 and keeps disk files",
       prompt:find("Dissociate review", 1, true) ~= nil and prompt:find("from PR #42", 1, true) ~= nil
-      and prompt:find("Files on disk will NOT be deleted", 1, true) ~= nil,
-      prompt)
+        and prompt:find("Files on disk will NOT be deleted", 1, true) ~= nil, prompt)
     opts.on_choice("yes")
-  end
-}
-package.loaded["auto-core.ui.float"] = mock_float
-
-notes = {}
-tree.remove_review(found_pr_review_row)
-ok("ADR-0083: float.confirm called for dissociation", confirm_called)
-ok("ADR-0083: dissociation notification logged",
-  last_note() and last_note().msg:find("dissociated review", 1, true) ~= nil,
-  vim.inspect(notes))
-
--- Verify review file on disk still exists and pr field was removed
-local after_raw = table.concat(vim.fn.readfile(mock_pr_review.path), "\n")
-local after_data = vim.json.decode(after_raw)
-ok("ADR-0083: review JSON file still exists on disk", vim.fn.filereadable(mock_pr_review.path) == 1)
-ok("ADR-0083: review JSON pr field was cleared (dissociated)", after_data.pr == nil)
-
--- SF2 Test: review whose pr does not match reports unassociated, does NOT report success
-notes = {}
-tree.remove_review(found_pr_review_row)
-ok("SF2: unassociated review reports refusal warning",
-  last_note() and last_note().msg:find("is not associated with PR #42", 1, true) ~= nil,
-  vim.inspect(notes))
-local found_false_dissociated = false
-for _, n in ipairs(notes) do
-  if n.msg:find("dissociated review", 1, true) then found_false_dissociated = true end
-end
-ok("SF2: success was NOT falsely reported for unassociated review", found_false_dissociated == false)
-
--- SF2 Test: write failure does not report success
-local orig_store_write = package.loaded["worktree.store"].write_json
-package.loaded["worktree.store"].write_json = function()
-  return false, "simulated disk error"
-end
--- Reset pr to 42 on disk
-after_data.pr = 42
-vim.fn.writefile({ vim.json.encode(after_data) }, mock_pr_review.path)
-notes = {}
-tree.remove_review(found_pr_review_row)
-ok("SF2: failed write reports error",
-  last_note() and last_note().msg:find("failed to save dissociated review", 1, true) ~= nil,
-  vim.inspect(notes))
-found_false_dissociated = false
-for _, n in ipairs(notes) do
-  if n.msg:find("dissociated review", 1, true) and not n.msg:find("failed", 1, true) then
-    found_false_dissociated = true
-  end
-end
-ok("SF2: success was NOT falsely reported on write failure", found_false_dissociated == false)
-package.loaded["worktree.store"].write_json = orig_store_write
-
--- Clean up and re-dissociate
-notes = {}
-tree.remove_review(found_pr_review_row)
-
--- 7. Open PR diff (Action 2)
-local open_diff_called = false
-local mock_dv = {
-  open = function(opts)
-    open_diff_called = true
-    ok("ADR-0083: diffview title contains PR number and title",
-      opts.title and opts.title:find("PR #42: Add PR feature", 1, true) ~= nil,
-      opts.title)
-    ok("ADR-0083: files passed to diffview have commit_sha and commit_short",
-      #opts.files == 1 and opts.files[1].commit_short == "c1a2b3c",
-      vim.inspect(opts.files))
-    if opts.on_close then
-      opts.on_close({ path = "foo.lua", idx = 1, pane = "preview", lnum = 5, col = 2 })
-    end
-    return {}
   end,
-  current_file = function() return { commit_sha = mock_pr_review.commit, path = "foo.lua" } end,
-  close = function() end,
 }
-package.loaded["auto-core.ui.diffview"] = mock_dv
+notes = {}
+tree.remove_review(rrow)
+ok("r9: float.confirm called for dissociation (via review.pr)", confirm_called)
+ok("r9: dissociation notification logged",
+  last_note() and last_note().msg:find("dissociated review", 1, true) ~= nil, vim.inspect(notes))
+local after = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
+ok("r9: review JSON still on disk", vim.fn.filereadable(mock_review.path) == 1)
+ok("r9: review JSON pr field cleared", after.pr == nil)
+-- restore
+after.pr = 42
+vim.fn.writefile({ vim.json.encode(vim.tbl_extend("force", after, {
+  comments = { { path = "foo.lua", line = 10, severity = "must-fix", body = "Fix this" } } })) }, mock_review.path)
 
-tree.open_pr_diff(found_pr_row)
-ok("ADR-0083: open_pr_diff invoked diffview.open", open_diff_called)
-ok("ADR-0083: resume snapshot recorded target_kind = pr",
-  tree._resume and tree._resume.target_kind == "pr" and tree._resume.pr_number == 42)
-
--- 8. Post PR feedback (Action 4)
-local post_called = false
-pr_mod.post_feedback = function(repo, pr_number, reviews, opts)
-  post_called = true
-  ok("ADR-0083: post_feedback called with correct pr_number", pr_number == 42)
+-- ── 8. S = submit_review posts ONE review entry's findings ──
+local submit_pr, submit_reviews = nil, nil
+pr_mod.post_feedback = function(_, pr_number, reviews)
+  submit_pr, submit_reviews = pr_number, reviews
   return { ok = true }
 end
-
 notes = {}
--- Restore review for post_feedback test
-repos_backend.reviews_for_pr = function(r, pr_num)
-  return { mock_pr_review }
-end
-tree.post_pr_feedback(found_pr_row)
-ok("ADR-0083: post_pr_feedback invoked worktree.pr.post_feedback", post_called)
-ok("ADR-0083: post_pr_feedback reported success",
-  last_note() and last_note().msg:find("feedback posted to PR #42", 1, true) ~= nil,
-  vim.inspect(notes))
+tree.submit_review({ kind = "review", repo = mock_repo, review = mock_review })
+ok("r9: *** submit_review posts to the review's PR (#42) ***", submit_pr == 42, tostring(submit_pr))
+ok("r9: *** it submits exactly ONE review, with the comments ARRAY loaded from JSON ***",
+  type(submit_reviews) == "table" and #submit_reviews == 1
+    and type(submit_reviews[1].comments) == "table" and #submit_reviews[1].comments == 1,
+  vim.inspect(submit_reviews))
+ok("r9: submit_review reported success",
+  last_note() and last_note().msg:find("submitted", 1, true) ~= nil, vim.inspect(notes))
 
--- 9. Create PR (Action 6)
-local create_called = false
-pr_mod.create_pr = function(repo, opts)
-  create_called = true
-  ok("ADR-0083: create_pr called with title", opts.title == "New Test PR")
-  return { ok = true, pr = { number = 99 } }
-end
+-- S on a review with NO PR refuses (nothing to submit to)
+notes = {}
+tree.submit_review({ kind = "review", repo = mock_repo, review = { name = "x", path = mock_review.path } })
+ok("r9: S on a review with no PR warns and posts nothing",
+  last_note() and last_note().msg:find("not associated with a PR", 1, true) ~= nil, vim.inspect(notes))
 
+-- S off a review row (e.g. a worktree) refuses
+notes = {}
+tree.submit_review({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+ok("r9: S off a review entry warns",
+  last_note() and last_note().msg:find("put the cursor on a review entry", 1, true) ~= nil, vim.inspect(notes))
+
+-- ── 9. N = create_pr_for_worktree (two sequential prompts) ──
+local create_title = nil
+pr_mod.create_pr = function(_, opts) create_title = opts.title; return { ok = true, pr = { number = 99 } } end
 local orig_input = vim.ui.input
 vim.ui.input = function(opts, cb)
-  if opts.prompt:find("PR Title", 1, true) then
-    cb("New Test PR")
-  else
-    cb("Test description")
-  end
+  cb(opts.prompt:find("PR Title", 1, true) and "New Test PR" or "Body text")
 end
-
 notes = {}
 tree.create_pr_for_worktree({ repo = mock_repo, worktree = mock_wt })
-ok("ADR-0083: create_pr_for_worktree called worktree.pr.create_pr", create_called)
-ok("ADR-0083: create_pr_for_worktree reported success",
-  last_note() and last_note().msg:find("created PR #99", 1, true) ~= nil,
-  vim.inspect(notes))
+ok("r9: N prompts title then body and creates the PR", create_title == "New Test PR")
+ok("r9: N reported success",
+  last_note() and last_note().msg:find("created PR #99", 1, true) ~= nil, vim.inspect(notes))
 
--- 10. Get PR (Action 1)
-local get_called = false
-pr_mod.fetch_and_create_worktree = function(repo, pr_number, opts)
-  get_called = true
-  ok("ADR-0083: fetch_and_create_worktree called with PR number", pr_number == 55)
-  return { ok = true, branch = "pr-55" }
-end
-
-vim.ui.input = function(opts, cb)
-  cb("55")
-end
-
+-- ── 10. G = get_pr_for_repo: success + error surfacing (C10-C12) ──
+local fetched_num = nil
+pr_mod.fetch_and_create_worktree = function(_, n) fetched_num = n; return { ok = true, branch = "pr-55" } end
+vim.ui.input = function(_, cb) cb("55") end
 notes = {}
 tree.get_pr_for_repo({ repo = mock_repo })
-ok("ADR-0083: get_pr_for_repo called worktree.pr.fetch_and_create_worktree", get_called)
-ok("ADR-0083: get_pr_for_repo reported success",
-  last_note() and last_note().msg:find("fetched PR #55 into branch pr-55", 1, true) ~= nil,
-  vim.inspect(notes))
+ok("r9: G fetches a valid PR number", fetched_num == 55)
+ok("r9: G reported success",
+  last_note() and last_note().msg:find("fetched PR #55", 1, true) ~= nil, vim.inspect(notes))
+
+-- C10: cancel (nil) is announced, not silent
+vim.ui.input = function(_, cb) cb(nil) end
+notes = {}
+tree.get_pr_for_repo({ repo = mock_repo })
+ok("r9 C10: *** a cancelled GetPR is announced, not silent ***",
+  last_note() and last_note().msg:find("cancelled", 1, true) ~= nil, vim.inspect(notes))
+
+-- C12: a non-numeric entry is rejected before any forge call
+fetched_num = nil
+vim.ui.input = function(_, cb) cb("not-a-number") end
+notes = {}
+tree.get_pr_for_repo({ repo = mock_repo })
+ok("r9 C12: *** a non-numeric PR entry is rejected ***",
+  last_note() and last_note().msg:find("is not a PR number", 1, true) ~= nil, vim.inspect(notes))
+ok("r9 C12: and NO forge call was made for bad input", fetched_num == nil)
+
+-- C11: a raising fetch is caught and surfaced, not left silent
+pr_mod.fetch_and_create_worktree = function() error("boom from curl") end
+vim.ui.input = function(_, cb) cb("77") end
+notes = {}
+tree.get_pr_for_repo({ repo = mock_repo })
+ok("r9 C11: *** a raising fetch is caught and surfaced ***",
+  last_note() and last_note().msg:find("errored", 1, true) ~= nil
+    and last_note().msg:find("boom from curl", 1, true) ~= nil, vim.inspect(notes))
 
 vim.ui.input = orig_input
 
