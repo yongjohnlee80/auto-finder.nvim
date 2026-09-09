@@ -245,10 +245,48 @@ end)()
   local node = { type = "file", name = "f.txt", get_id = function() return "f.txt" end }
   local state = { tree = { get_node = function() return node end } }
 
+  -- These verbs resolve their working directory from the EDITOR's cwd
+  -- (commands.lua `_cwd()` = vim.loop.cwd()) — correct for a real user, whose
+  -- editor sits inside the repo. But this suite runs under tests/run-all.sh,
+  -- which cd's to the plugin worktree, so driving them for REAL once ran
+  -- `git add -A` in the plugin worktree and staged its own files — which then
+  -- rode into a tagged release on a later bare commit (KB todo 2026-09-02).
+  -- Stub the single git-write owner (`auto-core.git.write`, resolved lazily by
+  -- commands.lua `_core_write` via require, so package.loaded is the seam) so
+  -- these verbs are exercised for ROUTING only: no real git touches any tree.
+  local WRITE = "auto-core.git.write"
+  local saved_write = package.loaded[WRITE]
+  local calls = {}
+  local function _rec(verb)
+    return function(...)
+      local n = select("#", ...)
+      calls[#calls + 1] = { verb = verb, cwd = (select(1, ...)) }
+      local cb = select(n, ...)          -- _run appends the callback last
+      if type(cb) == "function" then cb(true, "") end
+    end
+  end
+  -- `.stage` must be a function or _core_write's guard rejects the table.
+  package.loaded[WRITE] = { stage = _rec("stage"), unstage = _rec("unstage"),
+                            stage_all = _rec("stage_all") }
+
   for _, name in ipairs({ "git_add_file", "git_unstage_file", "git_add_all",
                           "git_toggle_file_stage" }) do
     ok("[7] " .. name .. " is callable without raising", (pcall(cmds[name], state)))
   end
+
+  package.loaded[WRITE] = saved_write
+
+  -- Routing, not merely non-raising: each write reached auto-core's single
+  -- owner (where the cwd is ultimately applied), never a raw git in the suite.
+  -- git_toggle_file_stage reads a status first and short-circuits on a path
+  -- absent from the tree, so it is asserted callable above, not for routing.
+  local function _saw(verb)
+    for _, c in ipairs(calls) do if c.verb == verb then return true end end
+    return false
+  end
+  ok("[7] git_add_all routes to auto-core git.write.stage_all", _saw("stage_all"))
+  ok("[7] git_add_file routes to auto-core git.write.stage", _saw("stage"))
+  ok("[7] git_unstage_file routes to auto-core git.write.unstage", _saw("unstage"))
 
   -- And the adapter must be declared BEFORE its first use, not merely exported.
   -- Asserted on the source because that ordering is what broke, and a runtime

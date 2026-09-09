@@ -37,6 +37,26 @@ cd "$(dirname "$0")/.."
 KNOWN_ENV_FAILS="${AF_KNOWN_ENV_FAILS:-0}"
 overall=0
 
+# ── SELF-STAGE GUARD (KB todo 2026-09-02) ──────────────────────────
+# No suite may touch THIS worktree's git state. A suite that runs a git
+# WRITE (`git add`, commit, …) against the process cwd instead of a
+# fixture stages the plugin's own files — and a later bare `git commit`
+# then wrote them into a tagged release once already (PRs/… into v0.4.13).
+# Snapshot the worktree's porcelain status now and again at the end; any
+# change means a suite mutated the plugin worktree, so the run fails
+# loudly HERE rather than letting the staging ride into a commit.
+#
+# It is a before/after INVARIANT, not a clean-tree check: a dev running
+# on a dirty branch is fine, as long as the run leaves that status
+# untouched. Skipped entirely when this is not a git checkout (a CI
+# tarball), so the runner stays usable off a worktree.
+git_status_snapshot() { git status --porcelain 2>/dev/null; }
+GIT_GUARD_ACTIVE=0
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  GIT_GUARD_ACTIVE=1
+  GIT_STATUS_BEFORE="$(git_status_snapshot)"
+fi
+
 # ── XDG SANDBOX ───────────────────────────────────────────────────
 # One writable root per run, exported so every suite nests its
 # config/state/cache under it (tests/_sandbox.lua reads this var).
@@ -245,6 +265,20 @@ fi
 for entry in "${SUITES[@]}"; do
   run_suite "${entry%%|*}" "${entry#*|}"
 done
+
+# ── SELF-STAGE GUARD: verdict ──────────────────────────────────────
+if [ "$GIT_GUARD_ACTIVE" -eq 1 ]; then
+  GIT_STATUS_AFTER="$(git_status_snapshot)"
+  if [ "$GIT_STATUS_BEFORE" != "$GIT_STATUS_AFTER" ]; then
+    echo "── self-stage guard ──────────────────────────"
+    echo "   ✗ a suite changed THIS worktree's git status — a git write"
+    echo "     reached the plugin worktree instead of a fixture (KB todo"
+    echo "     2026-09-02). Before → after:"
+    diff <(printf '%s\n' "$GIT_STATUS_BEFORE") \
+         <(printf '%s\n' "$GIT_STATUS_AFTER") | sed 's/^/     /'
+    overall=1
+  fi
+fi
 echo "──────────────────────────────────────"
 if [ "$overall" -eq 0 ]; then
   echo "run-all: OK (env-fail tolerance: $KNOWN_ENV_FAILS)"
