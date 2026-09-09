@@ -187,6 +187,18 @@ local SEVERITY_HL = {
   ["question"]   = "AutoCoreReviewQuestion",
 }
 
+-- A PR is no longer its own row (ADR-0083 Amendment r9): it is an ASSOCIATION
+-- with the worktree/branch, shown as a `[#N]` badge on that row. The colour
+-- carries the state the old `[OPEN]/[DRAFT]/[CLOSED]` text did — green open,
+-- gray draft, red closed/merged — so the number reads its state at a glance.
+---@param pr table  a worktree.repos PR record ({ number, state, draft, ... })
+---@return string highlight_group
+local function _pr_badge_hl(pr)
+  if pr.draft or pr.state == "draft" then return "AutoCoreReviewFrame" end
+  if pr.state == "closed" or pr.state == "merged" then return "AutoCoreGitDeleted" end
+  return "AutoCoreGitAdded"
+end
+
 ---CLOSE_CHOICES are the answers to the unsent-review prompt, spelled out.
 ---
 ---`keep` is the one that was MISSING, and its absence was the defect. A draft
@@ -290,22 +302,46 @@ end
 ---never a replacement: a review can carry real findings AND fail validation,
 ---and hiding either half is how a reviewer loses one.
 ---@param meta table  a `worktree.review.describe` record
+---@param posted boolean?  whether this review's findings are posted to its PR
 ---@return string
-local function _review_label(meta)
+local function _review_label(meta, posted)
   local name = tostring(meta.name or "?")
   if meta.slug and meta.slug ~= "" then
     name = name:gsub("^" .. vim.pesc(meta.slug) .. "@", "")
   end
+  -- PR association + posted state (ADR-0083 Amendment r9). A review that belongs
+  -- to a PR is tagged `→ #N`; once its findings are on the forge it also carries
+  -- `[posted]`. Both ride at the END of the label, after the severity badge, so
+  -- `foo.lua [must-fix] → #43 [posted]` reads left-to-right most-important-first.
+  local tail = ""
+  if meta.pr then tail = tail .. "  → #" .. tostring(meta.pr) end
+  if posted then tail = tail .. "  [posted]" end
   -- An UNDESCRIBED record — an older worktree.nvim's cheap `{revision, path,
   -- name}` — has no severity to report. It gets the bare filename rather than a
   -- badge that would read as "no comments" when the truth is "not looked at".
-  if meta.severities == nil then return name end
+  if meta.severities == nil then return name .. tail end
   local parts = {}
   if meta.worst then parts[#parts + 1] = meta.worst
   elseif meta.verdict and meta.verdict ~= "" then parts[#parts + 1] = meta.verdict
   elseif not meta.err then parts[#parts + 1] = "no comments" end
   if meta.err then parts[#parts + 1] = "malformed" end
-  return name .. "  [" .. table.concat(parts, " · ") .. "]"
+  return name .. "  [" .. table.concat(parts, " · ") .. "]" .. tail
+end
+
+---_review_posted asks the backend whether a review's findings are all on the
+---forge (read from the two-phase posting RECEIPT — the review JSON itself is an
+---ADR-0067 immutable artifact and must not be written to). Guarded: an older
+---worktree.nvim without `review_posted` simply never shows `[posted]`, so this
+---auto-finder release degrades cleanly ahead of the worktree.nvim side landing.
+---@param repo table?
+---@param meta table
+---@return boolean
+local function _review_posted(repo, meta)
+  if not (repo and meta and meta.pr) then return false end
+  local backend = _repos()
+  if not (backend and type(backend.review_posted) == "function") then return false end
+  local ok, res = pcall(backend.review_posted, repo, meta)
+  return ok and res == true
 end
 
 ---_render_review draws one review as an EXPANDABLE row whose children are its
@@ -331,12 +367,13 @@ local function _render_review(rows, lines, hls, depth, meta, extra)
   local id = "review:" .. tostring(meta.path)
   local open = M._expanded[id] == true
   local ppr = extra and (extra.parent_pr or extra.pr)
+  local posted = _review_posted(extra and extra.repo, meta)
   _row(rows, lines, hls, {
     kind = "review", id = id, expandable = true,
     repo = extra.repo, worktree = extra.worktree, node = extra.node, review = meta,
     parent_pr = ppr,
     hl = (meta.worst and SEVERITY_HL[meta.worst]) or "AutoCoreReviewFrame",
-    text = string.rep(IND, depth) .. _chevron(open) .. " " .. _review_label(meta),
+    text = string.rep(IND, depth) .. _chevron(open) .. " " .. _review_label(meta, posted),
   })
   if not open then return end
   -- The pair, newest-primary first: Markdown, then JSON. A review whose document
@@ -465,12 +502,37 @@ local function _render(bufnr)
           -- user drives; show it plainly so `w` has visible feedback.
           local suffix = wt.watched and "  ● watched" or ""
           if wt.is_base then suffix = suffix .. "  (base)" end
+          -- Resolve the branch name once so the PR badge can append to it. The
+          -- bare `wt.branch or <dir>` form MUST be parenthesised or `..` binds
+          -- the `(detached)` suffix to the fallback alone (Lua `..` > `or`).
+          local branch_label = wt.branch
+            or (vim.fn.fnamemodify(wt.path, ":t") .. (wt.detached and "  (detached)" or ""))
+          -- PR association (ADR-0083 Amendment r9): a worktree whose branch is a
+          -- PR carries a `[#N]` badge after the name, BEFORE the watch marker —
+          -- the PR is no longer a row of its own. Cached per-worktree (`false`
+          -- records "looked up, no PR") so an unchanged repaint costs no backend
+          -- call; `invalidate()` — which GetPR fires — re-queries.
+          local wc = _cache(wid)
+          if wc.pr == nil then
+            local found = nil
+            if type(backend.pr_for_worktree) == "function" then
+              found = backend.pr_for_worktree(repo, wt)
+            end
+            wc.pr = found or false
+          end
+          local pr = wc.pr or nil
+          local wlabel, wspans = branch_label, nil
+          if pr then
+            local from = #wlabel + 2 -- badge sits after two padding spaces
+            wlabel = wlabel .. "  [#" .. tostring(pr.number) .. "]"
+            wspans = { { from = from, to = #wlabel, hl = _pr_badge_hl(pr) } }
+          end
           local wopen = container(1, {
             kind = "worktree", id = wid, repo = repo, worktree = wt,
             hl = wt.watched and "AutoCoreSectionActive" or "AutoCoreSectionInactive",
-            label = wt.branch or vim.fn.fnamemodify(wt.path, ":t")
-              .. (wt.detached and "  (detached)" or ""),
+            label = wlabel,
             suffix = suffix,
+            spans = wspans,
           })
           if wopen then
             if not wt.watched then
@@ -503,54 +565,9 @@ local function _render(bufnr)
                 -- tree. Say so rather than letting omission imply it.
                 msg(2, "working-tree status unavailable", "AutoCoreGitDeleted")
               end
-              -- Render PR row if worktree is associated with a PR (ADR-0083 §2.5/§2.6)
-              if type(backend.pr_for_worktree) == "function" then
-                local pr = backend.pr_for_worktree(repo, wt)
-                if pr then
-                  local pr_hl = (pr.draft or pr.state == "draft") and "AutoCoreReviewFrame"
-                    or (pr.state == "closed" and "AutoCoreGitDeleted" or "AutoCoreGitAdded")
-                  local pr_badge = (pr.draft or pr.state == "draft") and "[DRAFT]"
-                    or (pr.state == "closed" and "[CLOSED]" or "[OPEN]")
-                  local pr_text = string.format("%s● PR #%s: %s  %s",
-                    string.rep(IND, 2), tostring(pr.number), pr.title or "", pr_badge)
-                  _row(rows, lines, hls, {
-                    kind = "pr",
-                    id = "pr:" .. repo.common_dir .. ":" .. tostring(pr.number),
-                    depth = 2,
-                    repo = repo,
-                    worktree = wt,
-                    pr = pr,
-                    hl = pr_hl,
-                    text = pr_text,
-                    node = {
-                      kind = "pr",
-                      pr_number = pr.number,
-                      title = pr.title,
-                      short = "PR#" .. tostring(pr.number),
-                    },
-                  })
-                  -- Child reviews associated with this PR (Action 5)
-                  local pr_revs = {}
-                  if type(backend.reviews_for_pr) == "function" then
-                    pr_revs = backend.reviews_for_pr(repo, pr.number)
-                  elseif type(backend.reviews_all) == "function" then
-                    local all_revs = backend.reviews_all(repo)
-                    for _, r in ipairs(all_revs) do
-                      if r.pr and tostring(r.pr) == tostring(pr.number) then
-                        table.insert(pr_revs, r)
-                      end
-                    end
-                  end
-                  for _, r_meta in ipairs(pr_revs) do
-                    _render_review(rows, lines, hls, 3, r_meta, {
-                      repo = repo,
-                      worktree = wt,
-                      pr = pr,
-                      parent_pr = pr,
-                    })
-                  end
-                end
-              end
+              -- (ADR-0083 Amendment r9) The PR is now a `[#N]` badge on the
+              -- worktree row above, not a row of its own; its reviews appear in
+              -- the repo's reviews section tagged `→ #N`. No PR block here.
               for _, node in ipairs(cc.items) do
                 local nid = node.kind == "uncommitted"
                   and ("unc:" .. wt.path) or ("commit:" .. node.sha)
@@ -869,12 +886,6 @@ local function _activate(row)
       kind = "commit", repo = row.repo, worktree = row.worktree,
       node = { kind = "commit", sha = row.sha, short = row.sha:sub(1, 7) },
     })
-  end
-  if row.kind == "pr" then
-    if row.pr and row.pr.kb_doc and vim.fn.filereadable(row.pr.kb_doc) == 1 then
-      return _open_path(row.pr.kb_doc)
-    end
-    return M.open_pr_diff(row)
   end
   if row.kind == "more" then return M.load_more(row) end
   -- A review row now EXPANDS into its [markdown, json] pair rather than opening
@@ -1741,7 +1752,84 @@ function M.open_worktree_diff(row, opts)
   }, opts)
 end
 
----post_pr_feedback posts review findings to PR inline (ADR-0083 §2.6 Action 4).
+---_load_review_for_post reads a described review's FULL JSON and shapes it for
+---`worktree.pr.post_feedback`, which iterates the comments ARRAY — a `describe`
+---record only carries the comment COUNT, so passing one straight through posts
+---nothing (and `ipairs` on a number errors). Returns nil + a reason when there
+---is nothing postable.
+---@param meta table  a describe record (has .path, .name)
+---@return table? rev, string? why
+local function _load_review_for_post(meta)
+  if not (meta and meta.path) then return nil, "no review path" end
+  local ok_store, store = pcall(require, "worktree.store")
+  if not ok_store then return nil, "worktree.store unavailable" end
+  local data, rerr = store.read_json(meta.path)
+  if not data then return nil, rerr or "unreadable review json" end
+  local comments = type(data.comments) == "table" and data.comments or {}
+  if #comments == 0 then return nil, "review has no line findings to post" end
+  return {
+    commit = data.commit,
+    sha = data.commit,
+    doc_name = meta.name or vim.fn.fnamemodify(meta.path, ":t"),
+    comments = comments,
+  }, nil
+end
+
+---submit_review posts the findings of ONE selected review entry to its PR
+---(ADR-0083 Amendment r9, `S`). The move off `P` is deliberate: `P` posted
+---whatever review group the cursor's PR row implied, which risked sending an
+---unintended batch. `S` submits exactly the review the cursor sits on.
+---@param row table
+function M.submit_review(row)
+  local backend = _repos()
+  -- Accept the review row or either of its pair leaves (like `d`): the two
+  -- files are one review.
+  if not (row and (row.kind == "review" or row.kind == "review_file")
+      and row.review and row.review.path) then
+    logger.notify("repos: put the cursor on a review entry to submit it (S)",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  if not (backend and row.repo) then return end
+  local meta = row.review
+  local pr_number = meta.pr
+  if not pr_number then
+    logger.notify(string.format(
+      "repos: review %s is not associated with a PR — nothing to submit to",
+      tostring(meta.name or meta.path)), { level = vim.log.levels.WARN })
+    return
+  end
+  local rev, why = _load_review_for_post(meta)
+  if not rev then
+    logger.notify(string.format("repos: cannot submit %s — %s",
+      tostring(meta.name or meta.path), tostring(why)), { level = vim.log.levels.WARN })
+    return
+  end
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if not ok_pr then
+    logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+    return
+  end
+  local ok_call, res = pcall(pr_mod.post_feedback, row.repo, pr_number, { rev })
+  if not ok_call then
+    logger.notify(string.format("repos: submitting review to PR #%s errored — %s",
+      tostring(pr_number), tostring(res)), { level = vim.log.levels.ERROR })
+    return
+  end
+  if res and res.ok then
+    M.invalidate(nil); _rerender()
+    logger.notify(string.format("repos: submitted %s to PR #%s",
+      tostring(meta.name or "review"), tostring(pr_number)), { level = vim.log.levels.INFO })
+  else
+    logger.notify(string.format("repos: failed to submit review to PR #%s — %s",
+      tostring(pr_number), tostring(res and res.error or "unknown")),
+      { level = vim.log.levels.ERROR })
+  end
+end
+
+---post_pr_feedback posts EVERY review associated with a PR (the legacy
+---`:AutoFinderPostPRFeedback` command). The per-entry `S` (submit_review) is the
+---keymapped path now; this stays as a bulk command.
 ---@param row table
 ---@param opts table?
 function M.post_pr_feedback(row, opts)
@@ -1769,20 +1857,26 @@ function M.post_pr_feedback(row, opts)
     return
   end
 
-  local reviews = {}
+  local metas = {}
   if type(backend.reviews_for_pr) == "function" then
-    reviews = backend.reviews_for_pr(row.repo, pr.number)
+    metas = backend.reviews_for_pr(row.repo, pr.number)
   else
-    local all = backend.reviews_all(row.repo)
-    for _, r in ipairs(all) do
+    for _, r in ipairs(backend.reviews_all(row.repo)) do
       if r.pr and tostring(r.pr) == tostring(pr.number) then
-        table.insert(reviews, r)
+        table.insert(metas, r)
       end
     end
   end
+  -- Shape each described review into a postable payload (comments ARRAY, not
+  -- the describe count). A review with no line findings is skipped, not fatal.
+  local reviews = {}
+  for _, m in ipairs(metas) do
+    local rev = _load_review_for_post(m)
+    if rev then table.insert(reviews, rev) end
+  end
 
   if #reviews == 0 then
-    logger.notify(string.format("repos: no review documents associated with PR #%s to post", tostring(pr.number)),
+    logger.notify(string.format("repos: no postable review findings associated with PR #%s", tostring(pr.number)),
       { level = vim.log.levels.WARN })
     return
   end
@@ -1842,6 +1936,50 @@ function M.create_pr_for_worktree(row)
   end)
 end
 
+---_fetch_pr validates a PR identifier and fetches it, surfacing EVERY outcome —
+---bad input, a returned failure, or a raised error. Shared by the interactive
+---`G` and the `:AutoFinderGetPR {n}` command so BOTH validate and guard
+---identically (lector PR #45 MF2: the command path passed input straight to the
+---forge URL and let a raised fetch error escape).
+---@param repo table
+---@param raw string|number|nil  the supplied PR identifier
+---@return boolean ok
+function M._fetch_pr(repo, raw)
+  local input = vim.trim(tostring(raw or ""))
+  if input == "" then
+    logger.notify("repos: GetPR cancelled (no PR number entered)", { level = vim.log.levels.INFO })
+    return false
+  end
+  -- C12: it must be a positive integer before a forge URL is built from it.
+  local num = tonumber(input)
+  if not num or num ~= math.floor(num) or num <= 0 then
+    logger.notify(string.format("repos: '%s' is not a PR number", input), { level = vim.log.levels.WARN })
+    return false
+  end
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if not ok_pr then
+    logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+    return false
+  end
+  -- C11: fetch_and_create_worktree can RAISE (a non-allowlisted provider, a curl
+  -- failure); a bare call escaped with no toast. pcall and surface it.
+  local ok_call, res = pcall(pr_mod.fetch_and_create_worktree, repo, num)
+  if not ok_call then
+    logger.notify(string.format("repos: GetPR #%s errored — %s", tostring(num), tostring(res)),
+      { level = vim.log.levels.ERROR })
+    return false
+  end
+  if res and res.ok then
+    M.invalidate(nil); _rerender()
+    logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(num), tostring(res.branch)),
+      { level = vim.log.levels.INFO })
+    return true
+  end
+  logger.notify(string.format("repos: could not fetch PR #%s — %s", tostring(num), tostring(res and res.error or "unknown")),
+    { level = vim.log.levels.ERROR })
+  return false
+end
+
 ---get_pr_for_repo fetches PR branch and creates worktree (ADR-0083 §2.6 Action 1).
 ---@param row table
 function M.get_pr_for_repo(row)
@@ -1851,26 +1989,15 @@ function M.get_pr_for_repo(row)
       { level = vim.log.levels.WARN })
     return
   end
-
   local repo = row.repo
   vim.ui.input({ prompt = string.format("Fetch PR # for %s: ", repo.label) }, function(input)
-    if not input or input == "" then return end
-    local num = tonumber(input) or input
-    local ok_pr, pr_mod = pcall(require, "worktree.pr")
-    if not ok_pr then
-      logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+    -- C10: a cancel (nil) is announced distinctly from an empty entry; the rest
+    -- of validation/guarding is shared with the command path.
+    if input == nil then
+      logger.notify("repos: GetPR cancelled", { level = vim.log.levels.INFO })
       return
     end
-    local res = pr_mod.fetch_and_create_worktree(repo, num)
-    if res and res.ok then
-      M.invalidate(nil)
-      _rerender()
-      logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(num), tostring(res.branch)),
-        { level = vim.log.levels.INFO })
-    else
-      logger.notify(string.format("repos: could not fetch PR #%s — %s", tostring(num), tostring(res and res.error or "unknown")),
-        { level = vim.log.levels.ERROR })
-    end
+    M._fetch_pr(repo, input)
   end)
 end
 
@@ -1885,18 +2012,11 @@ function M.get_pr_command(opts)
   end
   local arg = opts and opts.fargs and opts.fargs[1]
   if arg then
-    local ok_pr, pr_mod = pcall(require, "worktree.pr")
-    if ok_pr then
-      local res = pr_mod.fetch_and_create_worktree(repo, tonumber(arg) or arg)
-      if res and res.ok then
-        M.invalidate(nil)
-        _rerender()
-        logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(arg), tostring(res.branch)), { level = vim.log.levels.INFO })
-        return
-      end
-    end
+    -- Route the command through the SAME validation + guard as `G` (MF2).
+    M._fetch_pr(repo, arg)
+  else
+    M.get_pr_for_repo({ repo = repo })
   end
-  M.get_pr_for_repo({ repo = repo })
 end
 
 function M.create_pr_command(opts)
@@ -1956,27 +2076,30 @@ local function _info(row)
       "  detached: " .. tostring(row.worktree.detached),
       "  watched:  " .. tostring(row.worktree.watched),
       "  is base:  " .. tostring(row.worktree.is_base),
+    }
+    -- The PR is now the worktree's [#N] badge (Amendment r9), so its details —
+    -- and the KB doc path the old PR-row `<CR>` used to open — live here in the
+    -- worktree's info instead.
+    local backend = _repos()
+    local wpr = backend and type(backend.pr_for_worktree) == "function"
+      and backend.pr_for_worktree(row.repo, row.worktree) or nil
+    if wpr then
+      vim.list_extend(lines, {
+        "",
+        "PR #" .. tostring(wpr.number) .. ": " .. tostring(wpr.title or ""),
+        "  state:  " .. tostring(wpr.state or (wpr.draft and "draft" or "open")),
+        "  base:   " .. tostring(wpr.base or wpr.base_ref or "(unknown)"),
+        "  kb_doc: " .. tostring(wpr.kb_doc or "(none)"),
+      })
+    end
+    vim.list_extend(lines, {
       "",
       row.worktree.is_base
         and "This IS the base branch, so there is nothing to diff it against."
         or ("O opens the Git Diff View for everything this branch adds on top of "
             .. tostring(_base_branch(row.repo) or "its base") .. "."),
       "An unwatched worktree costs no git calls; w toggles it.",
-    }
-  elseif row.kind == "pr" then
-    local pr = row.pr or {}
-    lines = {
-      "Pull Request #" .. tostring(pr.number or (row.node and row.node.pr_number) or "?"),
-      "  title:   " .. tostring(pr.title or ""),
-      "  state:   " .. tostring(pr.state or (pr.draft and "draft" or "open")),
-      "  branch:  " .. tostring(pr.branch or (row.worktree and row.worktree.branch) or ""),
-      "  base:    " .. tostring(pr.base or pr.base_ref or "(unknown)"),
-      "  author:  " .. tostring(pr.author or "(unknown)"),
-      "  kb_doc:  " .. tostring(pr.kb_doc or "(none)"),
-      "",
-      "O opens grouped multi-commit diff · P posts inline feedback",
-      "<CR> opens KB document",
-    }
+    })
   elseif row.kind == "commit" then
     local c = row.node.commit or {}
     lines = {
@@ -2136,19 +2259,21 @@ M.HELP = {
   "  repo → reviews  → every review this repository has, newest first",
   "",
   "  a file with review feedback on it is badged [feedback]",
-  "  a review row is named <commit>.r<N>.review.json  [worst severity]",
+  "  a review row is <commit>.r<N>.review.json  [severity]  → #N (its PR)  [posted]",
+  "  a worktree that IS a PR branch is badged [#N] after its name",
   "",
-  "  <CR>  expand · open a file · open a review JSON · open PR KB doc",
+  "  <CR>  expand · open a file · open a review JSON",
   "  o     diff the commit — three columns: files | a/ (old) | b/ (new)",
-  "  O     diff PR across all commits (on PR entry)",
+  "  O     diff this worktree's branch across its commits (against its base)",
   "  w     watch / unwatch this worktree (persists)",
   "  m     load another window of commits",
   "  i     info about the node          R  reload (all with no node)",
-  "  d     remove review / dissociate from PR — confirms first",
+  "  d     remove review / dissociate from its PR — confirms first",
   "  A     attach review feedback to an in-progress task",
   "  G     GetPR: fetch PR branch and create worktree (on repo)",
   "  N     CreatePR: create PR for this worktree (on worktree)",
-  "  P     post inline feedback to PR (on PR) / push (on worktree)",
+  "  S     submit this review entry's findings to its PR (on a review)",
+  "  P     push this repository — confirms first",
   "  ?     this help",
   "",
   "  git actions:",
@@ -2552,9 +2677,10 @@ end
 ---to be published — and the point is that a mistyped key on the wrong row
 ---cannot publish.
 function M.git_push(row)
-  if row and row.kind == "pr" then
-    return M.post_pr_feedback(row)
-  end
+  -- `P` is PUSH ONLY (ADR-0083 Amendment r9). It used to double as "post inline
+  -- feedback" when the cursor sat on a PR row — a cursor-position overload that
+  -- risked posting an unintended review group. Posting now has its own key `S`
+  -- on a specific review entry (M.submit_review), so `P` never posts.
   if not (row and row.repo) then
     logger.notify("repos: put the cursor on a repository to push",
       { level = vim.log.levels.WARN })
@@ -2596,25 +2722,19 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("o", function() M.open_diff(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: diff this commit")
   -- `O` is the GROUPED diff: every commit in a range, in one view. `o` is the
-  -- single thing under the cursor. Three row kinds answer `O`, in the order a
-  -- reader would expect the most specific to win:
-  --
-  --   pr        the PR's commits against its base
-  --   worktree  the branch's commits against its base (Johno, 2026-09-08 —
-  --             "let's assign 'O' key on the worktree or branch to open the
-  --             diff_view"). A PR is a branch with a number attached, so a
-  --             branch without one was unreviewable for no reason but that.
-  --   anything  fall through to `o`'s behaviour rather than doing nothing
+  -- single thing under the cursor. Since a PR is no longer its own row
+  -- (Amendment r9), `O` on the WORKTREE answers "what does this branch change"
+  -- against its base — which is the same question as "what does this PR change",
+  -- the PR being a branch with a number attached (Johno, 2026-09-08). Anything
+  -- else falls through to `o`'s behaviour rather than doing nothing.
   set("O", function()
     local row = _row_under_cursor(panel_winid)
-    if row and row.kind == "pr" then
-      M.open_pr_diff(row)
-    elseif row and row.kind == "worktree" then
+    if row and row.kind == "worktree" then
       M.open_worktree_diff(row)
     else
       M.open_diff(row)
     end
-  end, "auto-finder.repos: grouped diff — PR / worktree against its base / commit")
+  end, "auto-finder.repos: grouped diff — worktree branch against its base / commit")
   set("w", function() M.toggle_watch(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: watch / unwatch this worktree")
   set("m", function() M.load_more(_row_under_cursor(panel_winid)) end,
@@ -2630,9 +2750,11 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("c", function() M.git_commit(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: commit what is staged")
   set("P", function() M.git_push(_row_under_cursor(panel_winid)) end,
-    "auto-finder.repos: post inline feedback to PR (on PR) / push (confirms first)")
+    "auto-finder.repos: push this repository (confirms first)")
+  set("S", function() M.submit_review(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: submit this review entry to its PR")
   set("d", function() M.remove_review(_row_under_cursor(panel_winid)) end,
-    "auto-finder.repos: remove review / dissociate from PR (confirms first)")
+    "auto-finder.repos: remove review / dissociate from its PR (confirms first)")
   set("A", function() M.attach_review_to_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: attach review to in-progress task")
   set("G", function() M.get_pr_for_repo(_row_under_cursor(panel_winid)) end,
