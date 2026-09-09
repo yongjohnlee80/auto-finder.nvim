@@ -1936,6 +1936,50 @@ function M.create_pr_for_worktree(row)
   end)
 end
 
+---_fetch_pr validates a PR identifier and fetches it, surfacing EVERY outcome —
+---bad input, a returned failure, or a raised error. Shared by the interactive
+---`G` and the `:AutoFinderGetPR {n}` command so BOTH validate and guard
+---identically (lector PR #45 MF2: the command path passed input straight to the
+---forge URL and let a raised fetch error escape).
+---@param repo table
+---@param raw string|number|nil  the supplied PR identifier
+---@return boolean ok
+function M._fetch_pr(repo, raw)
+  local input = vim.trim(tostring(raw or ""))
+  if input == "" then
+    logger.notify("repos: GetPR cancelled (no PR number entered)", { level = vim.log.levels.INFO })
+    return false
+  end
+  -- C12: it must be a positive integer before a forge URL is built from it.
+  local num = tonumber(input)
+  if not num or num ~= math.floor(num) or num <= 0 then
+    logger.notify(string.format("repos: '%s' is not a PR number", input), { level = vim.log.levels.WARN })
+    return false
+  end
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if not ok_pr then
+    logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
+    return false
+  end
+  -- C11: fetch_and_create_worktree can RAISE (a non-allowlisted provider, a curl
+  -- failure); a bare call escaped with no toast. pcall and surface it.
+  local ok_call, res = pcall(pr_mod.fetch_and_create_worktree, repo, num)
+  if not ok_call then
+    logger.notify(string.format("repos: GetPR #%s errored — %s", tostring(num), tostring(res)),
+      { level = vim.log.levels.ERROR })
+    return false
+  end
+  if res and res.ok then
+    M.invalidate(nil); _rerender()
+    logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(num), tostring(res.branch)),
+      { level = vim.log.levels.INFO })
+    return true
+  end
+  logger.notify(string.format("repos: could not fetch PR #%s — %s", tostring(num), tostring(res and res.error or "unknown")),
+    { level = vim.log.levels.ERROR })
+  return false
+end
+
 ---get_pr_for_repo fetches PR branch and creates worktree (ADR-0083 §2.6 Action 1).
 ---@param row table
 function M.get_pr_for_repo(row)
@@ -1945,50 +1989,15 @@ function M.get_pr_for_repo(row)
       { level = vim.log.levels.WARN })
     return
   end
-
   local repo = row.repo
   vim.ui.input({ prompt = string.format("Fetch PR # for %s: ", repo.label) }, function(input)
-    -- C10: a cancel (nil) or empty entry must NOT be silent — the user cannot
-    -- otherwise tell a cancel apart from a crash.
+    -- C10: a cancel (nil) is announced distinctly from an empty entry; the rest
+    -- of validation/guarding is shared with the command path.
     if input == nil then
       logger.notify("repos: GetPR cancelled", { level = vim.log.levels.INFO })
       return
     end
-    input = vim.trim(input)
-    if input == "" then
-      logger.notify("repos: GetPR cancelled (no PR number entered)", { level = vim.log.levels.INFO })
-      return
-    end
-    -- C12: validate it IS a positive integer before a forge URL is built from it.
-    local num = tonumber(input)
-    if not num or num ~= math.floor(num) or num <= 0 then
-      logger.notify(string.format("repos: '%s' is not a PR number", input),
-        { level = vim.log.levels.WARN })
-      return
-    end
-    local ok_pr, pr_mod = pcall(require, "worktree.pr")
-    if not ok_pr then
-      logger.notify("repos: worktree.pr is unavailable", { level = vim.log.levels.ERROR })
-      return
-    end
-    -- C11: fetch_and_create_worktree can RAISE (a non-allowlisted credential
-    -- provider, a curl failure) — a bare call would escape this ui.input
-    -- callback with no toast at all. pcall and surface it.
-    local ok_call, res = pcall(pr_mod.fetch_and_create_worktree, repo, num)
-    if not ok_call then
-      logger.notify(string.format("repos: GetPR #%s errored — %s", tostring(num), tostring(res)),
-        { level = vim.log.levels.ERROR })
-      return
-    end
-    if res and res.ok then
-      M.invalidate(nil)
-      _rerender()
-      logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(num), tostring(res.branch)),
-        { level = vim.log.levels.INFO })
-    else
-      logger.notify(string.format("repos: could not fetch PR #%s — %s", tostring(num), tostring(res and res.error or "unknown")),
-        { level = vim.log.levels.ERROR })
-    end
+    M._fetch_pr(repo, input)
   end)
 end
 
@@ -2003,18 +2012,11 @@ function M.get_pr_command(opts)
   end
   local arg = opts and opts.fargs and opts.fargs[1]
   if arg then
-    local ok_pr, pr_mod = pcall(require, "worktree.pr")
-    if ok_pr then
-      local res = pr_mod.fetch_and_create_worktree(repo, tonumber(arg) or arg)
-      if res and res.ok then
-        M.invalidate(nil)
-        _rerender()
-        logger.notify(string.format("repos: fetched PR #%s into branch %s", tostring(arg), tostring(res.branch)), { level = vim.log.levels.INFO })
-        return
-      end
-    end
+    -- Route the command through the SAME validation + guard as `G` (MF2).
+    M._fetch_pr(repo, arg)
+  else
+    M.get_pr_for_repo({ repo = repo })
   end
-  M.get_pr_for_repo({ repo = repo })
 end
 
 function M.create_pr_command(opts)

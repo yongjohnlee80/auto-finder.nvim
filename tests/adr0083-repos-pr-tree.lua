@@ -327,6 +327,33 @@ ok("r9 C11: *** a raising fetch is caught and surfaced ***",
   last_note() and last_note().msg:find("errored", 1, true) ~= nil
     and last_note().msg:find("boom from curl", 1, true) ~= nil, vim.inspect(notes))
 
+-- MF2: the :AutoFinderGetPR {arg} COMMAND path routes through the SAME
+-- validation/guard helper as interactive `G` (it used to pass the arg straight
+-- to the forge and let a raised fetch escape).
+local cmd_fetch = nil
+pr_mod.fetch_and_create_worktree = function(_, n) cmd_fetch = n; return { ok = true, branch = "pr-" .. tostring(n) } end
+notes = {}
+tree.get_pr_command({ fargs = { "abc" } })
+ok("r9 MF2: *** command rejects a non-numeric arg (no forge call) ***",
+  cmd_fetch == nil and last_note() and last_note().msg:find("is not a PR number", 1, true) ~= nil,
+  vim.inspect(notes))
+
+pr_mod.fetch_and_create_worktree = function(_, n) cmd_fetch = n; return { ok = false, error = "no such PR" } end
+cmd_fetch = nil
+notes = {}
+tree.get_pr_command({ fargs = { "88" } })
+ok("r9 MF2: command surfaces a returned fetch failure",
+  cmd_fetch == 88 and last_note() and last_note().msg:find("could not fetch PR #88", 1, true) ~= nil,
+  vim.inspect(notes))
+
+pr_mod.fetch_and_create_worktree = function() error("boom from command") end
+notes = {}
+tree.get_pr_command({ fargs = { "89" } })
+ok("r9 MF2: *** command catches a raised fetch and surfaces it ***",
+  last_note() and last_note().msg:find("errored", 1, true) ~= nil
+    and last_note().msg:find("boom from command", 1, true) ~= nil,
+  vim.inspect(notes))
+
 vim.ui.input = orig_input
 
 print(string.format("%d passed, %d failed", pass, fail))
