@@ -2191,9 +2191,13 @@ function M.associate_worktree(row)
           -- Snapshot BOTH ends, including the ones that were EMPTY: "I saw
           -- nothing there" is a claim the retry must also be held to, so a
           -- conflict appearing under the prompt refuses.
+          -- The target is bound by NUMBER AND BRANCH. Its number is the PR
+          -- the user asked for, so it is constant and pins nothing; what can
+          -- move under an open prompt is which branch holds it, and that is
+          -- exactly what the user was shown (lector r2).
           apply({ reassign = true, expect = {
             source = src and src.number or false,
-            target = tgt and tgt.number or false,
+            target = tgt and { number = tgt.number, branch = tgt.branch } or false,
           } })
         end)
         return

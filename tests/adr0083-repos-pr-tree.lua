@@ -661,7 +661,13 @@ do
   ok("r10.7 r1: *** and the retry snapshots BOTH endpoints ***",
     both_opts and both_opts.expect
       and tostring(both_opts.expect.source) == "43"
-      and tostring(both_opts.expect.target) == "42", vim.inspect(both_opts))
+      and type(both_opts.expect.target) == "table"
+      and tostring(both_opts.expect.target.number) == "42", vim.inspect(both_opts))
+  -- lector r2: the target's NUMBER is the PR requested and so is constant;
+  -- the branch holding it is what can move under an open prompt, and it is
+  -- what the user was shown.
+  ok("r10.7 r2: *** the target snapshot carries the BRANCH the prompt displayed ***",
+    both_opts.expect.target.branch == "alpha", vim.inspect(both_opts.expect.target))
   ok("r10.7 r1: *** the success message reports BOTH displacements ***",
     last_note() and last_note().msg:find("released from #43", 1, true) ~= nil
       and last_note().msg:find("taken from alpha", 1, true) ~= nil, vim.inspect(notes))
