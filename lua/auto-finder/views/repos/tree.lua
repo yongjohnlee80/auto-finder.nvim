@@ -1928,6 +1928,18 @@ function M.create_pr_for_worktree(row)
         _rerender()
         logger.notify(string.format("repos: created PR #%s: %s", tostring(res.pr and res.pr.number or ""), title),
           { level = vim.log.levels.INFO })
+        -- The PR exists either way; the KB doc is what ASSOCIATES it with this
+        -- branch. Losing it silently is the whole failure mode being fixed —
+        -- the badge, `S`, and every review's `pr` tag would just be absent with
+        -- nothing said. Guarded field read, so an older worktree.nvim (which
+        -- reports no association at all) simply never warns.
+        if res.kb_doc_error then
+          logger.notify(string.format(
+            "repos: PR #%s is open but NOT associated with %s (%s) — run G on #%s to write it",
+            tostring(res.pr and res.pr.number or "?"), branch,
+            tostring(res.kb_doc_error), tostring(res.pr and res.pr.number or "?")),
+            { level = vim.log.levels.WARN })
+        end
       else
         logger.notify(string.format("repos: could not create PR — %s", tostring(res and res.error or "unknown")),
           { level = vim.log.levels.ERROR })
@@ -2252,38 +2264,78 @@ end
 ---HELP is `?`. Exported so the suite can assert it still documents the surfaces
 ---this view opens — an overlay that silently falls behind its own keymaps is
 ---worse than none, because it reads as complete.
+---
+---It documents the PREREQUISITES too, not only the keys. `G`/`N`/`S` reach a
+---forge and do nothing at all without a registered token, and the `[#N]` badge
+---they hang everything on comes from an association a reader has no way to
+---infer — so a modal that lists the keys and stops is precisely the shape that
+---reads as complete while leaving the surface unusable (Johno, 2026-09-10:
+---"the ? help modal is missing how I can manage the PAT credential to perform
+---such action, and how to manage PR associations").
+---
+---The overlay is a focused, scrollable buffer capped at the window height, and
+---nothing on it says so — hence the header hint, which costs no line.
 M.HELP = {
-  "auto-finder repos — worktree explorer",
+  "auto-finder repos — worktree explorer      j/k scrolls · q closes",
   "",
   "  repo → worktree → UNCOMMITTED / commits → files · reviews",
   "  repo → reviews  → every review this repository has, newest first",
   "",
-  "  a file with review feedback on it is badged [feedback]",
-  "  a review row is <commit>.r<N>.review.json  [severity]  → #N (its PR)  [posted]",
-  "  a worktree that IS a PR branch is badged [#N] after its name",
+  "  badges:  a file with review feedback on it        [feedback]",
+  "           a worktree whose branch is a PR          [#N]",
+  "             green open · gray draft · red closed",
+  "           a review <commit>.r<N>.review.json  [severity]  → #N  [posted]",
   "",
+  "  MOVE AND LOOK",
   "  <CR>  expand · open a file · open a review JSON",
   "  o     diff the commit — three columns: files | a/ (old) | b/ (new)",
   "  O     diff this worktree's branch across its commits (against its base)",
-  "  w     watch / unwatch this worktree (persists)",
   "  m     load another window of commits",
-  "  i     info about the node          R  reload (all with no node)",
-  "  d     remove review / dissociate from its PR — confirms first",
-  "  A     attach review feedback to an in-progress task",
-  "  G     GetPR: fetch PR branch and create worktree (on repo)",
-  "  N     CreatePR: create PR for this worktree (on worktree)",
-  "  S     submit this review entry's findings to its PR (on a review)",
-  "  P     push this repository — confirms first",
+  "  i     info about the node — on a worktree, its PR, base and KB doc",
+  "  R     reload (all with no node)",
+  "  w     watch / unwatch this worktree (persists)",
   "  ?     this help",
   "",
-  "  git actions:",
+  "  GIT",
   "  f     fetch this repository",
   "  s     stage / unstage a file under UNCOMMITTED",
   "  c     commit what is staged (prompts for a message)",
-  "  P     push — confirms first, and names the repo",
+  "  P     push this repository — confirms first, and names the repo",
   "",
+  "  PULL REQUESTS            (every key here needs a token — see below)",
+  "  G     GetPR: fetch PR #n's branch into a worktree (on a repo)",
+  "  N     CreatePR: open a PR for this worktree's branch (on a worktree)",
+  "  S     submit this review entry's findings to its PR (on a review)",
+  "  d     remove a review / dissociate it from its PR — confirms first",
+  "  A     attach review feedback to an in-progress task",
   "",
-  "  in the diff view (o), on the a/ or b/ pane:",
+  "  THE TOKEN — no PR key works until one is registered. There is no",
+  "  ambient default, and nothing prompts you for it. From any buffer:",
+  "    :WorktreeAuth set github.com command pass show git/pat",
+  "    :WorktreeAuth set github.com env GITHUB_TOKEN",
+  "    :WorktreeAuth list            lists profiles, never the token",
+  "    :WorktreeAuth clear github.com",
+  "  <key> is matched slug → host → env, first hit wins:",
+  "    slug  owner__name (double underscore), for one repository",
+  "    host  github.com — one token for every repo there, the usual case",
+  "    env   $GITHUB_TOKEN, and only when the host really is github.com",
+  "  Providers are allowlisted: pass, op, gh, secret-tool, keyctl,",
+  "  security. Profiles live in worktree-auth.json (mode 0600) and hold",
+  "  the REFERENCE — the secret itself never touches disk or a process",
+  "  argument list.",
+  "",
+  "  PR ASSOCIATION — what puts the [#N] on a worktree. It is PR #N when",
+  "  its branch is named pr-<N>, OR when the document",
+  "    $AUTO_AGENTS_KB_ROOT/shared/prs/<slug>/pr-<N>.md",
+  "  says `branch: <this worktree's branch>`. G and N both write it, so",
+  "  the ordinary flows need no manual step.",
+  "  A review inherits its PR from the worktree AT DRAFT TIME. Open the",
+  "  diff on a worktree with no association and the review carries no PR,",
+  "  so S can never submit it — associate first, then review.",
+  "  Repoint one by editing that document's `branch:`; delete the",
+  "  document to dissociate the worktree. `d` dissociates a REVIEW.",
+  "",
+  "  IN THE DIFF VIEW (o / O), on the a/ or b/ pane:",
   "  c     annotate the line — in visual mode, the selection",
   "  u     record a finding with NO line (\"this module has no tests\")",
   "  x     drop a pending annotation on this line",

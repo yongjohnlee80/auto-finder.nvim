@@ -117,6 +117,49 @@ ok("r9: HELP explains the [#N] worktree badge", help_text:find("[#N]", 1, true) 
 ok("r9: HELP explains the review → #N / [posted] badges",
   help_text:find("→ #N", 1, true) ~= nil and help_text:find("[posted]", 1, true) ~= nil)
 
+-- HELP must document the PREREQUISITES of the PR keys, not only the keys.
+-- G/N/S reach a forge and do nothing without a registered token, and the [#N]
+-- badge is an association a reader cannot infer — a modal that lists the keys
+-- and stops reads as complete while the surface stays unusable (Johno,
+-- 2026-09-10). These assert the facts a user needs to ACT, so a help text that
+-- drifts from the credential or association model fails here.
+ok("creds: HELP names the command that registers a token",
+  help_text:find(":WorktreeAuth set", 1, true) ~= nil)
+ok("creds: HELP says a PR key does nothing until one is registered",
+  help_text:find("no PR key works until", 1, true) ~= nil)
+ok("creds: HELP gives both provider forms (command and env)",
+  help_text:find("command pass show", 1, true) ~= nil
+    and help_text:find("env GITHUB_TOKEN", 1, true) ~= nil)
+ok("creds: HELP gives the key-resolution order",
+  help_text:find("slug → host → env", 1, true) ~= nil)
+ok("creds: HELP gives the slug's real shape (owner__name, not owner/name)",
+  help_text:find("owner__name", 1, true) ~= nil)
+ok("creds: HELP names the provider allowlist",
+  help_text:find("pass, op, gh, secret-tool", 1, true) ~= nil)
+ok("creds: HELP says the store holds a reference, not the secret",
+  help_text:lower():find("the secret itself never touches disk", 1, true) ~= nil)
+ok("creds: HELP does not print a token-looking literal",
+  help_text:find("ghp_", 1, true) == nil)
+
+ok("assoc: HELP gives BOTH ways a worktree becomes PR #N",
+  help_text:find("branch is named pr-<N>", 1, true) ~= nil
+    and help_text:find("shared/prs/<slug>/pr-<N>.md", 1, true) ~= nil)
+ok("assoc: HELP says G and N write that document",
+  help_text:find("G and N both write it", 1, true) ~= nil)
+ok("assoc: HELP warns a review inherits its PR at DRAFT time",
+  help_text:find("AT DRAFT TIME", 1, true) ~= nil
+    and help_text:find("S can never submit it", 1, true) ~= nil)
+ok("assoc: HELP says how to repoint and how to dissociate",
+  help_text:find("Repoint one by editing", 1, true) ~= nil
+    and help_text:find("delete the", 1, true) ~= nil)
+ok("assoc: HELP distinguishes `d` (a REVIEW) from dissociating a worktree",
+  help_text:find("`d` dissociates a REVIEW", 1, true) ~= nil)
+
+-- The overlay is capped at the window height and says nothing about it, so a
+-- reader who cannot see the bottom has no reason to think there IS a bottom.
+ok("HELP's first line tells the reader it scrolls",
+  tostring(tree.HELP[1]):find("scrolls", 1, true) ~= nil, tostring(tree.HELP[1]))
+
 -- ── 3. Commands ───────────────────────────────────────────────
 local cmds = vim.api.nvim_get_commands({})
 ok("r9: :AutoFinderGetPR registered", cmds["AutoFinderGetPR"] ~= nil)
@@ -291,6 +334,43 @@ tree.create_pr_for_worktree({ repo = mock_repo, worktree = mock_wt })
 ok("r9: N prompts title then body and creates the PR", create_title == "New Test PR")
 ok("r9: N reported success",
   last_note() and last_note().msg:find("created PR #99", 1, true) ~= nil, vim.inspect(notes))
+
+-- A created PR whose ASSOCIATION could not be written. The PR is open either
+-- way, so the action succeeds — but the badge, `S`, and every review's `pr`
+-- tag would simply be absent, which is the failure mode this whole change is
+-- about. It must be said out loud rather than inferred from a missing badge.
+pr_mod.create_pr = function(_, opts)
+  create_title = opts.title
+  return { ok = true, pr = { number = 99 }, branch = "feat/x",
+           kb_doc_error = "mkdir: permission denied" }
+end
+notes = {}
+tree.create_pr_for_worktree({ repo = mock_repo, worktree = mock_wt })
+do
+  local all = vim.tbl_map(function(n) return n.msg end, notes)
+  local joined = table.concat(all, "\n")
+  ok("assoc: N still reports the PR as created when the association fails",
+    joined:find("created PR #99", 1, true) ~= nil, joined)
+  ok("assoc: *** N WARNS that the PR is open but not associated ***",
+    joined:find("NOT associated with", 1, true) ~= nil, joined)
+  ok("assoc: the warning names the branch and the write error",
+    joined:find(mock_wt.branch, 1, true) ~= nil
+      and joined:find("permission denied", 1, true) ~= nil, joined)
+  local warned = false
+  for _, n in ipairs(notes) do
+    if n.msg:find("NOT associated", 1, true) and n.level == vim.log.levels.WARN then warned = true end
+  end
+  ok("assoc: it is a WARN, not another INFO lost in the success toast", warned,
+    vim.inspect(notes))
+end
+-- An OLDER worktree.nvim reports no association at all; the guarded read must
+-- not turn that into a spurious warning.
+pr_mod.create_pr = function(_, opts) create_title = opts.title; return { ok = true, pr = { number = 99 } } end
+notes = {}
+tree.create_pr_for_worktree({ repo = mock_repo, worktree = mock_wt })
+ok("assoc: no kb_doc_error field means no warning",
+  table.concat(vim.tbl_map(function(n) return n.msg end, notes), "\n")
+    :find("NOT associated", 1, true) == nil, vim.inspect(notes))
 
 -- ── 10. G = get_pr_for_repo: success + error surfacing (C10-C12) ──
 local fetched_num = nil
