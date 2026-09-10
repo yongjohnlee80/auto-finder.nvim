@@ -198,6 +198,23 @@ local mock_repo = {
   url = "https://github.com/user/test-repo.git",
 }
 local mock_wt = { path = sb .. "/test-repo/wt-pr42", branch = "pr-42", head = "c1a2b3c", watched = true }
+
+-- The forge keys are GATED on a credential now (ADR-0083 §2.6 Action 1 step 1),
+-- so every cell that drives G / N / S needs the credential state to be an
+-- explicit part of the fixture rather than whatever the developer's shell
+-- happens to export. Register a real in-memory profile for this repo's slug —
+-- the real machinery, not a stub, so `describe` reports it selected and ready
+-- exactly as it would in production.
+--
+-- Without this the suite passes or fails on ambient $GITHUB_TOKEN: it was
+-- green while worktree.nvim had no `describe()` (the gate was transparent) and
+-- went red the moment the producer landed on main, which is the kind of
+-- coupling to the developer's environment that
+-- shared/conventions/tests-never-touch-the-developer-environment forbids.
+-- The preflight cells below override `describe` for their own states and
+-- restore it.
+require("worktree.credentials").set_profile(mock_repo.slug,
+  { kind = "in_memory", token = "fixture_token" })
 local mock_pr = {
   number = 42, title = "Add PR feature", state = "open", draft = false,
   branch = "pr-42", base = "main", author = "alice",
