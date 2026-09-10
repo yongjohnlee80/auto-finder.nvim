@@ -2072,6 +2072,208 @@ function M._fetch_pr(repo, raw)
   return false
 end
 
+---_confirm asks yes/no through the shared float, falling back to `ui.select`.
+local function _confirm(prompt, on_yes)
+  local function decide(choice)
+    if choice ~= "yes" then
+      logger.notify("repos: cancelled", { level = vim.log.levels.INFO })
+      return
+    end
+    on_yes()
+  end
+  local okc, float = pcall(require, "auto-core.ui.float")
+  if okc and float and type(float.confirm) == "function" then
+    float.confirm(prompt, { on_choice = decide })
+  else
+    vim.ui.select({ "yes", "no" }, { prompt = prompt }, decide)
+  end
+end
+
+---associate_worktree is `#` on a worktree row (ADR-0083 r10.7).
+---
+---`G` fetches a PR into a NEW worktree and `N` opens one for this branch.
+---Neither covers the branch that ALREADY has a PR — opened with `gh` outside
+---nvim, a colleague's, or one you renamed — which until now could only be
+---bound by hand-editing the KB document. Without it the worktree carries no
+---`[#N]`, `O` has no base, and every review drafted here is born with no `pr`
+---and can never be submitted with `S`.
+---@param row table
+function M.associate_worktree(row)
+  if not (row and row.repo and row.worktree and row.worktree.branch) then
+    logger.notify("repos: put the cursor on a worktree to associate it with a PR",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if not (ok_pr and type(pr_mod.associate) == "function") then
+    logger.notify("repos: associating a PR needs a newer worktree.nvim (pr.associate)",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  local repo, branch = row.repo, row.worktree.branch
+  vim.ui.input({ prompt = string.format("Associate %s with PR #: ", branch) }, function(input)
+    input = vim.trim(tostring(input or ""))
+    if input == "" then
+      logger.notify("repos: associate cancelled (no PR number entered)", { level = vim.log.levels.INFO })
+      return
+    end
+
+    -- One shared applier, so the plain path and the re-point path cannot drift
+    -- in what they report ([[shared-resolver-single-source-of-truth]]).
+    local function apply(opts)
+      -- associate can RAISE (a non-allowlisted credential provider throws),
+      -- and a bare call would escape this ui.input callback invisibly — the
+      -- C11 lesson from GetPR, which had the same shape.
+      local ok_call, res = pcall(pr_mod.associate, repo, branch, input, opts)
+      if not ok_call then
+        logger.notify(string.format("repos: associate #%s errored — %s", input, tostring(res)),
+          { level = vim.log.levels.ERROR })
+        return
+      end
+
+      if res and res.ok then
+        M.invalidate(nil); _rerender()
+        local n = tostring(res.pr and res.pr.number or input)
+        local msg = string.format("repos: %s is now PR #%s", branch, n)
+        -- Report every displacement. Mentioning one while hiding the other is
+        -- how a two-ended move looked like a one-ended one.
+        local moved = {}
+        if res.reassigned_from then
+          moved[#moved + 1] = string.format("released from #%s", tostring(res.reassigned_from))
+        end
+        if res.took_from_branch then
+          moved[#moved + 1] = string.format("taken from %s", tostring(res.took_from_branch))
+        end
+        if #moved > 0 then msg = msg .. " (" .. table.concat(moved, ", ") .. ")" end
+        logger.notify(msg, { level = vim.log.levels.INFO })
+        -- A stub is a REAL association — the badge appears — but it is
+        -- unverified, and the fields `O` needs (base, base_sha) are empty.
+        -- Saying so is the difference between "done" and "done, but".
+        if res.stub then
+          logger.notify("repos: " .. tostring(res.reason), { level = vim.log.levels.WARN })
+        end
+        return
+      end
+
+      -- A branch may claim one PR, and a PR may be claimed by one branch.
+      -- Offer the re-point rather than making the user find and clear the
+      -- incumbent document by hand.
+      --
+      -- The retry carries `expect_incumbent`, so the confirmation authorizes
+      -- releasing THE ASSOCIATION THE USER SAW. Without it, another actor
+      -- moving the association while the prompt is open would have the answer
+      -- applied to whatever is current instead (lector r0 P1-3).
+      if res and res.code == "conflict" and not (opts and opts.reassign) then
+        local c = res.conflict or {}
+        local src, tgt = c.source, c.target
+        -- BOTH ends can be occupied at once, and one prompt may only stand for
+        -- both if it NAMES both losses. Presenting a single "the conflict"
+        -- mixed the two — "PR #43 is currently on alpha" described a pair that
+        -- did not exist — and confirming it displaced both (lector r1).
+        local prompt
+        if src and tgt then
+          prompt = string.format(
+            "Two associations would be broken: %s currently holds PR #%s, and PR #%s currently sits on %s. "
+            .. "Move PR #%s onto %s?  (both are released; no PR is closed)",
+            branch, tostring(src.number), tostring(tgt.number), tostring(tgt.branch),
+            tostring(tgt.number), branch)
+        elseif tgt then
+          prompt = string.format(
+            "PR #%s is currently on %s. Move it to %s?  (that branch loses the association; no PR is closed)",
+            tostring(tgt.number), tostring(tgt.branch), branch)
+        else
+          prompt = string.format(
+            "%s is already PR #%s. Re-point it to #%s?  (the old association is released; no PR is closed)",
+            branch, tostring(src and src.number), input)
+        end
+        _confirm(prompt, function()
+          -- Snapshot BOTH ends, including the ones that were EMPTY: "I saw
+          -- nothing there" is a claim the retry must also be held to, so a
+          -- conflict appearing under the prompt refuses.
+          -- The target is bound by NUMBER AND BRANCH. Its number is the PR
+          -- the user asked for, so it is constant and pins nothing; what can
+          -- move under an open prompt is which branch holds it, and that is
+          -- exactly what the user was shown (lector r2).
+          apply({ reassign = true, expect = {
+            source = src and src.number or false,
+            target = tgt and { number = tgt.number, branch = tgt.branch } or false,
+          } })
+        end)
+        return
+      end
+
+      -- The association moved between the prompt and the answer. Say so and
+      -- stop; re-running shows the reader the state that is actually there.
+      if res and res.code == "incumbent_drift" then
+        logger.notify("repos: " .. tostring(res.error) .. " — nothing was changed; press # again",
+          { level = vim.log.levels.WARN })
+        return
+      end
+
+      logger.notify(string.format("repos: could not associate %s with #%s — %s",
+        branch, input, tostring(res and res.error or "unknown")),
+        { level = vim.log.levels.ERROR })
+    end
+
+    apply(nil)
+  end)
+end
+
+---dissociate_worktree is `d` on a worktree row (ADR-0083 r10.7).
+---
+---`d` on a REVIEW dissociates that review; on a worktree it releases the
+---worktree itself. Nothing is deleted and no PR is closed — the KB document
+---keeps the PR's metadata and only stops claiming this branch.
+---@param row table
+function M.dissociate_worktree(row)
+  if not (row and row.repo and row.worktree and row.worktree.branch) then return false end
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if not (ok_pr and type(pr_mod.dissociate) == "function") then
+    logger.notify("repos: dissociating a worktree needs a newer worktree.nvim (pr.dissociate)",
+      { level = vim.log.levels.WARN })
+    return true
+  end
+
+  local repo, branch = row.repo, row.worktree.branch
+  local pr = row.pr or (row.worktree and row.worktree.pr)
+  local n = pr and pr.number
+  _confirm(string.format(
+    "Release %s from PR #%s?  Nothing is deleted and the PR is not closed.",
+    branch, tostring(n or "?")), function()
+    -- `expect_pr` is the number the prompt DISPLAYED: the confirmation cannot
+    -- release a replacement association installed while it was open (lector
+    -- r0 P1-3).
+    local ok_call, res = pcall(pr_mod.dissociate, repo, branch, { expect_pr = n })
+    if not ok_call then
+      logger.notify("repos: dissociate errored — " .. tostring(res), { level = vim.log.levels.ERROR })
+      return
+    end
+    if res and res.code == "incumbent_drift" then
+      logger.notify("repos: " .. tostring(res.error) .. " — nothing was released; press d again",
+        { level = vim.log.levels.WARN })
+      return
+    end
+    if not (res and res.ok) then
+      logger.notify(string.format("repos: could not release %s — %s", branch,
+        tostring(res and res.error or "unknown")), { level = vim.log.levels.ERROR })
+      return
+    end
+    M.invalidate(nil); _rerender()
+    logger.notify(string.format("repos: %s released from PR #%s", branch, tostring(res.number)),
+      { level = vim.log.levels.INFO })
+    -- The badge comes back on the next repaint, because rule 1 (the branch is
+    -- NAMED pr-<N>) outlives the document. Unexplained, that reads as the
+    -- release having failed.
+    if res.still_named_pr then
+      logger.notify(string.format(
+        "repos: the branch is still NAMED pr-%s, so it stays associated by name — rename it to fully release",
+        tostring(res.still_named_pr)), { level = vim.log.levels.WARN })
+    end
+  end)
+  return true
+end
+
 ---get_pr_for_repo fetches PR branch and creates worktree (ADR-0083 §2.6 Action 1).
 ---@param row table
 function M.get_pr_for_repo(row)
@@ -2416,8 +2618,10 @@ M.HELP = {
   "  PULL REQUESTS            (every key here needs a token — see below)",
   "  G     GetPR: fetch PR #n's branch into a worktree (on a repo)",
   "  N     CreatePR: open a PR for this worktree's branch (on a worktree)",
+  "  #     associate this worktree with an EXISTING PR (on a worktree)",
   "  S     submit this review entry's findings to its PR (on a review)",
-  "  d     remove a review / dissociate it from its PR — confirms first",
+  "  d     on a worktree, release it from its PR; on a review, remove the",
+  "        review / dissociate it from its PR — both confirm first",
   "  A     attach review feedback to an in-progress task",
   "",
   "  THE TOKEN — no PR key works until one is registered. There is no",
@@ -2446,8 +2650,12 @@ M.HELP = {
   "  A review inherits its PR from the worktree AT DRAFT TIME. Open the",
   "  diff on a worktree with no association and the review carries no PR,",
   "  so S can never submit it — associate first, then review.",
-  "  Repoint one by editing that document's `branch:`; delete the",
-  "  document to dissociate the worktree. `d` dissociates a REVIEW.",
+  "  For a PR opened elsewhere (gh pr create, a colleague's, a renamed",
+  "  branch), press # on the worktree and give the number. With a token",
+  "  the record is the forge's; without one it writes an unverified stub",
+  "  and says so. A branch claims ONE PR — a second offers to re-point.",
+  "  d on the worktree releases it. A branch literally NAMED pr-<N> stays",
+  "  associated by its name; rename it to fully release.",
   "",
   "  IN THE DIFF VIEW (o / O), on the a/ or b/ pane:",
   "  c     annotate the line — in visual mode, the selection",
@@ -2616,6 +2824,13 @@ end
 ---written, and using one key for "discard an unsaved draft" and "delete a file
 ---from disk" would blur the only distinction that matters here.
 function M.remove_review(row)
+  -- `d` on a WORKTREE releases it from its PR — the symmetric half of `#`.
+  -- Checked before the review guard so the key means one thing per row kind
+  -- rather than warning "put the cursor on a review" at a row where `d` has
+  -- an obvious meaning (ADR-0083 r10.7).
+  if row and row.kind == "worktree" then
+    if M.dissociate_worktree(row) then return end
+  end
   -- Accept the review row OR either of its pair leaves: `d` on the Markdown or
   -- the JSON removes the whole review, since the two files are one thing.
   if not (row and (row.kind == "review" or row.kind == "review_file")
@@ -2927,6 +3142,12 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: fetch PR branch and create worktree (GetPR)")
   set("N", function() M.create_pr_for_worktree(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: create PR for worktree (CreatePR)")
+  -- `#` for association: it is the badge the key produces (`[#N]`), it is not
+  -- a git verb competing with f/s/c/P, and `a`/`A` was rejected — `A` already
+  -- attaches a review to a task, and a lowercase twin meaning something
+  -- unrelated is the s/c collision the help text already has to apologise for.
+  set("#", function() M.associate_worktree(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: associate this worktree with a PR (#)")
   set("?", _help, "auto-finder.repos: help")
 end
 

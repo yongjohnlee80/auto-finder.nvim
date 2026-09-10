@@ -373,8 +373,9 @@ attribute a review of one repo to another's configured identity.)
 | `P`    | Push — **confirms first, naming the repository**  |
 | `G`    | GetPR — fetch PR #n's branch into a worktree      |
 | `N`    | CreatePR — open a PR for this worktree's branch   |
+| `#`    | Associate this worktree with an existing PR       |
 | `S`    | Submit this review entry's findings to its PR     |
-| `d`    | Remove a review / dissociate it from its PR       |
+| `d`    | Worktree: release it from its PR. Review: remove it |
 | `A`    | Attach review feedback to an in-progress task     |
 | `?`    | Help                                              |
 
