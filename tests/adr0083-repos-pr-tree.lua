@@ -588,7 +588,8 @@ do
   pr_mod.associate = function(_, branch, n, opts)
     calls = calls + 1
     if not (opts and opts.reassign) then
-      return { ok = false, code = "conflict", conflict = { number = 7 },
+      return { ok = false, code = "conflict",
+               conflict = { kind = "source", source = { number = 7, kb_doc = "pr-7.md" } },
                error = "already associated with PR #7" }
     end
     return { ok = true, pr = { number = tonumber(n) }, branch = branch, reassigned_from = 7 }
@@ -611,21 +612,24 @@ do
   local retry_opts = nil
   pr_mod.associate = function(_, branch, n, opts)
     if not (opts and opts.reassign) then
-      return { ok = false, code = "conflict", conflict = { number = 7 } }
+      return { ok = false, code = "conflict",
+               conflict = { kind = "source", source = { number = 7 } } }
     end
     retry_opts = opts
     return { ok = true, pr = { number = tonumber(n) }, branch = branch }
   end
   notes = {}; answer = "yes"
   tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
-  ok("r10.7 P1-3: *** the re-point retry binds expect_incumbent to what was shown ***",
-    retry_opts and tostring(retry_opts.expect_incumbent) == "7", vim.inspect(retry_opts))
+  ok("r10.7 P1-3: *** the re-point retry binds BOTH endpoints to what was shown ***",
+    retry_opts and retry_opts.expect
+      and tostring(retry_opts.expect.source) == "7"
+      and retry_opts.expect.target == false, vim.inspect(retry_opts))
 
   -- A TARGET conflict (the PR is on another branch) must read differently: it
   -- is that branch that loses the association, not this one.
   pr_mod.associate = function()
     return { ok = false, code = "conflict",
-             conflict = { number = 7, branch = "other/branch", kind = "target" } }
+             conflict = { kind = "target", target = { number = 7, branch = "other/branch" } } }
   end
   notes = {}; confirm_prompt = nil; answer = "no"
   tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
@@ -633,6 +637,34 @@ do
     confirm_prompt and confirm_prompt:find("currently on other/branch", 1, true) ~= nil,
     tostring(confirm_prompt))
   answer = "yes"
+
+  -- BOTH ends occupied: one prompt is acceptable only if it names both
+  -- losses, and the retry must snapshot both (lector r1).
+  local both_opts = nil
+  pr_mod.associate = function(_, _, _, opts)
+    if not (opts and opts.reassign) then
+      return { ok = false, code = "conflict", conflict = {
+        kind = "both",
+        source = { number = 43, kb_doc = "pr-43.md" },
+        target = { number = 42, branch = "alpha", kb_doc = "pr-42.md" },
+      } }
+    end
+    both_opts = opts
+    return { ok = true, pr = { number = 42 }, branch = "beta",
+             reassigned_from = 43, took_from_branch = "alpha", took_from_pr = 42 }
+  end
+  notes = {}; confirm_prompt = nil; answer = "yes"
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7 r1: *** a dual conflict names BOTH losses in one prompt ***",
+    confirm_prompt and confirm_prompt:find("holds PR #43", 1, true) ~= nil
+      and confirm_prompt:find("sits on alpha", 1, true) ~= nil, tostring(confirm_prompt))
+  ok("r10.7 r1: *** and the retry snapshots BOTH endpoints ***",
+    both_opts and both_opts.expect
+      and tostring(both_opts.expect.source) == "43"
+      and tostring(both_opts.expect.target) == "42", vim.inspect(both_opts))
+  ok("r10.7 r1: *** the success message reports BOTH displacements ***",
+    last_note() and last_note().msg:find("released from #43", 1, true) ~= nil
+      and last_note().msg:find("taken from alpha", 1, true) ~= nil, vim.inspect(notes))
 
   -- Drift is reported and changes nothing.
   pr_mod.associate = function()
@@ -656,7 +688,8 @@ do
   pr_mod.associate = function(_, branch, n, opts)
     calls = calls + 1
     if not (opts and opts.reassign) then
-      return { ok = false, code = "conflict", conflict = { number = 7 },
+      return { ok = false, code = "conflict",
+               conflict = { kind = "source", source = { number = 7, kb_doc = "pr-7.md" } },
                error = "already associated with PR #7" }
     end
     return { ok = true, pr = { number = tonumber(n) }, branch = branch, reassigned_from = 7 }

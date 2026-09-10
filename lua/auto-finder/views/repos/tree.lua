@@ -2136,9 +2136,16 @@ function M.associate_worktree(row)
         M.invalidate(nil); _rerender()
         local n = tostring(res.pr and res.pr.number or input)
         local msg = string.format("repos: %s is now PR #%s", branch, n)
+        -- Report every displacement. Mentioning one while hiding the other is
+        -- how a two-ended move looked like a one-ended one.
+        local moved = {}
         if res.reassigned_from then
-          msg = msg .. string.format(" (released from #%s)", tostring(res.reassigned_from))
+          moved[#moved + 1] = string.format("released from #%s", tostring(res.reassigned_from))
         end
+        if res.took_from_branch then
+          moved[#moved + 1] = string.format("taken from %s", tostring(res.took_from_branch))
+        end
+        if #moved > 0 then msg = msg .. " (" .. table.concat(moved, ", ") .. ")" end
         logger.notify(msg, { level = vim.log.levels.INFO })
         -- A stub is a REAL association — the badge appears — but it is
         -- unverified, and the fields `O` needs (base, base_sha) are empty.
@@ -2159,15 +2166,35 @@ function M.associate_worktree(row)
       -- applied to whatever is current instead (lector r0 P1-3).
       if res and res.code == "conflict" and not (opts and opts.reassign) then
         local c = res.conflict or {}
-        local prompt = c.kind == "target"
-          and string.format(
+        local src, tgt = c.source, c.target
+        -- BOTH ends can be occupied at once, and one prompt may only stand for
+        -- both if it NAMES both losses. Presenting a single "the conflict"
+        -- mixed the two — "PR #43 is currently on alpha" described a pair that
+        -- did not exist — and confirming it displaced both (lector r1).
+        local prompt
+        if src and tgt then
+          prompt = string.format(
+            "Two associations would be broken: %s currently holds PR #%s, and PR #%s currently sits on %s. "
+            .. "Move PR #%s onto %s?  (both are released; no PR is closed)",
+            branch, tostring(src.number), tostring(tgt.number), tostring(tgt.branch),
+            tostring(tgt.number), branch)
+        elseif tgt then
+          prompt = string.format(
             "PR #%s is currently on %s. Move it to %s?  (that branch loses the association; no PR is closed)",
-            tostring(c.number), tostring(c.branch), branch)
-          or string.format(
+            tostring(tgt.number), tostring(tgt.branch), branch)
+        else
+          prompt = string.format(
             "%s is already PR #%s. Re-point it to #%s?  (the old association is released; no PR is closed)",
-            branch, tostring(c.number), input)
+            branch, tostring(src and src.number), input)
+        end
         _confirm(prompt, function()
-          apply({ reassign = true, expect_incumbent = c.number })
+          -- Snapshot BOTH ends, including the ones that were EMPTY: "I saw
+          -- nothing there" is a claim the retry must also be held to, so a
+          -- conflict appearing under the prompt refuses.
+          apply({ reassign = true, expect = {
+            source = src and src.number or false,
+            target = tgt and tgt.number or false,
+          } })
         end)
         return
       end
