@@ -362,6 +362,7 @@ attribute a review of one repo to another's configured identity.)
 |--------|---------------------------------------------------|
 | `<CR>` | Expand / open the row                             |
 | `o`    | Diff this commit                                  |
+| `O`    | Diff this worktree's branch against its base      |
 | `w`    | Watch / unwatch this worktree                     |
 | `m`    | Load more commits                                 |
 | `i`    | Info for the row under the cursor                 |
@@ -370,6 +371,11 @@ attribute a review of one repo to another's configured identity.)
 | `s`    | Stage / unstage this file                         |
 | `c`    | Commit what is staged                             |
 | `P`    | Push — **confirms first, naming the repository**  |
+| `G`    | GetPR — fetch PR #n's branch into a worktree      |
+| `N`    | CreatePR — open a PR for this worktree's branch   |
+| `S`    | Submit this review entry's findings to its PR     |
+| `d`    | Remove a review / dissociate it from its PR       |
+| `A`    | Attach review feedback to an in-progress task     |
 | `?`    | Help                                              |
 
 `P` sits one key from `p` and a push is the only action here that
@@ -378,6 +384,43 @@ publish: a mistyped key on the wrong row cannot push.
 
 Left the diff to go read a file? `:AutoFinderResumeDiff` reopens it at
 the file and line you were on.
+
+### Pull requests — the two things `G`, `N` and `S` need
+
+`G`, `N` and `S` reach a forge. Neither prerequisite is visible from the
+panel, so both are spelled out in `?` as well.
+
+**1. A token.** There is no ambient default and nothing prompts for one:
+until a credential profile is registered, every PR key fails. Register one
+with `worktree.nvim`'s `:WorktreeAuth`, from any buffer:
+
+```vim
+:WorktreeAuth set github.com command pass show git/pat
+:WorktreeAuth set github.com env GITHUB_TOKEN
+:WorktreeAuth list            " profiles only — never the token
+:WorktreeAuth clear github.com
+```
+
+The key is matched **slug → host → env**: a repo slug (`owner__name`, double
+underscore) for one repository, a forge host (`github.com`) for every repo
+there — the usual case — and failing both `$GITHUB_TOKEN`, only when the host
+really is GitHub. Command providers are allowlisted (`pass`, `op`, `gh`,
+`secret-tool`, `keyctl`, `security`), and the profile store holds the
+*reference*, never the secret. Full detail lives in
+[worktree.nvim's README](https://github.com/yongjohnlee80/worktree.nvim#forge-authentication-for-pr-features).
+
+**2. An association.** The `[#N]` badge, `O`'s range diff and a review's `→ #N`
+tag all read from one fact: a worktree is PR #N when its branch is named
+`pr-<N>`, **or** when `$AUTO_AGENTS_KB_ROOT/shared/prs/<slug>/pr-<N>.md` says
+`branch: <that branch>`. `G` and `N` both write that document, so the ordinary
+flows need no manual step.
+
+The ordering matters once: **a review inherits its PR from the worktree at
+draft time.** Open the diff on a worktree that is not yet associated and the
+review is written with no PR, so `S` can never submit it — fetch or create the
+PR first, then review. To repoint an association by hand, edit that document's
+`branch:` line; delete the document to dissociate the worktree. (`d` in the
+panel dissociates a *review*, not a worktree.)
 
 ## DBase view — autodb inside the panel
 
