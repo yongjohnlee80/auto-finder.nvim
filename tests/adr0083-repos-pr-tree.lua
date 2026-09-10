@@ -160,6 +160,13 @@ ok("assoc: HELP distinguishes `d` (a REVIEW) from dissociating a worktree",
 ok("HELP's first line tells the reader it scrolls",
   tostring(tree.HELP[1]):find("scrolls", 1, true) ~= nil, tostring(tree.HELP[1]))
 
+-- Credential PREFLIGHT (ADR-0083 §2.6 Action 1 step 1).
+ok("preflight: HELP says the PR keys check for a token BEFORE prompting",
+  help_text:find("check for a token BEFORE prompting", 1, true) ~= nil)
+ok("preflight: HELP points at :WorktreeAuth status and i",
+  help_text:find(":WorktreeAuth status", 1, true) ~= nil
+    and help_text:find("i on a repo row shows which key resolves it", 1, true) ~= nil)
+
 -- ── 3. Commands ───────────────────────────────────────────────
 local cmds = vim.api.nvim_get_commands({})
 ok("r9: :AutoFinderGetPR registered", cmds["AutoFinderGetPR"] ~= nil)
@@ -371,6 +378,63 @@ tree.create_pr_for_worktree({ repo = mock_repo, worktree = mock_wt })
 ok("assoc: no kb_doc_error field means no warning",
   table.concat(vim.tbl_map(function(n) return n.msg end, notes), "\n")
     :find("NOT associated", 1, true) == nil, vim.inspect(notes))
+
+-- ── 9c. credential PREFLIGHT gates G / N / S (r10.7) ──
+do
+  -- The gate must fire BEFORE the prompt. A refusal after the user has typed
+  -- a PR number (or a title AND a body) is the failure this replaces, so the
+  -- cells assert that ui.input was never REACHED — not merely that an error
+  -- was reported.
+  local creds = require("worktree.credentials")
+  local orig_describe = creds.describe
+  local prompted = 0
+  local orig_input = vim.ui.input
+  vim.ui.input = function(_, cb) prompted = prompted + 1; cb(nil) end
+
+  creds.describe = function()
+    return { configured = false, why = "no profile for acme__x",
+             hint = ":WorktreeAuth set github.com command pass show <path/to/token>" }
+  end
+
+  notes = {}; prompted = 0
+  tree.get_pr_for_repo({ kind = "repo", repo = mock_repo })
+  ok("preflight: *** G refuses BEFORE prompting when no token resolves ***",
+    prompted == 0, prompted .. " prompts")
+  ok("preflight: and the refusal names the exact :WorktreeAuth line",
+    last_note() and last_note().msg:find(":WorktreeAuth set github.com", 1, true) ~= nil,
+    vim.inspect(notes))
+  ok("preflight: the refusal names the action and the repo",
+    last_note() and last_note().msg:find("GetPR", 1, true) ~= nil
+      and last_note().msg:find(mock_repo.slug, 1, true) ~= nil, vim.inspect(notes))
+
+  notes = {}; prompted = 0
+  tree.create_pr_for_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("preflight: *** N refuses before the title AND body prompts ***",
+    prompted == 0 and last_note() and last_note().msg:find("CreatePR", 1, true) ~= nil,
+    prompted .. " prompts / " .. vim.inspect(notes))
+
+  -- Configured: the gate must be TRANSPARENT. A preflight that also blocks
+  -- the working case is worse than none.
+  creds.describe = function()
+    return { configured = true, key = "github.com", kind = "env",
+             var = "GITHUB_TOKEN", source = "environment" }
+  end
+  notes = {}; prompted = 0
+  tree.get_pr_for_repo({ kind = "repo", repo = mock_repo })
+  ok("preflight: *** with a token configured, G prompts as before ***",
+    prompted == 1, prompted .. " prompts / " .. vim.inspect(notes))
+
+  -- An OLDER worktree.nvim cannot report; the keys must keep working rather
+  -- than being gated by the absence of the reporter.
+  creds.describe = nil
+  notes = {}; prompted = 0
+  tree.get_pr_for_repo({ kind = "repo", repo = mock_repo })
+  ok("preflight: *** no describe() at all does NOT gate the key ***",
+    prompted == 1, prompted .. " prompts / " .. vim.inspect(notes))
+
+  creds.describe = orig_describe
+  vim.ui.input = orig_input
+end
 
 -- ── 10. G = get_pr_for_repo: success + error surfacing (C10-C12) ──
 local fetched_num = nil

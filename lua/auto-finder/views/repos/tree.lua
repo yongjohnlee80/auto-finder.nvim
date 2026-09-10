@@ -86,6 +86,57 @@ local function _base_branch(repo)
   return nil
 end
 
+---_credential reports which forge credential `repo` resolves through, or nil
+---when the backend is too old to say (ADR-0083 §2.6 Action 1 step 1).
+---
+---Guarded, like every other cross-plugin read here: an auto-finder ahead of
+---worktree.nvim simply loses the preflight rather than erroring, and the keys
+---behave exactly as they did before.
+---@param repo table?
+---@return table? report  see worktree.credentials.describe
+local function _credential(repo)
+  if not repo then return nil end
+  local ok_c, creds = pcall(require, "worktree.credentials")
+  if not (ok_c and type(creds.describe) == "function") then return nil end
+  local host
+  local ok_pr, pr_mod = pcall(require, "worktree.pr")
+  if ok_pr and type(pr_mod.parse_remote) == "function" then
+    local ok_p, remote = pcall(pr_mod.parse_remote, repo.url or "")
+    if ok_p and type(remote) == "table" then host = remote.host end
+  end
+  local ok_d, d = pcall(creds.describe, repo.slug, host)
+  if not ok_d or type(d) ~= "table" then return nil end
+  return d
+end
+
+---_preflight_credential refuses a forge action BEFORE it prompts, naming the
+---exact command that would fix it.
+---
+---ADR-0083 §2.6 Action 1 step 1 specified this and it was never built: `G`,
+---`N` and `S` prompted for a PR number, built a URL, went to the network, and
+---only then reported a missing token — after input the user has to retype. The
+---cost is not only the round trip; a failure that arrives after you have
+---committed to an action reads as the action being broken.
+---
+---Deliberately NOT applied to `#`: `associate` works without a token by
+---design, writing a flagged unverified stub, so gating it would remove a
+---capability rather than protect one.
+---@param repo table?
+---@param action string   what the user pressed, named in the refusal
+---@return boolean ok
+local function _preflight_credential(repo, action)
+  local d = _credential(repo)
+  -- No report at all means an older worktree.nvim, not a missing credential.
+  -- Refusing here would break the keys on exactly the installs that still work.
+  if not d or d.configured then return true end
+  logger.notify(string.format(
+    "repos: %s needs a forge token and none resolves for %s — %s\n  %s",
+    action, tostring(repo and repo.slug or "this repo"),
+    tostring(d.why), tostring(d.hint)),
+    { level = vim.log.levels.WARN })
+  return false
+end
+
 ---_range_commits lists the commits `head` adds on top of `base`, oldest first,
 ---each with its changed files.
 ---
@@ -1799,6 +1850,10 @@ function M.submit_review(row)
       tostring(meta.name or meta.path)), { level = vim.log.levels.WARN })
     return
   end
+  -- Before reading and shaping the review: posting is the only one of the
+  -- three that takes a LOCK on the PR receipt, so a refusal that arrives
+  -- afterwards has already done work worth not doing.
+  if not _preflight_credential(row.repo, "submitting a review") then return end
   local rev, why = _load_review_for_post(meta)
   if not rev then
     logger.notify(string.format("repos: cannot submit %s — %s",
@@ -1908,6 +1963,9 @@ function M.create_pr_for_worktree(row)
   -- exported the latter, so this line opened every PR against the literal
   -- "main" regardless of what the repo's default branch actually is.
   local base = _base_branch(repo) or "main"
+  -- Before the two prompts, not after them: a title and a body typed into a
+  -- request that cannot be sent is the worst version of this failure.
+  if not _preflight_credential(repo, "CreatePR") then return end
 
   vim.ui.input({ prompt = string.format("PR Title for %s: ", branch) }, function(title)
     if not title or title == "" then return end
@@ -2002,6 +2060,7 @@ function M.get_pr_for_repo(row)
     return
   end
   local repo = row.repo
+  if not _preflight_credential(repo, "GetPR") then return end
   vim.ui.input({ prompt = string.format("Fetch PR # for %s: ", repo.label) }, function(input)
     -- C10: a cancel (nil) is announced distinctly from an empty entry; the rest
     -- of validation/guarding is shared with the command path.
@@ -2077,9 +2136,31 @@ local function _info(row)
       "  bare:       " .. tostring(row.repo.is_bare),
       "  slug:       " .. tostring(row.repo.slug),
       "  remote:     " .. tostring(row.repo.url or "(none)"),
+    }
+    -- Whether the PR keys will work here, and through WHICH credential.
+    -- Nothing else in the UI can answer that; the old way to find out was to
+    -- press G, type a number, and wait for the forge to refuse.
+    local d = _credential(row.repo)
+    if d then
+      if d.configured then
+        local shape = d.kind == "env" and ("env " .. tostring(d.var))
+          or d.kind == "command" and ("command " .. table.concat(d.argv or {}, " "))
+          or tostring(d.kind)
+        vim.list_extend(lines, {
+          "  auth:       " .. tostring(d.key) .. " — " .. shape
+            .. " (" .. tostring(d.source) .. ")",
+        })
+      else
+        vim.list_extend(lines, {
+          "  auth:       NONE — " .. tostring(d.why),
+          "              " .. tostring(d.hint),
+        })
+      end
+    end
+    vim.list_extend(lines, {
       "",
       "Reviews for this repo are stored under its slug.",
-    }
+    })
   elseif row.kind == "worktree" then
     lines = {
       "Worktree: " .. tostring(row.worktree.branch or row.worktree.path),
@@ -2313,6 +2394,7 @@ M.HELP = {
   "  ambient default, and nothing prompts you for it. From any buffer:",
   "    :WorktreeAuth set github.com command pass show git/pat",
   "    :WorktreeAuth set github.com env GITHUB_TOKEN",
+  "    :WorktreeAuth status          does THIS repo resolve one? (no secret)",
   "    :WorktreeAuth list            lists profiles, never the token",
   "    :WorktreeAuth clear github.com",
   "  <key> is matched slug → host → env, first hit wins:",
@@ -2323,6 +2405,8 @@ M.HELP = {
   "  security. Profiles live in worktree-auth.json (mode 0600) and hold",
   "  the REFERENCE — the secret itself never touches disk or a process",
   "  argument list.",
+  "  G, N and S check for a token BEFORE prompting and name the exact",
+  "  line to run. i on a repo row shows which key resolves it, and how.",
   "",
   "  PR ASSOCIATION — what puts the [#N] on a worktree. It is PR #N when",
   "  its branch is named pr-<N>, OR when the document",

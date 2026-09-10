@@ -401,6 +401,13 @@ with `worktree.nvim`'s `:WorktreeAuth`, from any buffer:
 :WorktreeAuth clear github.com
 ```
 
+`G`, `N` and `S` check for a token **before** they prompt, and the refusal
+names the exact `:WorktreeAuth set …` line for that repo's host — you no longer
+type a PR number (or a title *and* a body) into a request that cannot be sent.
+`i` on a repo row reports which key resolves it and how; `:WorktreeAuth status`
+answers the same question from any buffer. Neither executes the provider, so
+neither can trigger a passphrase prompt, and neither prints a secret.
+
 The key is matched **slug → host → env**: a repo slug (`owner__name`, double
 underscore) for one repository, a forge host (`github.com`) for every repo
 there — the usual case — and failing both `$GITHUB_TOKEN`, only when the host
