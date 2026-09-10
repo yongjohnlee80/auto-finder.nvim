@@ -2,6 +2,91 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.28] — 2026-09-10 — `?` never said a PR key needs a token, or what gives a worktree its `[#N]`
+
+Patch. Documentation and one warning; no key changed behaviour.
+
+> Johno, 2026-09-10: "I understand `G` will grab a remote PR worktree into
+> local. Now the `?` help modal is missing how I can manage the PAT credential
+> to perform such action, and how to manage PR associations."
+
+Both prerequisites of the PR surface were undiscoverable from the panel.
+
+**A token.** `G`, `N` and `S` reach a forge and do nothing until a credential
+profile is registered — there is no ambient default and nothing prompts for
+one. `:WorktreeAuth` has existed since worktree.nvim v0.5.14 and is documented
+in *that* repo's README, which is not where someone pressing `?` is looking.
+`?` now carries both registration forms, the **slug → host → env** resolution
+order, the slug's real shape (`owner__name`, double underscore — a reader who
+guesses `owner/name` registers a profile that never resolves), the provider
+allowlist, and the fact that the store holds a *reference* rather than the
+secret.
+
+**An association.** Everything hung off `[#N]` — the badge, `O`'s range diff, a
+review's `→ #N` tag and therefore `S` — reads from one fact a reader has no way
+to infer: a worktree is PR #N when its branch is named `pr-<N>`, **or** when
+`$AUTO_AGENTS_KB_ROOT/shared/prs/<slug>/pr-<N>.md` says `branch: <that
+branch>`. `?` now gives both rules, says `G` and `N` write that document, and
+states the ordering that actually bites — **a review inherits its PR at draft
+time**, so a diff opened before the association exists yields a review `S` can
+never submit. Repointing and dissociating are named, and `d` is distinguished
+as dissociating a *review*.
+
+The help text is restructured rather than appended to — `MOVE AND LOOK` /
+`GIT` / `PULL REQUESTS` / `THE TOKEN` / `PR ASSOCIATION` / `IN THE DIFF VIEW` —
+and the duplicate `P push` entry is gone. The overlay is a focused, scrollable
+buffer capped at the window height with nothing saying so, so the header now
+says it scrolls; that costs no line and is the difference between "this is all
+of it" and "there is more".
+
+`N` now warns when a PR is created but its association could **not** be
+written. The PR is open either way, but the badge, `S` and every later review's
+`pr` tag would simply be absent with nothing said. Guarded field read, so an
+older worktree.nvim never warns spuriously.
+
+README: the repos key table was missing `O`/`G`/`N`/`S`/`d`/`A`, and had
+nothing on either prerequisite.
+
+Pairs with worktree.nvim **v0.5.16**, which makes `N` actually write the
+association this documents (and fixes it reporting failure for PRs it created).
+ADR-0083 Amendment r10; the general rule is recorded as the KB convention
+*help surfaces document prerequisites, not only keys*.
+
+PR #46. +17 cells in `adr0083-repos-pr-tree` (70 total); `run-all.sh` OK at
+1517 across 18 suites. The help cells assert the facts a user needs to act on —
+the command string, the resolution order, `owner__name`, the allowlist, both
+association rules, the draft-time ordering — not that a section exists, so a
+help text that drifts from the credential or association model fails.
+
+## [v0.4.27] — 2026-09-09 — a PR is a `[#N]` badge on its worktree, not a row
+
+Patch. ADR-0083 Amendment r9.
+
+The repos panel renders a worktree's grouped commits, so a separate PR section
+was clutter. A PR is now an association carried by its worktree and by the
+reviews written against it:
+
+- The worktree row carries a `[#N]` badge after the branch name, before the
+  watch marker, coloured by state (green open, gray draft, red closed). The old
+  PR row and its child reviews are gone.
+- A review that belongs to a PR is tagged `→ #N` in the reviews section, and
+  carries `[posted]` once its findings are on the forge (read from the posting
+  receipt via a guarded backend query; needs worktree.nvim v0.5.15 to light up,
+  degrades cleanly without it).
+- `S` submits exactly one review entry to its PR; `P` is push-only (it used to
+  double as post-feedback on a PR row, a cursor overload that risked posting an
+  unintended batch).
+- GetPR no longer fails silently: cancel announced, non-numeric rejected before
+  any forge call, a raising fetch caught and surfaced — for both the `G` key and
+  the `:AutoFinderGetPR` command, through one shared guard.
+
+Latent fix: `post_feedback` needs the comments array; the panel was passing
+describe records whose `comments` is a count.
+
+PR #45. Reviewed by lector; approved. `adr0083-repos-pr-tree` rewritten (51
+cells); full suite green, verified on VM43 (nvim 0.12.5). Deferred to its own
+task (r9.6): importing a PR's existing forge reviews as local objects.
+
 ## [v0.4.26] — 2026-09-09 — the test suite no longer stages the plugin's own worktree
 
 Patch. Test-only; no behaviour changed.
