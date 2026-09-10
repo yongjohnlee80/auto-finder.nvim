@@ -149,11 +149,16 @@ ok("assoc: HELP says G and N write that document",
 ok("assoc: HELP warns a review inherits its PR at DRAFT time",
   help_text:find("AT DRAFT TIME", 1, true) ~= nil
     and help_text:find("S can never submit it", 1, true) ~= nil)
-ok("assoc: HELP says how to repoint and how to dissociate",
-  help_text:find("Repoint one by editing", 1, true) ~= nil
-    and help_text:find("delete the", 1, true) ~= nil)
-ok("assoc: HELP distinguishes `d` (a REVIEW) from dissociating a worktree",
-  help_text:find("`d` dissociates a REVIEW", 1, true) ~= nil)
+-- Was "Repoint one by editing that document's `branch:`" / "`d` dissociates a
+-- REVIEW". r10.7 replaced hand-editing with `#` and gave `d` a meaning on a
+-- worktree row, so the modal now names the KEYS; the same two facts, pinned
+-- against the surface a user actually reaches for.
+ok("assoc: HELP says how to associate and how to release",
+  help_text:find("press # on the worktree", 1, true) ~= nil
+    and help_text:find("d on the worktree releases it", 1, true) ~= nil)
+ok("assoc: HELP distinguishes d on a worktree from d on a review",
+  help_text:find("d     on a worktree, release it from its PR", 1, true) ~= nil
+    and help_text:find("on a review, remove the", 1, true) ~= nil)
 
 -- The overlay is capped at the window height and says nothing about it, so a
 -- reader who cannot see the bottom has no reason to think there IS a bottom.
@@ -166,6 +171,19 @@ ok("preflight: HELP says the PR keys check for a token BEFORE prompting",
 ok("preflight: HELP points at :WorktreeAuth status and i",
   help_text:find(":WorktreeAuth status", 1, true) ~= nil
     and help_text:find("i on a repo row shows which key resolves it", 1, true) ~= nil)
+-- HELP and keymaps for `#` / `d`-on-a-worktree (r10.7).
+ok("assoc: '#' keymap bound", km_map["#"] ~= nil)
+ok("assoc: '#' describes associating a worktree with a PR",
+  km_map["#"] and km_map["#"].desc:find("associate", 1, true) ~= nil, km_map["#"] and km_map["#"].desc)
+ok("assoc: HELP documents '#' as associating an EXISTING PR",
+  help_text:find("#     associate this worktree with an EXISTING PR", 1, true) ~= nil)
+ok("assoc: HELP says d on a worktree releases it",
+  help_text:find("d     on a worktree, release it from its PR", 1, true) ~= nil)
+ok("assoc: HELP tells the reader when to reach for # (a PR opened elsewhere)",
+  help_text:find("gh pr create", 1, true) ~= nil
+    and help_text:find("press # on the worktree", 1, true) ~= nil)
+ok("assoc: HELP warns a pr-<N>-NAMED branch cannot be fully released",
+  help_text:find("rename it to fully release", 1, true) ~= nil)
 
 -- ── 3. Commands ───────────────────────────────────────────────
 local cmds = vim.api.nvim_get_commands({})
@@ -512,6 +530,129 @@ do
   pr_mod.post_feedback, pr_mod.acquire_lock = orig_post, orig_lock
   creds.describe = orig_describe
   vim.ui.input = orig_input
+end
+-- ── 9b. # = associate_worktree, d = dissociate_worktree (r10.7) ──
+--
+-- The stubs return the shapes `worktree.pr.associate` / `.dissociate` really
+-- return (envelopes with a `code` on failure), NOT the shape these handlers
+-- would like — the r21 lesson from the create_pr mock that was green for the
+-- life of a defect.
+do
+  local seen, confirm_prompt = nil, nil
+  local orig_assoc, orig_dissoc = pr_mod.associate, pr_mod.dissociate
+  local answer = "yes"
+  -- Section 7 leaves a float stub installed whose `confirm` runs an `ok(...)`
+  -- of its own on EVERY call, so any later confirm re-fires that assertion
+  -- against an unrelated prompt. Install our own for this block and put the
+  -- previous one back, rather than editing a cell we are not testing.
+  local prev_float = package.loaded["auto-core.ui.float"]
+  package.loaded["auto-core.ui.float"] = {
+    confirm = function(prompt, opts)
+      confirm_prompt = prompt
+      if opts and opts.on_choice then opts.on_choice(answer) end
+    end,
+  }
+
+  vim.ui.input = function(_, cb) cb("43") end
+  pr_mod.associate = function(_, branch, n, opts)
+    seen = { branch = branch, n = n, opts = opts }
+    return { ok = true, pr = { number = tonumber(n) }, branch = branch }
+  end
+  notes = {}
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7: # passes the worktree's BRANCH and the typed number",
+    seen and seen.branch == mock_wt.branch and tostring(seen.n) == "43", vim.inspect(seen))
+  ok("r10.7: # reports the new association",
+    last_note() and last_note().msg:find("is now PR #43", 1, true) ~= nil, vim.inspect(notes))
+
+  -- An unverified stub must not read as a clean success.
+  pr_mod.associate = function(_, branch)
+    return { ok = true, pr = { number = 43 }, branch = branch, stub = true,
+             reason = "no credential profile resolved; wrote an unverified stub" }
+  end
+  notes = {}
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  do
+    local joined = table.concat(vim.tbl_map(function(x) return x.msg end, notes), "\n")
+    local warned = false
+    for _, x in ipairs(notes) do
+      if x.msg:find("unverified stub", 1, true) and x.level == vim.log.levels.WARN then warned = true end
+    end
+    ok("r10.7: *** a STUB association still reports success ***",
+      joined:find("is now PR #43", 1, true) ~= nil, joined)
+    ok("r10.7: *** and warns that it is unverified ***", warned, joined)
+  end
+
+  -- Conflict: the handler must OFFER the re-point, then retry with reassign.
+  local calls = 0
+  pr_mod.associate = function(_, branch, n, opts)
+    calls = calls + 1
+    if not (opts and opts.reassign) then
+      return { ok = false, code = "conflict", conflict = { number = 7 },
+               error = "already associated with PR #7" }
+    end
+    return { ok = true, pr = { number = tonumber(n) }, branch = branch, reassigned_from = 7 }
+  end
+  notes = {}; confirm_prompt = nil; answer = "yes"
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7: *** a conflict prompts to re-point, naming both PRs ***",
+    confirm_prompt and confirm_prompt:find("already PR #7", 1, true) ~= nil
+      and confirm_prompt:find("#43", 1, true) ~= nil, tostring(confirm_prompt))
+  ok("r10.7: the prompt says nothing is closed",
+    confirm_prompt and confirm_prompt:find("no PR is closed", 1, true) ~= nil, tostring(confirm_prompt))
+  ok("r10.7: *** confirming retries WITH reassign and reports the release ***",
+    calls == 2 and last_note() and last_note().msg:find("released from #7", 1, true) ~= nil,
+    calls .. " calls / " .. vim.inspect(notes))
+
+  -- Declining must not re-point.
+  calls = 0; answer = "no"; notes = {}
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7: *** declining the re-point does NOT call associate again ***", calls == 1,
+    calls .. " calls")
+  answer = "yes"
+
+  -- d on a worktree releases it; d on a review still removes the review.
+  local dissoc_branch = nil
+  pr_mod.dissociate = function(_, branch)
+    dissoc_branch = branch
+    return { ok = true, number = 43, still_named_pr = nil }
+  end
+  notes = {}
+  tree.remove_review({ kind = "worktree", repo = mock_repo, worktree = mock_wt,
+                       pr = { number = 43 } })
+  ok("r10.7: *** d on a WORKTREE routes to dissociate, not the review guard ***",
+    dissoc_branch == mock_wt.branch, tostring(dissoc_branch))
+  ok("r10.7: and it does not warn about putting the cursor on a review",
+    table.concat(vim.tbl_map(function(x) return x.msg end, notes), "\n")
+      :find("cursor on a review", 1, true) == nil, vim.inspect(notes))
+
+  -- A pr-<N>-NAMED branch keeps its badge; the handler must say so.
+  pr_mod.dissociate = function(_, branch)
+    dissoc_branch = branch
+    return { ok = true, number = 43, still_named_pr = 42 }
+  end
+  notes = {}
+  tree.remove_review({ kind = "worktree", repo = mock_repo, worktree = mock_wt,
+                       pr = { number = 43 } })
+  do
+    local warned = false
+    for _, x in ipairs(notes) do
+      if x.msg:find("still NAMED pr-42", 1, true) and x.level == vim.log.levels.WARN then warned = true end
+    end
+    ok("r10.7: *** releasing a pr-<N> branch warns the NAME still associates it ***",
+      warned, vim.inspect(notes))
+  end
+
+  -- An older worktree.nvim has neither verb; the keys must degrade, not error.
+  pr_mod.associate, pr_mod.dissociate = nil, nil
+  notes = {}
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7: # on an older worktree.nvim asks for an upgrade, does not error",
+    last_note() and last_note().msg:find("needs a newer worktree.nvim", 1, true) ~= nil,
+    vim.inspect(notes))
+
+  pr_mod.associate, pr_mod.dissociate = orig_assoc, orig_dissoc
+  package.loaded["auto-core.ui.float"] = prev_float
 end
 
 -- ── 10. G = get_pr_for_repo: success + error surfacing (C10-C12) ──
