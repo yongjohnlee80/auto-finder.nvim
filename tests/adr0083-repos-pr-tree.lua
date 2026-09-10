@@ -604,7 +604,63 @@ do
     calls == 2 and last_note() and last_note().msg:find("released from #7", 1, true) ~= nil,
     calls .. " calls / " .. vim.inspect(notes))
 
-  -- Declining must not re-point.
+  -- lector r0 P1-3: the confirmation authorizes releasing THE ASSOCIATION THE
+  -- USER SAW. The retry must carry that number, or an actor who moves the
+  -- association while the prompt is open gets the answer applied to their
+  -- replacement instead.
+  local retry_opts = nil
+  pr_mod.associate = function(_, branch, n, opts)
+    if not (opts and opts.reassign) then
+      return { ok = false, code = "conflict", conflict = { number = 7 } }
+    end
+    retry_opts = opts
+    return { ok = true, pr = { number = tonumber(n) }, branch = branch }
+  end
+  notes = {}; answer = "yes"
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7 P1-3: *** the re-point retry binds expect_incumbent to what was shown ***",
+    retry_opts and tostring(retry_opts.expect_incumbent) == "7", vim.inspect(retry_opts))
+
+  -- A TARGET conflict (the PR is on another branch) must read differently: it
+  -- is that branch that loses the association, not this one.
+  pr_mod.associate = function()
+    return { ok = false, code = "conflict",
+             conflict = { number = 7, branch = "other/branch", kind = "target" } }
+  end
+  notes = {}; confirm_prompt = nil; answer = "no"
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  ok("r10.7 P1-3: *** a TARGET conflict names the branch that would lose it ***",
+    confirm_prompt and confirm_prompt:find("currently on other/branch", 1, true) ~= nil,
+    tostring(confirm_prompt))
+  answer = "yes"
+
+  -- Drift is reported and changes nothing.
+  pr_mod.associate = function()
+    return { ok = false, code = "incumbent_drift",
+             error = "the association changed while you were deciding: expected PR #7, found #9" }
+  end
+  notes = {}
+  tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
+  do
+    local warned = false
+    for _, x in ipairs(notes) do
+      if x.msg:find("nothing was changed", 1, true) and x.level == vim.log.levels.WARN then warned = true end
+    end
+    ok("r10.7 P1-3: *** drift is reported as changing nothing, not as a failure ***",
+      warned, vim.inspect(notes))
+  end
+
+  -- Declining must not re-point. Re-install the COUNTING stub: the drift and
+  -- target-conflict cells above replaced pr_mod.associate, so `calls` would
+  -- otherwise stay 0 and this cell would pass while observing nothing.
+  pr_mod.associate = function(_, branch, n, opts)
+    calls = calls + 1
+    if not (opts and opts.reassign) then
+      return { ok = false, code = "conflict", conflict = { number = 7 },
+               error = "already associated with PR #7" }
+    end
+    return { ok = true, pr = { number = tonumber(n) }, branch = branch, reassigned_from = 7 }
+  end
   calls = 0; answer = "no"; notes = {}
   tree.associate_worktree({ kind = "worktree", repo = mock_repo, worktree = mock_wt })
   ok("r10.7: *** declining the re-point does NOT call associate again ***", calls == 1,
@@ -612,9 +668,9 @@ do
   answer = "yes"
 
   -- d on a worktree releases it; d on a review still removes the review.
-  local dissoc_branch = nil
-  pr_mod.dissociate = function(_, branch)
-    dissoc_branch = branch
+  local dissoc_branch, dissoc_opts = nil, nil
+  pr_mod.dissociate = function(_, branch, o)
+    dissoc_branch, dissoc_opts = branch, o
     return { ok = true, number = 43, still_named_pr = nil }
   end
   notes = {}
@@ -622,6 +678,8 @@ do
                        pr = { number = 43 } })
   ok("r10.7: *** d on a WORKTREE routes to dissociate, not the review guard ***",
     dissoc_branch == mock_wt.branch, tostring(dissoc_branch))
+  ok("r10.7 P1-3: *** d binds expect_pr to the number the prompt displayed ***",
+    dissoc_opts and tostring(dissoc_opts.expect_pr) == "43", vim.inspect(dissoc_opts))
   ok("r10.7: and it does not warn about putting the cursor on a review",
     table.concat(vim.tbl_map(function(x) return x.msg end, notes), "\n")
       :find("cursor on a review", 1, true) == nil, vim.inspect(notes))

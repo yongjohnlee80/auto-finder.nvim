@@ -2149,14 +2149,34 @@ function M.associate_worktree(row)
         return
       end
 
-      -- A branch may claim one PR. Offer the re-point rather than making the
-      -- user find and clear the incumbent document by hand.
+      -- A branch may claim one PR, and a PR may be claimed by one branch.
+      -- Offer the re-point rather than making the user find and clear the
+      -- incumbent document by hand.
+      --
+      -- The retry carries `expect_incumbent`, so the confirmation authorizes
+      -- releasing THE ASSOCIATION THE USER SAW. Without it, another actor
+      -- moving the association while the prompt is open would have the answer
+      -- applied to whatever is current instead (lector r0 P1-3).
       if res and res.code == "conflict" and not (opts and opts.reassign) then
         local c = res.conflict or {}
-        _confirm(string.format(
-          "%s is already PR #%s. Re-point it to #%s?  (the old association is released; no PR is closed)",
-          branch, tostring(c.number), input),
-          function() apply({ reassign = true }) end)
+        local prompt = c.kind == "target"
+          and string.format(
+            "PR #%s is currently on %s. Move it to %s?  (that branch loses the association; no PR is closed)",
+            tostring(c.number), tostring(c.branch), branch)
+          or string.format(
+            "%s is already PR #%s. Re-point it to #%s?  (the old association is released; no PR is closed)",
+            branch, tostring(c.number), input)
+        _confirm(prompt, function()
+          apply({ reassign = true, expect_incumbent = c.number })
+        end)
+        return
+      end
+
+      -- The association moved between the prompt and the answer. Say so and
+      -- stop; re-running shows the reader the state that is actually there.
+      if res and res.code == "incumbent_drift" then
+        logger.notify("repos: " .. tostring(res.error) .. " — nothing was changed; press # again",
+          { level = vim.log.levels.WARN })
         return
       end
 
@@ -2190,9 +2210,17 @@ function M.dissociate_worktree(row)
   _confirm(string.format(
     "Release %s from PR #%s?  Nothing is deleted and the PR is not closed.",
     branch, tostring(n or "?")), function()
-    local ok_call, res = pcall(pr_mod.dissociate, repo, branch)
+    -- `expect_pr` is the number the prompt DISPLAYED: the confirmation cannot
+    -- release a replacement association installed while it was open (lector
+    -- r0 P1-3).
+    local ok_call, res = pcall(pr_mod.dissociate, repo, branch, { expect_pr = n })
     if not ok_call then
       logger.notify("repos: dissociate errored — " .. tostring(res), { level = vim.log.levels.ERROR })
+      return
+    end
+    if res and res.code == "incumbent_drift" then
+      logger.notify("repos: " .. tostring(res.error) .. " — nothing was released; press d again",
+        { level = vim.log.levels.WARN })
       return
     end
     if not (res and res.ok) then
