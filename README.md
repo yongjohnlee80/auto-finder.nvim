@@ -404,8 +404,12 @@ with `worktree.nvim`'s `:WorktreeAuth`, from any buffer:
 `G`, `N` and `S` check for a token **before** they prompt, and the refusal
 names the exact `:WorktreeAuth set …` line for that repo's host — you no longer
 type a PR number (or a title *and* a body) into a request that cannot be sent.
-`i` on a repo row reports which key resolves it and how; `:WorktreeAuth status`
-answers the same question from any buffer. Neither executes the provider, so
+`i` on a repo row reports which key is selected, its shape, and its
+**readiness** — flagging `UNAVAILABLE` (with the reason) or `readiness unknown`
+rather than implying a source works; `:WorktreeAuth status` answers the same
+from any buffer. A gate refuses only when nothing is selected or the selected
+source is *known* to be unusable; an unprobed command provider is allowed
+through, because knowing would mean running it. Neither executes a provider, so
 neither can trigger a passphrase prompt, and neither prints a secret.
 
 The key is matched **slug → host → env**: a repo slug (`owner__name`, double

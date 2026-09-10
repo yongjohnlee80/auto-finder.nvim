@@ -128,9 +128,31 @@ local function _preflight_credential(repo, action)
   local d = _credential(repo)
   -- No report at all means an older worktree.nvim, not a missing credential.
   -- Refusing here would break the keys on exactly the installs that still work.
-  if not d or d.configured then return true end
+  if not d then return true end
+
+  -- SELECTION and READINESS are separate facts, and only two of the states
+  -- justify refusing (lector r0 P1-1):
+  --
+  --   nothing selected   refuse — there is no source to try
+  --   unavailable        refuse — the selected source is KNOWN not to work
+  --                      (an env variable that is unset), so prompting would
+  --                      only postpone a certain failure
+  --   unknown            ALLOW — a command provider's readiness cannot be
+  --                      known without running it, and running it here would
+  --                      fire a passphrase prompt on a keypress that has asked
+  --                      for nothing. Let the action itself resolve and fail.
+  --   ready              ALLOW
+  --
+  -- `d.readiness` is nil on a worktree.nvim that reports only the old boolean;
+  -- fall back to it so the gate stays correct on both.
+  local readiness = d.readiness
+  local blocked = (readiness == nil)
+    and (d.configured == false)
+    or (d.selected == false or readiness == "unavailable")
+  if not blocked then return true end
+
   logger.notify(string.format(
-    "repos: %s needs a forge token and none resolves for %s — %s\n  %s",
+    "repos: %s needs a forge token and none is usable for %s — %s\n  %s",
     action, tostring(repo and repo.slug or "this repo"),
     tostring(d.why), tostring(d.hint)),
     { level = vim.log.levels.WARN })
@@ -2142,19 +2164,27 @@ local function _info(row)
     -- press G, type a number, and wait for the forge to refuse.
     local d = _credential(row.repo)
     if d then
-      if d.configured then
-        local shape = d.kind == "env" and ("env " .. tostring(d.var))
-          or d.kind == "command" and ("command " .. table.concat(d.argv or {}, " "))
-          or tostring(d.kind)
-        vim.list_extend(lines, {
-          "  auth:       " .. tostring(d.key) .. " — " .. shape
-            .. " (" .. tostring(d.source) .. ")",
-        })
-      else
+      if d.selected == false or (d.selected == nil and not d.configured) then
         vim.list_extend(lines, {
           "  auth:       NONE — " .. tostring(d.why),
           "              " .. tostring(d.hint),
         })
+      else
+        local shape = d.kind == "env" and ("env " .. tostring(d.var))
+          or d.kind == "command" and ("command " .. table.concat(d.argv or {}, " "))
+          or tostring(d.kind)
+        -- Readiness is reported, not implied. "auth: X" with no qualifier read
+        -- as "this works", which is what let a broken env profile look fine.
+        local qualifier = (d.readiness == "unavailable" and "  — UNAVAILABLE: " .. tostring(d.why))
+          or (d.readiness == "unknown" and "  — readiness unknown (not probed)")
+          or ""
+        vim.list_extend(lines, {
+          "  auth:       " .. tostring(d.key) .. " — " .. shape
+            .. " (" .. tostring(d.source) .. ")" .. qualifier,
+        })
+        if d.readiness == "unavailable" then
+          vim.list_extend(lines, { "              " .. tostring(d.hint) })
+        end
       end
     end
     vim.list_extend(lines, {
