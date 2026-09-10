@@ -2,6 +2,57 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.29] — 2026-09-11 — `#` binds a worktree to an existing PR, and the PR keys check for a token first
+
+Patch. ADR-0083 Amendment r10.7. Needs worktree.nvim **v0.5.17**, which ships
+the verbs and the credential report; degrades cleanly on older versions.
+Reviewed by lector across four rounds.
+
+**`#` associates, `d` releases (#48).** `G` fetches a PR into a *new* worktree
+and `N` opens one for this branch. Neither covered the branch that **already**
+has a PR — `gh pr create` outside nvim, a colleague's, one you renamed — which
+could only be bound by hand-editing the KB document. Without it the worktree
+carries no `[#N]`, `O` has no base, and every review drafted there is born
+with no `pr` and can never be submitted with `S`.
+
+`#` on a worktree row prompts for the number; `d` on a worktree row releases
+it (on a review, `d` still removes the review). `#` rather than `a`: it is the
+badge the key produces, it is not a git verb competing with `f`/`s`/`c`/`P`,
+and `A` already attaches a review to a task.
+
+What the panel says, each because its absence reads as something else:
+
+- an unverified **stub** (no token) still reports success *and* warns it is
+  unverified — the badge is real but `base`/`base_sha` are empty;
+- a conflict **offers** the re-point and names every association it would
+  break, including the two-ended case where a branch holds one PR *and* the
+  requested PR sits on another branch;
+- the retry is bound to the state the prompt displayed, so an association
+  moved by another actor while the prompt was open refuses rather than being
+  silently displaced;
+- releasing a branch literally named `pr-<N>` warns that the name still
+  associates it, because the badge returns on the next repaint.
+
+**The PR keys check for a token before prompting (#49).** ADR-0083 §2.6
+Action 1 step 1, specified and never built: `G`, `N` and `S` prompted for a PR
+number — `N` for a title *and* a body — went to the network, and only then
+reported that no token resolves. A failure that arrives after you have
+committed to an action reads as the action being broken.
+
+All three now refuse first and name the exact `:WorktreeAuth set <host> …`
+line. The gate consumes selection *and* readiness: it refuses when nothing is
+selected or the selected source is **known** unusable, and allows an unprobed
+command provider through, because knowing would mean running it. `#` is
+deliberately not gated — `associate` works without a token by design.
+
+`i` on a repo row gains an `auth:` line — the winning key with its shape and
+source, flagging `UNAVAILABLE` (with the reason) or `readiness unknown` rather
+than implying a source works. Nothing else in the UI could answer "will the PR
+keys work here".
+
+PRs #48 and #49. Tests: `adr0083-repos-pr-tree` 70 → 113; `run-all.sh` OK on
+merged `main`. Each behaviour carries a falsification.
+
 ## [v0.4.28] — 2026-09-10 — `?` never said a PR key needs a token, or what gives a worktree its `[#N]`
 
 Patch. Documentation and one warning; no key changed behaviour.
