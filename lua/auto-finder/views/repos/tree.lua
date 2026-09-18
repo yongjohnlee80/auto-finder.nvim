@@ -1540,6 +1540,22 @@ local function _open_range_diff(spec, opts)
   local draft = authoring.draft(repo.slug, default_sha, { cwd = spec.wt_path })
   if spec.pr then draft.pr = spec.pr.number end
 
+  -- Say it at DRAFT time, not at submit time (r11.5). Without a PR this review
+  -- cannot be posted, and the old failure arrived at `S` — after every finding
+  -- had been written, which is the least useful moment to learn it. Warn once,
+  -- and name the recovery so the message is actionable rather than an
+  -- apology: `p` attaches a PR to a review that already exists.
+  --
+  -- Deliberately NOT a refusal. A review with no PR is perfectly legitimate —
+  -- reading a commit and recording findings for a task is a real workflow, and
+  -- `A` attaches those to a todo without a PR ever existing.
+  if not draft.pr then
+    logger.notify(
+      "repos: this review has no PR — S cannot submit it. Press p on the review "
+      .. "afterwards to attach one.",
+      { level = vim.log.levels.WARN })
+  end
+
   local annotate = {
     on_add = function(a)
       local cur_file = dv.current_file()
@@ -2098,6 +2114,79 @@ end
 ---`[#N]`, `O` has no base, and every review drafted here is born with no `pr`
 ---and can never be submitted with `S`.
 ---@param row table
+---associate_review attaches a PR to a review that has none (`p`, r11).
+---
+---The gap this closes: `pr` is written at draft creation and only there, so a
+---review drafted from a COMMIT context — which never had a worktree to inherit
+---one from — could never be posted. `S` refused it, and the panel offered
+---`S`/`d`/`A` and nothing that could supply what `S` wanted. The only route was
+---to delete the review and redo it from the PR view, discarding the findings.
+---
+---Shaped like `associate_worktree` (`#`) — prompt, apply, report — but the
+---target is different: `#` writes the KB PR document for a WORKTREE, this
+---writes the `pr` field of a REVIEW. Like `#`, it needs no credential: nothing
+---here talks to the forge.
+---@param row table
+function M.associate_review(row)
+  -- Accept the review row or either of its pair leaves, exactly as `d` does:
+  -- the two files are one review.
+  if not (row and (row.kind == "review" or row.kind == "review_file")
+      and row.review and row.review.path) then
+    logger.notify("repos: put the cursor on a review to associate it with a PR (p)",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local ok_rev, review_mod = pcall(require, "worktree.review")
+  if not (ok_rev and type(review_mod.amend_pr_association) == "function") then
+    logger.notify("repos: associating a review needs a newer worktree.nvim "
+      .. "(review.amend_pr_association)", { level = vim.log.levels.WARN })
+    return
+  end
+
+  local meta = row.review
+  local label = tostring(meta.name or meta.path)
+
+  -- Say what it is already on rather than silently re-pointing it. A review
+  -- that already posts somewhere is the case where a wrong number does real
+  -- damage.
+  local existing = meta.pr
+  local prompt = existing
+      and string.format("Re-point review %s from PR #%s to PR #: ", label, tostring(existing))
+      or string.format("Associate review %s with PR #: ", label)
+
+  vim.ui.input({ prompt = prompt }, function(input)
+    input = vim.trim(tostring(input or ""))
+    if input == "" then
+      logger.notify("repos: associate cancelled (no PR number entered)",
+        { level = vim.log.levels.INFO })
+      return
+    end
+    local n = tonumber(input)
+    if not n or n < 1 or n ~= math.floor(n) then
+      logger.notify(string.format("repos: '%s' is not a PR number", input),
+        { level = vim.log.levels.WARN })
+      return
+    end
+
+    local ok_call, aok, aerr = pcall(review_mod.amend_pr_association, meta.path, n)
+    if not ok_call then
+      logger.notify(string.format("repos: associate #%d errored — %s", n, tostring(aok)),
+        { level = vim.log.levels.ERROR })
+      return
+    end
+    if not aok then
+      logger.notify(string.format("repos: could not associate review %s with PR #%d — %s",
+        label, n, tostring(aerr)), { level = vim.log.levels.ERROR })
+      return
+    end
+
+    M.invalidate(nil)
+    _rerender()
+    logger.notify(string.format("repos: review %s now posts to PR #%d — press S to submit it",
+      label, n), { level = vim.log.levels.INFO })
+  end)
+end
+
 function M.associate_worktree(row)
   if not (row and row.repo and row.worktree and row.worktree.branch) then
     logger.notify("repos: put the cursor on a worktree to associate it with a PR",
@@ -2647,9 +2736,11 @@ M.HELP = {
   "    $AUTO_AGENTS_KB_ROOT/shared/prs/<slug>/pr-<N>.md",
   "  says `branch: <this worktree's branch>`. G and N both write it, so",
   "  the ordinary flows need no manual step.",
-  "  A review inherits its PR from the worktree AT DRAFT TIME. Open the",
-  "  diff on a worktree with no association and the review carries no PR,",
-  "  so S can never submit it — associate first, then review.",
+  "  A review inherits its PR from the worktree AT DRAFT TIME, so a review",
+  "  drafted from a commit — which had no worktree to inherit from — carries",
+  "  no PR and S refuses it. That is recoverable: p on the review asks for a",
+  "  number and attaches it, then S submits. p needs no token, and it can",
+  "  re-point a review that already names a PR. d clears the association.",
   "  For a PR opened elsewhere (gh pr create, a colleague's, a renamed",
   "  branch), press # on the worktree and give the number. With a token",
   "  the record is the forge's; without one it writes an unverified stub",
@@ -2857,55 +2948,41 @@ function M.remove_review(row)
         logger.notify("repos: dissociation cancelled", { level = vim.log.levels.INFO })
         return
       end
+      -- ONE writer for both directions (r11). This used to read the JSON,
+      -- mutate it in memory and write it back through `store.write_json` — or,
+      -- failing that, through `fs.atomic` or a bare `writefile` — none of which
+      -- re-check the schema or the pair that every other writer of a canonical
+      -- review enforces. `p` (associate) and `d` (dissociate) now share
+      -- `review.amend_pr_association`, which is also the only operation that can
+      -- touch `pr` at all.
+      local ok_rev, review_mod = pcall(require, "worktree.review")
+      if not (ok_rev and type(review_mod.amend_pr_association) == "function") then
+        logger.notify("repos: dissociating a review needs a newer worktree.nvim "
+          .. "(review.amend_pr_association)", { level = vim.log.levels.WARN })
+        return
+      end
+
+      -- Read first, only to answer "is this review actually on THAT PR?".
+      -- `d` on a review belonging to a different PR stays a no-op with a
+      -- reason rather than a silent clear — the prior behaviour.
       local ok_store, store = pcall(require, "worktree.store")
-      local ok_pr, pr_mod = pcall(require, "worktree.pr")
       local data, rerr = ok_store and store.read_json(meta.path)
       if not data then
-        logger.notify("repos: could not read review JSON to dissociate — " .. tostring(rerr), { level = vim.log.levels.ERROR })
+        logger.notify("repos: could not read review JSON to dissociate — " .. tostring(rerr),
+          { level = vim.log.levels.ERROR })
         return
       end
-      local did_change = false
-      if ok_pr and pr_mod.dissociate_review then
-        did_change = pr_mod.dissociate_review(data, pr_num)
-      else
-        if tonumber(data.pr) == tonumber(pr_num) then
-          data.pr = nil
-          did_change = true
-        end
-      end
-      if not did_change then
-        logger.notify(string.format("repos: review %s is not associated with PR #%s", label, tostring(pr_num)), { level = vim.log.levels.WARN })
+      if tonumber(data.pr) ~= tonumber(pr_num) then
+        logger.notify(string.format("repos: review %s is not associated with PR #%s",
+          label, tostring(pr_num)), { level = vim.log.levels.WARN })
         return
       end
-      local write_ok = false
-      local werr = nil
-      if ok_store and store.write_json then
-        local wok, err = store.write_json(meta.path, data)
-        if wok then
-          write_ok = true
-        else
-          werr = err
-        end
-      else
-        local ok_atomic, fs_atomic = pcall(require, "auto-core.fs.atomic")
-        if ok_atomic and fs_atomic.write then
-          local wok, err = fs_atomic.write(meta.path, vim.json.encode(data))
-          if wok then
-            write_ok = true
-          else
-            werr = err
-          end
-        else
-          local wok, err = pcall(vim.fn.writefile, { vim.json.encode(data) }, meta.path)
-          if wok and err == 0 then
-            write_ok = true
-          else
-            werr = err or "write failed"
-          end
-        end
-      end
-      if not write_ok then
-        logger.notify(string.format("repos: failed to save dissociated review %s: %s", label, tostring(werr or "write error")), { level = vim.log.levels.ERROR })
+
+      -- By PATH: the review this row names, not one rebuilt from an identity.
+      local aok, aerr = review_mod.amend_pr_association(meta.path, nil)
+      if not aok then
+        logger.notify(string.format("repos: failed to dissociate review %s: %s",
+          label, tostring(aerr or "write error")), { level = vim.log.levels.ERROR })
         return
       end
       M.invalidate(nil)
@@ -3138,6 +3215,8 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: remove review / dissociate from its PR (confirms first)")
   set("A", function() M.attach_review_to_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: attach review to in-progress task")
+  set("p", function() M.associate_review(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: associate this review with a PR (no token needed)")
   set("G", function() M.get_pr_for_repo(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: fetch PR branch and create worktree (GetPR)")
   set("N", function() M.create_pr_for_worktree(_row_under_cursor(panel_winid)) end,
