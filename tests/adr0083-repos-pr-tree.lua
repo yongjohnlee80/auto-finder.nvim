@@ -42,6 +42,11 @@ vim.o.columns, vim.o.lines = 200, 60
 
 local sb = vim.fn.tempname() .. "-adr0083-pr"
 dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h") .. "/_sandbox.lua")("adr0083-pr")
+-- The review fixtures below put their documents under `sb/agents/<slug>/reviews/`,
+-- which is only a legible pair if $KB_ROOT names `sb`. Nothing checked the pair
+-- before r11, so this was never needed; `p` re-validates it, because attaching
+-- a PR is what makes a review postable.
+vim.env.AUTO_AGENTS_KB_ROOT = sb
 
 pcall(vim.cmd, "runtime plugin/auto-finder.lua")
 
@@ -146,9 +151,19 @@ ok("assoc: HELP gives BOTH ways a worktree becomes PR #N",
     and help_text:find("shared/prs/<slug>/pr-<N>.md", 1, true) ~= nil)
 ok("assoc: HELP says G and N write that document",
   help_text:find("G and N both write it", 1, true) ~= nil)
-ok("assoc: HELP warns a review inherits its PR at DRAFT time",
+-- r11: the help used to end at "S can never submit it", which was true when
+-- nothing could supply a missing PR. It is now false, and a help text that
+-- states a dead end the panel can recover from is worse than silence — the
+-- reader stops looking for the key that fixes it. The assertion moves with the
+-- behaviour: still explain draft-time inheritance, then name the recovery and
+-- what it needs.
+ok("assoc: HELP explains draft-time inheritance AND the p recovery",
   help_text:find("AT DRAFT TIME", 1, true) ~= nil
-    and help_text:find("S can never submit it", 1, true) ~= nil)
+    and help_text:find("p on the review", 1, true) ~= nil)
+ok("assoc: HELP says p needs no token (its prerequisite, stated)",
+  help_text:find("needs no token", 1, true) ~= nil)
+ok("assoc: HELP no longer claims the review can never be submitted",
+  help_text:find("S can never submit it", 1, true) == nil)
 -- Was "Repoint one by editing that document's `branch:`" / "`d` dissociates a
 -- REVIEW". r10.7 replaced hand-editing with `#` and gave `d` a meaning on a
 -- worktree row, so the modal now names the KEYS; the same two facts, pinned
@@ -230,9 +245,15 @@ local mock_review = {
 vim.fn.mkdir(vim.fs.dirname(mock_pr.kb_doc), "p")
 vim.fn.writefile({ "# PR 42", "Body" }, mock_pr.kb_doc)
 vim.fn.mkdir(vim.fs.dirname(mock_review.path), "p")
+-- The on-disk JSON carries `document` and `reviewer_slug`, as a review written
+-- by `save_pair` always does. It did not before r11, and nothing noticed
+-- because no code path re-validated the pair — `p` does, since attaching a PR
+-- is what makes a review postable.
 vim.fn.writefile({ vim.json.encode({
   schema = "worktree.review/1", commit = mock_review.commit, revision = 1,
   repo = { url = mock_repo.url, owner = "user", name = "test-repo" }, pr = 42,
+  reviewer = "reviewer", reviewer_slug = "reviewer",
+  document = mock_review.document,
   comments = { { path = "foo.lua", line = 10, severity = "must-fix", body = "Fix this" } },
 }) }, mock_review.path)
 vim.fn.writefile({ "# Review r1" }, mock_review.document)
@@ -357,6 +378,54 @@ notes = {}
 tree.submit_review({ kind = "review", repo = mock_repo, review = { name = "x", path = mock_review.path } })
 ok("r9: S on a review with no PR warns and posts nothing",
   last_note() and last_note().msg:find("not associated with a PR", 1, true) ~= nil, vim.inspect(notes))
+
+-- ── r11: p supplies what S was refusing for ─────────────────────────
+-- The refusal above was a DEAD END: nothing on the panel could give a review
+-- the PR that S demands, so a commit-context review could only be posted by
+-- deleting it and re-reviewing from the PR view. `p` is the missing inverse.
+local prev_input = vim.ui.input
+notes = {}
+vim.ui.input = function(opts, cb) cb("777") end
+tree.associate_review({ kind = "review", repo = mock_repo, review = mock_review })
+vim.ui.input = prev_input
+local assoc_disk = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
+ok("r11: *** p attaches a PR to a review that had none ***",
+  tostring(assoc_disk.pr) == "777", tostring(assoc_disk.pr))
+ok("r11: and it says so, naming S as the next step",
+  last_note() and last_note().msg:find("posts to PR #777", 1, true) ~= nil, vim.inspect(notes))
+
+-- The whole point: S now works on the review p just fixed.
+submit_pr = nil
+notes = {}
+tree.submit_review({ kind = "review", repo = mock_repo,
+  review = { name = mock_review.name, path = mock_review.path, pr = 777 } })
+ok("r11: *** S submits the review p associated — the dead end is gone ***",
+  submit_pr == 777, tostring(submit_pr))
+
+-- p refuses non-numbers rather than writing junk into `pr`.
+notes = {}
+vim.ui.input = function(opts, cb) cb("not-a-number") end
+tree.associate_review({ kind = "review", repo = mock_repo, review = mock_review })
+vim.ui.input = prev_input
+ok("r11: p rejects a non-numeric PR and says so",
+  last_note() and last_note().msg:find("is not a PR number", 1, true) ~= nil, vim.inspect(notes))
+local unchanged = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
+ok("r11: and the association is untouched by the rejected input",
+  tostring(unchanged.pr) == "777", tostring(unchanged.pr))
+
+-- p off a review row refuses, like every other review key.
+notes = {}
+tree.associate_review({ kind = "worktree", repo = mock_repo })
+ok("r11: p off a review row warns instead of acting",
+  last_note() and last_note().msg:find("put the cursor on a review", 1, true) ~= nil,
+  vim.inspect(notes))
+
+-- Restore the fixture for the dissociation section below, which expects #42.
+do
+  local d = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
+  d.pr = 42
+  vim.fn.writefile({ vim.json.encode(d) }, mock_review.path)
+end
 
 -- S off a review row (e.g. a worktree) refuses
 notes = {}
