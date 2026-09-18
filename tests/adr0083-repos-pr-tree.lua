@@ -235,9 +235,16 @@ local mock_pr = {
   branch = "pr-42", base = "main", author = "alice",
   kb_doc = sb .. "/shared/prs/test-repo/pr-42.md",
 }
+-- Review JSON lives in the worktree review store (`reviews/<slug>/<file>`);
+-- the Markdown document lives in the KB under `agents/<slug>/reviews/`. The
+-- fixture used to put BOTH in the KB dir, which no code path noticed until
+-- `p` began requiring the canonical store layout before attaching a PR.
+local _wt_store = require("worktree.store")
+local REVIEW_DIR = _wt_store.reviews_dir("user__test-repo")
+vim.fn.mkdir(REVIEW_DIR, "p")
 local mock_review = {
   name = "test-repo@c1a2b3c.r1.review.json",
-  path = sb .. "/agents/reviewer/reviews/test-repo@c1a2b3c.r1.review.json",
+  path = REVIEW_DIR .. "/test-repo@c1a2b3c.r1.review.json",
   document = sb .. "/agents/reviewer/reviews/2026-09-05-test-repo-c1a2b3c-r1-review.md",
   commit = "c1a2b3c000000000000000000000000000000000",
   revision = 1, pr = 42, worst = "must-fix", severities = { ["must-fix"] = 1 },
@@ -245,6 +252,9 @@ local mock_review = {
 vim.fn.mkdir(vim.fs.dirname(mock_pr.kb_doc), "p")
 vim.fn.writefile({ "# PR 42", "Body" }, mock_pr.kb_doc)
 vim.fn.mkdir(vim.fs.dirname(mock_review.path), "p")
+-- The document lives in the KB, which is now a DIFFERENT directory from the
+-- JSON; both have to exist for the pair to be legible.
+vim.fn.mkdir(vim.fs.dirname(mock_review.document), "p")
 -- The on-disk JSON carries `document` and `reviewer_slug`, as a review written
 -- by `save_pair` always does. It did not before r11, and nothing noticed
 -- because no code path re-validated the pair — `p` does, since attaching a PR
@@ -383,12 +393,42 @@ ok("r9: S on a review with no PR warns and posts nothing",
 -- The refusal above was a DEAD END: nothing on the panel could give a review
 -- the PR that S demands, so a commit-context review could only be posted by
 -- deleting it and re-reviewing from the PR view. `p` is the missing inverse.
+--
+-- This uses its OWN review with NO pr on disk. An earlier version ran against
+-- the shared fixture, which carries pr=42 — so the cell labelled "attaches a
+-- PR to a review that had none" was in fact exercising a REPOINT, and the
+-- commit-context case this whole amendment exists for went untested
+-- (agent:zen, r11 joint review).
 local prev_input = vim.ui.input
+local nopr = {
+  name = "test-repo@d4e5f60.r1.review.json",
+  path = REVIEW_DIR .. "/test-repo@d4e5f60.r1.review.json",
+  document = sb .. "/agents/reviewer/reviews/2026-09-05-test-repo-d4e5f60-r1-review.md",
+  commit = "d4e5f60000000000000000000000000000000000",
+  revision = 1,
+}
+vim.fn.writefile({ vim.json.encode({
+  schema = "worktree.review/1", commit = nopr.commit, revision = 1,
+  repo = { url = mock_repo.url, owner = "user", name = "test-repo" },
+  reviewer = "reviewer", reviewer_slug = "reviewer", document = nopr.document,
+  comments = { { path = "bar.lua", line = 3, severity = "nit", body = "x" } },
+}) }, nopr.path)
+vim.fn.writefile({ "# Review r1" }, nopr.document)
+
+local before_assoc = vim.json.decode(table.concat(vim.fn.readfile(nopr.path), "\n"))
+ok("r11: CONTROL — the review starts with NO pr on disk", before_assoc.pr == nil,
+  tostring(before_assoc.pr))
+notes = {}
+tree.submit_review({ kind = "review", repo = mock_repo, review = nopr })
+ok("r11: CONTROL — and S refuses it, which is the defect",
+  last_note() and last_note().msg:find("not associated with a PR", 1, true) ~= nil,
+  vim.inspect(notes))
+
 notes = {}
 vim.ui.input = function(opts, cb) cb("777") end
-tree.associate_review({ kind = "review", repo = mock_repo, review = mock_review })
+tree.associate_review({ kind = "review", repo = mock_repo, review = nopr })
 vim.ui.input = prev_input
-local assoc_disk = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
+local assoc_disk = vim.json.decode(table.concat(vim.fn.readfile(nopr.path), "\n"))
 ok("r11: *** p attaches a PR to a review that had none ***",
   tostring(assoc_disk.pr) == "777", tostring(assoc_disk.pr))
 ok("r11: and it says so, naming S as the next step",
@@ -398,11 +438,25 @@ ok("r11: and it says so, naming S as the next step",
 submit_pr = nil
 notes = {}
 tree.submit_review({ kind = "review", repo = mock_repo,
-  review = { name = mock_review.name, path = mock_review.path, pr = 777 } })
+  review = { name = nopr.name, path = nopr.path, pr = assoc_disk.pr } })
 ok("r11: *** S submits the review p associated — the dead end is gone ***",
   submit_pr == 777, tostring(submit_pr))
 
+-- Re-pointing an already-associated review is a SEPARATE case, kept separate.
+notes = {}
+vim.ui.input = function(opts, cb) cb("888") end
+tree.associate_review({ kind = "review", repo = mock_repo, review = mock_review })
+vim.ui.input = prev_input
+local repointed = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
+ok("r11: p re-points a review that already names a PR (42 -> 888)",
+  tostring(repointed.pr) == "888", tostring(repointed.pr))
+
 -- p refuses non-numbers rather than writing junk into `pr`.
+-- Compared against whatever the association happens to be at this point rather
+-- than a literal: the cells above re-point it, and a hard-coded expectation
+-- here would fail for a reason that has nothing to do with the rejection.
+local pr_before_bad = vim.json.decode(
+  table.concat(vim.fn.readfile(mock_review.path), "\n")).pr
 notes = {}
 vim.ui.input = function(opts, cb) cb("not-a-number") end
 tree.associate_review({ kind = "review", repo = mock_repo, review = mock_review })
@@ -411,7 +465,8 @@ ok("r11: p rejects a non-numeric PR and says so",
   last_note() and last_note().msg:find("is not a PR number", 1, true) ~= nil, vim.inspect(notes))
 local unchanged = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
 ok("r11: and the association is untouched by the rejected input",
-  tostring(unchanged.pr) == "777", tostring(unchanged.pr))
+  tostring(unchanged.pr) == tostring(pr_before_bad),
+  ("%s -> %s"):format(tostring(pr_before_bad), tostring(unchanged.pr)))
 
 -- p off a review row refuses, like every other review key.
 notes = {}
