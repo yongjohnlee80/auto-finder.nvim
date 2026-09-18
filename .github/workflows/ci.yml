@@ -107,17 +107,13 @@ jobs:
           # to the change under test cannot distinguish a new failure from the
           # standing one.
           AUTO_CORE_REF: "5bba92e0bbcf46dc9f486373958f06dd7803627c"  # main @ v0.2.24
-          # BUMPED for ADR-0083 r11, and this one is TEMPORARY in a way the
-          # others are not: it points at worktree.nvim PR #34's head, not a
-          # merged commit. `p` and `d` call `review.amend_pr_association`,
-          # which exists only on that branch, so the pin has to move or seven
-          # cells fail for a reason unrelated to anything in this repo.
-          #
-          # RE-PIN TO MAIN THE MOMENT #34 MERGES. A pin on a PR branch is
-          # fine while the branch lives and becomes a dangling reference when
-          # it is deleted; the object is reachable today because GitHub serves
-          # it to a full clone (verified), not because the ref is permanent.
-          WORKTREE_REF:  "36bd63a7917816fa3366bf00a2246d912d1b7be9"  # PR #34 head — TEMPORARY
+          # BUMPED for ADR-0083 r11: `p` and `d` call
+          # `review.amend_pr_association`, which the previous pin predated.
+          # Briefly pointed at PR #34's head while that PR was open; now on
+          # main, where a pin belongs. The branch has since been deleted, so
+          # the old value named a commit reachable only as refs/pull/34/head —
+          # still resolvable, but not a thing to leave a gating job resting on.
+          WORKTREE_REF:  "9a5542e57561329ef9706588c23985fc95157dd4"  # main, carries amend_pr_association
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
           PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
           NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
@@ -266,17 +262,13 @@ jobs:
       - name: install plugin dependencies (auto-core at HEAD)
         env:
           AUTO_CORE_REF: ""   # empty => default branch
-          # BUMPED for ADR-0083 r11, and this one is TEMPORARY in a way the
-          # others are not: it points at worktree.nvim PR #34's head, not a
-          # merged commit. `p` and `d` call `review.amend_pr_association`,
-          # which exists only on that branch, so the pin has to move or seven
-          # cells fail for a reason unrelated to anything in this repo.
-          #
-          # RE-PIN TO MAIN THE MOMENT #34 MERGES. A pin on a PR branch is
-          # fine while the branch lives and becomes a dangling reference when
-          # it is deleted; the object is reachable today because GitHub serves
-          # it to a full clone (verified), not because the ref is permanent.
-          WORKTREE_REF:  "36bd63a7917816fa3366bf00a2246d912d1b7be9"  # PR #34 head — TEMPORARY
+          # BUMPED for ADR-0083 r11: `p` and `d` call
+          # `review.amend_pr_association`, which the previous pin predated.
+          # Briefly pointed at PR #34's head while that PR was open; now on
+          # main, where a pin belongs. The branch has since been deleted, so
+          # the old value named a commit reachable only as refs/pull/34/head —
+          # still resolvable, but not a thing to leave a gating job resting on.
+          WORKTREE_REF:  "9a5542e57561329ef9706588c23985fc95157dd4"  # main, carries amend_pr_association
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
           PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
           NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
