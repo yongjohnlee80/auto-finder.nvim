@@ -154,9 +154,13 @@ end)()
   local asked = nil
   local orig_select = vim.ui.select
   local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
   -- Force the fallback path so the assertion does not depend on which
   -- confirm primitive is present.
+  -- Both surfaces are nil'd: `_confirm` prefers `ui.modal` (ADR-0195 D3) and
+  -- only then falls back to `float.confirm`, then to `vim.ui.select`.
   package.loaded["auto-core.ui.float"] = { confirm = nil }
+  package.loaded["auto-core.ui.modal"] = { open = nil }
   vim.ui.select = function(items, opts, cb) asked = opts and opts.prompt; cb("no") end
 
   local repo_row = { kind = "repo", repo = { label = "myrepo", common_dir = "/x/.git" } }
@@ -180,6 +184,7 @@ end)()
 
   vim.ui.select = orig_select
   package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
   package.loaded["worktree.repos"] = nil
 end)()
 
@@ -374,7 +379,11 @@ end)()
   local asked = nil
   local orig_select = vim.ui.select
   local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  -- Both surfaces are nil'd: `_confirm` prefers `ui.modal` (ADR-0195 D3) and
+  -- only then falls back to `float.confirm`, then to `vim.ui.select`.
   package.loaded["auto-core.ui.float"] = { confirm = nil }
+  package.loaded["auto-core.ui.modal"] = { open = nil }
   vim.ui.select = function(_, opts, cb) asked = opts and opts.prompt; cb("no") end
 
   local row = {
@@ -511,7 +520,288 @@ end)()
 
   vim.ui.select = orig_select
   package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
   package.loaded["worktree.repos"] = nil
+end)()
+
+-- ── [10] ADR-0195 D3: the delete confirm is an IRREVERSIBLE modal ───────
+-- [9] proves the gate exists through the degraded fallback. This proves the
+-- SHAPE of the real one: the raw filename moves into the modal's BODY, where it
+-- is readable, and irreversibility is passed as an ENFORCED construction input
+-- rather than left to the caller's answer ordering — auto-core is what drops the
+-- affirmative default and puts the decline first.
+;(function()
+  local removed = {}
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    remove_review = function(repo, path)
+      removed[#removed + 1] = { repo = repo, path = path }
+      return true, nil, { path = path, document_removed = true }
+    end,
+  }
+  local seen, answer = nil, false
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  package.loaded["auto-core.ui.modal"] = {
+    open = function(o) seen = o; if o.on_choice then o.on_choice(answer) end end,
+  }
+
+  local row = {
+    kind = "review",
+    repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+    review = { name = "own__myrepo@1cfe731.r1.review.json",
+               path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+               short = "1cfe731", revision = 1, severities = {} },
+  }
+
+  tree.remove_review(row)
+  local body = seen
+    and (type(seen.body) == "table" and table.concat(seen.body, "  ") or tostring(seen.body))
+    or ""
+  ok("[10] d opens the shared modal", seen ~= nil)
+  ok("[10] *** the delete is declared IRREVERSIBLE ***",
+    seen ~= nil and seen.reversibility == "irreversible", seen and tostring(seen.reversibility))
+  ok("[10] the BODY carries the raw review filename, not a truncated prompt line",
+    body:find("own__myrepo@1cfe731.r1.review.json", 1, true) ~= nil, body)
+  ok("[10] the body says both halves go and it cannot be undone",
+    body:find("Markdown", 1, true) ~= nil
+      and body:lower():find("cannot be undone", 1, true) ~= nil, body)
+  ok("[10] it offers a cancel-role answer for auto-core to order first", (function()
+    for _, it in ipairs((seen and seen.items) or {}) do
+      if it.role == "cancel" then return true end
+    end
+    return false
+  end)())
+  ok("[10] *** declining removes nothing ***", #removed == 0, #removed)
+
+  answer = true
+  tree.remove_review(row)
+  ok("[10] (control) confirming removes exactly that review, once",
+    #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
+
+  package.loaded["auto-core.ui.modal"] = orig_modal
+  package.loaded["worktree.repos"] = nil
+end)()
+
+-- ── [11] ADR-0195 SF2: the DEGRADED fallback is decline-first too ───────
+-- On an auto-core predating ui.modal the confirm degrades to a picker, which has
+-- no notion of a default — so ORDER is the only safety mechanism there, and a
+-- bare <CR> takes the FIRST row. For the irreversible delete that row must be
+-- the decline. (lector, PR#53 P0: it was hardcoded yes-first, so a bare Enter on
+-- an older auto-core removed both review files.)
+;(function()
+  local removed = {}
+  local function repos_stub()
+    return {
+      available = function() return true end,
+      remove_review = function(repo, path)
+        removed[#removed + 1] = { repo = repo, path = path }
+        return true, nil, { path = path, document_removed = true }
+      end,
+    }
+  end
+  package.loaded["worktree.repos"] = repos_stub()
+
+  local shown = nil
+  local orig_select = vim.ui.select
+  local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  -- Force the DEGRADED path: neither modal nor float.confirm is present.
+  package.loaded["auto-core.ui.float"] = { confirm = nil }
+  package.loaded["auto-core.ui.modal"] = { open = nil }
+
+  local row = {
+    kind = "review",
+    repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+    review = { name = "own__myrepo@1cfe731.r1.review.json",
+               path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+               short = "1cfe731", revision = 1, severities = {} },
+  }
+
+  -- Model a bare <CR>: a picker takes its FIRST row.
+  vim.ui.select = function(items, _, cb) shown = items; cb(items[1]) end
+  tree.remove_review(row)
+  ok("[11] *** the degraded delete lists the DECLINE first ***",
+    shown ~= nil and shown[1] == "no", shown and vim.inspect(shown))
+  ok("[11] *** so a bare <CR> on an older auto-core removes NOTHING ***",
+    #removed == 0, #removed)
+
+  -- (control) the affirmative is still reachable, and still removes.
+  vim.ui.select = function(_, _, cb) cb("yes") end
+  tree.remove_review(row)
+  ok("[11] (control) choosing yes still removes exactly that review",
+    #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
+
+  -- (control) a REVERSIBLE question keeps its affirmative first, so <CR> acts.
+  local pushed = 0
+  package.loaded["worktree.repos"] = { available = function() return true end,
+                                       push = function() pushed = pushed + 1 end }
+  local pshown = nil
+  vim.ui.select = function(items, _, cb) pshown = items; cb(items[1]) end
+  tree.git_push({ kind = "repo", repo = { label = "myrepo", common_dir = "/x/.git" } })
+  ok("[11] (control) a REVERSIBLE question is still affirmative-first",
+    pshown ~= nil and pshown[1] == "yes", pshown and vim.inspect(pshown))
+
+  vim.ui.select = orig_select
+  package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
+  package.loaded["worktree.repos"] = nil
+end)()
+
+-- ── [11b] the LEGACY-FLOAT branch carries the same ordering ─────────────
+--
+-- [11] nils float.confirm, so it only ever reaches the raw vim.ui.select last
+-- resort. That left the middle rung untested: an auto-core new enough to have
+-- `float.confirm` but too old for `ui.modal`. Its safety depends entirely on the
+-- call passing `items = items` — and lector proved the gap by deleting exactly
+-- that argument, which reintroduces yes-first bare Enter while the suite stayed
+-- 99/0. A branch that no cell enters is not covered by the cells around it.
+;(function()
+  local removed = {}
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    remove_review = function(repo, path)
+      removed[#removed + 1] = { repo = repo, path = path }
+      return true, nil, { path = path, document_removed = true }
+    end,
+  }
+
+  local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  -- Modal ABSENT, float.confirm PRESENT: the exact older-auto-core rung.
+  package.loaded["auto-core.ui.modal"] = { open = nil }
+
+  local seen = nil
+  local function float_stub(enter)
+    package.loaded["auto-core.ui.float"] = {
+      confirm = function(prompt, opts)
+        seen = { prompt = prompt, items = opts and opts.items }
+        -- Model a bare <CR>: float.confirm's picker takes its FIRST item.
+        if opts and opts.on_choice then opts.on_choice(enter and enter(opts) or nil) end
+      end,
+    }
+  end
+
+  local row = {
+    kind = "review",
+    repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+    review = { name = "own__myrepo@1cfe731.r1.review.json",
+               path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+               short = "1cfe731", revision = 1, severities = {} },
+  }
+
+  float_stub(function(opts) return opts.items and opts.items[1] end)
+  tree.remove_review(row)
+  -- Assert the LIST REACHED THE CALL before indexing it: dropping `items = items`
+  -- leaves it nil, and that must read as a failure, not a crash.
+  ok("[11b] *** the legacy float.confirm RECEIVES the item list ***",
+    seen ~= nil and type(seen.items) == "table", seen and vim.inspect(seen))
+  ok("[11b] *** and it is DECLINE-first ***",
+    seen and type(seen.items) == "table" and seen.items[1] == "no",
+    seen and vim.inspect(seen.items))
+  ok("[11b] *** so a bare <CR> on that auto-core removes NOTHING ***",
+    #removed == 0, #removed)
+
+  -- (control) the affirmative is still reachable through the same branch.
+  float_stub(function() return "yes" end)
+  tree.remove_review(row)
+  ok("[11b] (control) choosing yes still removes exactly that review",
+    #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
+
+  -- (control) a REVERSIBLE question keeps its affirmative first here too.
+  package.loaded["worktree.repos"] = { available = function() return true end,
+                                       push = function() end }
+  float_stub(function(opts) return opts.items and opts.items[1] end)
+  tree.git_push({ kind = "repo", repo = { label = "myrepo", common_dir = "/x/.git" } })
+  ok("[11b] (control) a REVERSIBLE question is still affirmative-first",
+    seen and type(seen.items) == "table" and seen.items[1] == "yes",
+    seen and vim.inspect(seen.items))
+
+  package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
+  package.loaded["worktree.repos"] = nil
+end)()
+
+-- [12] ADR-0195 D5 — the migration manifest, asserted by SET-EQUALITY.
+--
+-- A count alone is not an audit. r0's manifest was WRONG while its count looked
+-- right: it mislabelled two help overlays as confirmations and listed the
+-- `_confirm` helper instead of its callers. A wrong conversion can replace a
+-- missed required one and leave any count green — so this pins exact MEMBERSHIP
+-- (which enclosing function holds which surface) as well as the totals.
+--
+-- Identity is the enclosing function name, not a line number: line numbers drift
+-- with every edit above them, and a drifting assertion gets "fixed" by updating
+-- the expectation, which is how an audit stops auditing.
+;(function()
+  local src = plugin_root .. "/lua/auto-finder/views/repos/tree.lua"
+  local lines = vim.fn.readfile(src)
+  ok("[12] the audited source is the shipped repos tree", #lines > 0, #lines)
+
+  local found = { confirm = {}, overlay = {}, picker = {}, legacy = {},
+                  modal = {}, vimfn = {}, irreversible = {} }
+  local fn = "<file scope>"
+  for _, line in ipairs(lines) do
+    local l = line:match("^local function ([%w_]+)") or line:match("^function (M%.[%w_]+)")
+    if l then fn = l end
+    -- Comments describe surfaces without being them; a doc line naming
+    -- `float.confirm` must not count as a call site.
+    if not line:match("^%s*%-%-") then
+      if line:match("_confirm%(") and not line:match("^local function _confirm")
+        then table.insert(found.confirm, fn) end
+      if line:match("pcall%(float%.help_overlay") then table.insert(found.overlay, fn) end
+      if line:match("vim%.ui%.select%(")          then table.insert(found.picker, fn) end
+      if line:match("float%.confirm%(")           then table.insert(found.legacy, fn) end
+      if line:match("modal%.open%(")              then table.insert(found.modal, fn) end
+      if line:match("vim%.fn%.confirm%(")         then table.insert(found.vimfn, fn) end
+      if line:match("irreversible%s*=%s*true")    then table.insert(found.irreversible, fn) end
+    end
+  end
+
+  local function seteq(label, got, want)
+    local g, w = vim.deepcopy(got), vim.deepcopy(want)
+    table.sort(g); table.sort(w)
+    ok(label .. " — membership", table.concat(g, ", ") == table.concat(w, ", "),
+      ("got {%s} want {%s}"):format(table.concat(g, ", "), table.concat(w, ", ")))
+    ok(label .. " — count", #g == #w, ("%d vs %d"):format(#g, #w))
+  end
+
+  -- The five confirmation surfaces of D5's auto-finder rows. `remove_review`
+  -- appears TWICE by design: the reversible PR-dissociation and the
+  -- irreversible non-PR delete are different questions in one function.
+  seteq("[12] *** the five confirmations ***", found.confirm, {
+    "M.associate_worktree",   -- re-point PR association        (reversible)
+    "M.dissociate_worktree",  -- release worktree from PR       (reversible)
+    "M.remove_review",        -- dissociate PR review           (reversible)
+    "M.remove_review",        -- delete non-PR review        (IRREVERSIBLE)
+    "M.git_push",             -- push                           (reversible)
+  })
+
+  -- Help overlays stay overlays: an overlay is not a question, so converting one
+  -- to a modal would invent a decision the user never had to make.
+  seteq("[12] the help overlays stayed overlays", found.overlay, { "_info", "_help" })
+
+  -- Pickers stay pickers. `_confirm`'s own last-resort `vim.ui.select` is a
+  -- degradation path, not a menu, so it is named separately rather than quietly
+  -- inflating the picker set.
+  local pickers, in_confirm = {}, 0
+  for _, f in ipairs(found.picker) do
+    if f == "_confirm" then in_confirm = in_confirm + 1 else table.insert(pickers, f) end
+  end
+  seteq("[12] the pickers stayed pickers", pickers, {
+    "M.open_diff", "M.open_diff", "M._submit_review", "M.attach_review_to_task",
+  })
+  ok("[12] _confirm holds exactly one fallback picker", in_confirm == 1, in_confirm)
+
+  -- No confirmation escapes the helper: every one routes through `_confirm`, so
+  -- the D3 reversibility contract has a single place it can be enforced.
+  seteq("[12] *** modal.open is reached ONLY through _confirm ***", found.modal, { "_confirm" })
+  seteq("[12] *** float.confirm survives ONLY as _confirm's degradation ***",
+    found.legacy, { "_confirm" })
+  ok("[12] *** no raw vim.fn.confirm remains ***", #found.vimfn == 0, vim.inspect(found.vimfn))
+
+  -- Exactly one surface is irreversible, and it is the delete.
+  seteq("[12] *** exactly one site declares itself irreversible ***",
+    found.irreversible, { "M.remove_review" })
 end)()
 
 logger.notify = orig_notify

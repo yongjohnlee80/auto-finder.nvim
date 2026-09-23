@@ -1653,6 +1653,10 @@ local function _open_range_diff(spec, opts)
     -- without one still resolves a revision instead of silently dropping to
     -- the hunk render.
     sha = default_sha,
+    -- ADR-0195 D1: what `git.graph.show_stat` needs to render a COMMIT when the
+    -- cursor sits on a commit-group header row. Without it auto-core leaves that
+    -- branch inert and a header shows its first file's diff, as before.
+    common_dir = spec.repo and spec.repo.common_dir,
     context = opts.context or "hunk",
     initial = opts.initial,
     on_close = function(pos)
@@ -2089,19 +2093,66 @@ function M._fetch_pr(repo, raw)
 end
 
 ---_confirm asks yes/no through the shared float, falling back to `ui.select`.
-local function _confirm(prompt, on_yes)
+---_confirm asks a yes/no question through auto-core's shared modal (ADR-0195 D3):
+---a titled card whose BODY carries the detail that a single-line `vim.ui.select`
+---prompt truncates — which is the entire point for a long review filename.
+---
+---`opts.irreversible` selects the ADR-0101 D12 treatment: the modal itself drops
+---any affirmative default and puts the declining answer FIRST with the cursor on
+---it, so a bare `<CR>` cannot fire the destructive action.
+---
+---It degrades to the older single-line confirm when the running auto-core
+---predates `ui.modal`, so an auto-finder ahead of its auto-core still asks rather
+---than erroring — the guarded-surface pattern of ADR-0083 r9.3.
+---@param opts string|{ title: string, body: (string|string[])?, yes: string?, no: string?, irreversible: boolean?, cancel_message: string? }
+---@param on_yes fun()
+local function _confirm(opts, on_yes)
+  if type(opts) == "string" then opts = { title = opts } end
+  local cancel_message = opts.cancel_message or "repos: cancelled"
+  local function decline()
+    logger.notify(cancel_message, { level = vim.log.levels.INFO })
+  end
+
+  local okm, modal = pcall(require, "auto-core.ui.modal")
+  if okm and modal and type(modal.open) == "function" then
+    local yes = { label = opts.yes or "Yes", value = true,  role = "confirm" }
+    local no  = { label = opts.no  or "No",  value = false, role = "cancel" }
+    modal.open({
+      title = opts.title,
+      body  = opts.body,
+      -- The modal re-orders decline-first for an irreversible question itself;
+      -- passing it that way too keeps this source honest about what is shown.
+      items = opts.irreversible and { no, yes } or { yes, no },
+      reversibility = opts.irreversible and "irreversible" or "reversible",
+      default = (not opts.irreversible) and true or nil,
+      on_choice = function(v) if v then on_yes() else decline() end end,
+      on_cancel = decline,
+    })
+    return
+  end
+
+  -- Older auto-core: one line. The body is APPENDED rather than dropped — the
+  -- picker will probably truncate it, but losing it entirely is worse.
+  local prompt = opts.title or ""
+  if opts.body then
+    local b = type(opts.body) == "table" and table.concat(opts.body, "  ") or tostring(opts.body)
+    prompt = prompt .. "  " .. b
+  end
+  -- The fallback carries the SAME safety contract as the modal. A picker has no
+  -- notion of a default, so ORDER is the whole mechanism: its first row is what a
+  -- bare <CR> takes. For an irreversible question the declining answer therefore
+  -- comes FIRST — a hardcoded yes-first list is exactly the defect ADR-0195 §2.3
+  -- / SF2 names, and it would delete both review files on an older auto-core.
+  local items = opts.irreversible and { "no", "yes" } or { "yes", "no" }
   local function decide(choice)
-    if choice ~= "yes" then
-      logger.notify("repos: cancelled", { level = vim.log.levels.INFO })
-      return
-    end
+    if choice ~= "yes" then decline(); return end
     on_yes()
   end
   local okc, float = pcall(require, "auto-core.ui.float")
   if okc and float and type(float.confirm) == "function" then
-    float.confirm(prompt, { on_choice = decide })
+    float.confirm(prompt, { items = items, on_choice = decide })
   else
-    vim.ui.select({ "yes", "no" }, { prompt = prompt }, decide)
+    vim.ui.select(items, { prompt = prompt }, decide)
   end
 end
 
@@ -2276,7 +2327,7 @@ function M.associate_worktree(row)
             "%s is already PR #%s. Re-point it to #%s?  (the old association is released; no PR is closed)",
             branch, tostring(src and src.number), input)
         end
-        _confirm(prompt, function()
+        _confirm({ title = "Re-point PR association?", body = prompt }, function()
           -- Snapshot BOTH ends, including the ones that were EMPTY: "I saw
           -- nothing there" is a claim the retry must also be held to, so a
           -- conflict appearing under the prompt refuses.
@@ -2327,9 +2378,10 @@ function M.dissociate_worktree(row)
   local repo, branch = row.repo, row.worktree.branch
   local pr = row.pr or (row.worktree and row.worktree.pr)
   local n = pr and pr.number
-  _confirm(string.format(
-    "Release %s from PR #%s?  Nothing is deleted and the PR is not closed.",
-    branch, tostring(n or "?")), function()
+  _confirm({
+    title = string.format("Release %s from PR #%s?", branch, tostring(n or "?")),
+    body  = "Nothing is deleted and the PR is not closed.",
+  }, function()
     -- `expect_pr` is the number the prompt DISPLAYED: the confirmation cannot
     -- release a replacement association installed while it was open (lector
     -- r0 P1-3).
@@ -2942,12 +2994,7 @@ function M.remove_review(row)
     or (row.review and row.review.pr)
   if pr_num then
     local label = tostring(meta.name or meta.path)
-    local prompt = string.format("Dissociate review %s from PR #%s? (Files on disk will NOT be deleted)", label, tostring(pr_num))
-    local function go_dissociate(choice)
-      if choice ~= "yes" then
-        logger.notify("repos: dissociation cancelled", { level = vim.log.levels.INFO })
-        return
-      end
+    local function go_dissociate()
       -- ONE writer for both directions (r11). This used to read the JSON,
       -- mutate it in memory and write it back through `store.write_json` — or,
       -- failing that, through `fs.atomic` or a bare `writefile` — none of which
@@ -2989,26 +3036,22 @@ function M.remove_review(row)
       _rerender()
       logger.notify(string.format("repos: dissociated review %s from PR #%s", label, tostring(pr_num)), { level = vim.log.levels.INFO })
     end
-    local okc, float = pcall(require, "auto-core.ui.float")
-    if okc and float and type(float.confirm) == "function" then
-      float.confirm(prompt, { on_choice = go_dissociate })
-    else
-      vim.ui.select({ "yes", "no" }, { prompt = prompt }, go_dissociate)
-    end
+    -- Reversible: this only clears the association, so it keeps a default. The
+    -- raw filename goes in the body where it is readable.
+    _confirm({
+      title          = string.format("Dissociate review from PR #%s?", tostring(pr_num)),
+      body           = { label, "Files on disk will NOT be deleted." },
+      yes            = "Dissociate",
+      cancel_message = "repos: dissociation cancelled",
+    }, go_dissociate)
     return
   end
 
   -- The RAW filename, not the elided row label: a prompt that is about to
   -- delete something names it exactly as the filesystem does.
   local label = tostring(meta.name or meta.path)
-  local prompt = ("Delete review %s from %s?  Both the JSON and its Markdown are removed."):format(
-    label, tostring(row.repo and row.repo.label or "this repository"))
 
-  local function go(choice)
-    if choice ~= "yes" then
-      logger.notify("repos: removal cancelled", { level = vim.log.levels.INFO })
-      return
-    end
+  local function go()
     local ok, err, detail = backend.remove_review(row.repo, meta.path)
     if not ok then
       logger.notify("repos: could not remove " .. label .. " — " .. tostring(err),
@@ -3039,13 +3082,22 @@ function M.remove_review(row)
     logger.notify(msg, { level = vim.log.levels.INFO })
   end
 
-  local okc, float = pcall(require, "auto-core.ui.float")
-  if okc and float and type(float.confirm) == "function" then
-    float.confirm(prompt, { on_choice = go })
-  else
-    -- No confirm primitive is NOT a licence to delete unconfirmed.
-    vim.ui.select({ "yes", "no" }, { prompt = prompt }, go)
-  end
+  -- IRREVERSIBLE: both halves of the pair go and the revision is fenced, so the
+  -- modal drops any affirmative default and puts the decline FIRST — a bare <CR>
+  -- here must not delete (ADR-0195 D3, ADR-0101 D12). The raw filename goes in
+  -- the BODY, where it is readable, rather than into a truncated prompt line.
+  _confirm({
+    title = "Delete review permanently?",
+    body  = {
+      label,
+      ("from %s"):format(tostring(row.repo and row.repo.label or "this repository")),
+      "Both the JSON and its Markdown are removed. This cannot be undone.",
+    },
+    yes            = "Delete permanently",
+    no             = "No, keep it",
+    irreversible   = true,
+    cancel_message = "repos: removal cancelled",
+  }, go)
 end
 
 ---attach_review_to_task is `A` on a review row: attach the review's canonical
@@ -3146,25 +3198,19 @@ function M.git_push(row)
   end
   local fn = _verb("push"); if not fn then return end
   local label = row.repo.label or "this repo"
-  local prompt = "Push " .. label .. " to its remote?"
-  local function go(choice)
-    if choice ~= "yes" then
-      logger.notify("repos: push cancelled", { level = vim.log.levels.INFO })
-      return
-    end
+  local function go()
     logger.notify("repos: pushing " .. label .. "...", { level = vim.log.levels.INFO })
     local ok = pcall(fn, row.repo, nil, function(done, err)
       _notify_result("push " .. label, done, err)
     end)
     if not ok then _notify_result("push " .. label, false, "call failed") end
   end
-  local okc, float = pcall(require, "auto-core.ui.float")
-  if okc and float and type(float.confirm) == "function" then
-    float.confirm(prompt, { on_choice = go })
-  else
-    -- No confirm primitive is NOT a licence to push unconfirmed.
-    vim.ui.select({ "yes", "no" }, { prompt = prompt }, go)
-  end
+  -- A push is reversible enough to keep a default, but it still asks.
+  _confirm({
+    title          = "Push " .. label .. " to its remote?",
+    yes            = "Push",
+    cancel_message = "repos: push cancelled",
+  }, go)
 end
 
 -- ─── keymaps + subscriptions ──────────────────────────────────

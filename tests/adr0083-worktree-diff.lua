@@ -157,6 +157,12 @@ do
   ok("[1] it reports success and returns the float",
     okr == true and float ~= nil, tostring(okr))
   ok("[1] the renderer was actually invoked", captured ~= nil)
+  -- ADR-0195 D1: auto-core needs the repo's git-dir to render a COMMIT when the
+  -- cursor sits on a commit-group header row. Without it that whole branch stays
+  -- inert and a header shows its first file's diff, exactly as before.
+  ok("[1] ADR-0195: the renderer receives the repo's common_dir",
+    captured ~= nil and captured.common_dir ~= nil and captured.common_dir == repo.common_dir,
+    captured and tostring(captured.common_dir) or "nil")
 
   -- Johno: "the title should indicate that as well such as {worktree name} ->
   -- {target branch}". Both halves asserted, and the ARROW between them, so a
