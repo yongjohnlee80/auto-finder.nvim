@@ -190,6 +190,25 @@ M._expanded = {}
 -- Per-repo "is the reviews section showing archived rows" (ADR-0195 D4). Keyed
 -- on common_dir, the same identity every other per-repo cache uses.
 M._archived = {}
+
+---_archive_capable asks whether the running worktree.nvim UNDERSTANDS archiving,
+---by the presence of its interface rather than a version number.
+---
+---This has to gate the LISTING as well as the verbs, and the first cut gated
+---only the verbs. An older worktree.nvim still accepts
+---`reviews_all(repo, opts)` — Lua discards an argument a function does not
+---declare — so `include_archived = "archived_only"` came back with EVERY review
+---and the section counted all of them as archived. Passing an option to a
+---function that ignores it is indistinguishable from success, which is exactly
+---why an optional argument is not a capability check.
+---@param backend table?
+---@return boolean
+local function _archive_capable(backend)
+  return backend ~= nil
+    and type(backend.archive_review) == "function"
+    and type(backend.unarchive_review) == "function"
+end
+
 M._cache = {}
 M._bufnr = nil
 M._rows = nil
@@ -798,8 +817,18 @@ local function _render(bufnr)
         if type(backend.reviews_index) == "function" then
           local vid = "reviews:" .. repo.common_dir
           local vc = _cache(vid)
+          -- LEGACY CONTRACT PRESERVED: on an incapable backend the calls are made
+          -- exactly as they were before this feature existed — no opts argument
+          -- at all — so the rows and the count are byte-for-byte the old
+          -- behaviour rather than the old behaviour plus a silently-ignored
+          -- option.
+          local acap = _archive_capable(backend)
           local amode = M.archived_mode(repo)
-          if not vc.index then vc.index = backend.reviews_index(repo, { include_archived = amode }) or {} end
+          if not vc.index then
+            vc.index = (acap
+              and backend.reviews_index(repo, { include_archived = amode })
+              or backend.reviews_index(repo)) or {}
+          end
           -- The count includes UNSAVED drafts: a section that says "(2)" while
           -- holding two reviews and a draft is lying about what is inside it,
           -- and the draft is the row a reader is most likely looking for.
@@ -811,7 +840,7 @@ local function _render(bufnr)
           -- already know about to discover anything. Counting them costs one
           -- directory scan and no document reads.
           local narchived = 0
-          if amode == "active" and type(backend.reviews_index) == "function" then
+          if acap and amode == "active" then
             narchived = #(backend.reviews_index(repo, { include_archived = "archived_only" }) or {})
           end
           local suffix = ""
@@ -832,7 +861,9 @@ local function _render(bufnr)
           })
           if vopen then
             if not vc.items then
-              vc.items = backend.reviews_all(repo, { include_archived = amode }) or {}
+              vc.items = (acap
+                and backend.reviews_all(repo, { include_archived = amode })
+                or backend.reviews_all(repo)) or {}
             end
             if #vc.items == 0 then
               msg(2, "(no reviews recorded for this repository)")
@@ -3021,11 +3052,16 @@ end
 -- exactly the muscle-memory protection the split exists to create (Lector, OQ-2).
 
 ---archived_mode reports which listing this repo's reviews section is showing.
+---
+---On an incapable backend it is ALWAYS "active" — not as a default the user can
+---toggle away from, but as the only answer there is. A mode the store cannot
+---honour would be a claim the panel makes on its own.
 ---@param repo table
 ---@return "active"|"all"
 function M.archived_mode(repo)
   local key = repo and repo.common_dir
   if not key then return "active" end
+  if not _archive_capable(_repos()) then return "active" end
   return M._archived[key] or "active"
 end
 
@@ -3040,9 +3076,12 @@ function M.toggle_archived(row)
     return
   end
   local backend = _repos()
-  if not (backend and type(backend.reviews_all) == "function") then
-    logger.notify("repos: showing archived reviews needs a newer worktree.nvim",
-      { level = vim.log.levels.WARN })
+  -- Gated on the ARCHIVE interface, not on `reviews_all`: the older backend HAS
+  -- reviews_all and simply ignores the mode, so checking for it would let `za`
+  -- announce "showing archived reviews" over a listing that never changed.
+  if not _archive_capable(backend) then
+    logger.notify("repos: showing archived reviews needs a newer worktree.nvim "
+      .. "(archive_review)", { level = vim.log.levels.WARN })
     return
   end
   M._archived[repo.common_dir] = (M.archived_mode(repo) == "active") and "all" or "active"

@@ -821,6 +821,9 @@ end)()
   local repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" }
   package.loaded["worktree.repos"] = {
     available = function() return true end,
+    -- A CAPABLE backend: the archive interface is what the panel gates on.
+    archive_review = function() return true end,
+    unarchive_review = function() return true end,
     reviews_all = function() return {} end,
     reviews_index = function() return {} end,
   }
@@ -866,6 +869,46 @@ end)()
   ok("[13b] `D` is bound to the delete, not to d's handler",
     src:find('set("D", function() M.delete_review', 1, true) ~= nil
       and src:find('set("d", function() M.remove_review', 1, true) ~= nil)
+
+  package.loaded["worktree.repos"] = nil
+end)()
+
+-- ── [13c] an OLDER worktree.nvim must not be told it can archive ────────
+--
+-- Lua discards an argument a function does not declare, so a pre-v0.5.20
+-- `reviews_all(repo)` accepts `{ include_archived = "archived_only" }` and
+-- returns EVERY review. The panel then counted all of them as archived and `za`
+-- announced "showing archived reviews" over a listing that had not changed.
+--
+-- This is the failure mode an optional argument always has: passing an option
+-- to a function that ignores it is indistinguishable from success. So the gate
+-- is the presence of the archive INTERFACE, not the acceptance of an option.
+;(function()
+  local calls = {}
+  -- Legacy shape: reviews_all / reviews_index exist, the archive verbs do not,
+  -- and the listing ignores any opts it is handed.
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    reviews_all = function(_, opts)
+      calls[#calls + 1] = { fn = "reviews_all", opts = opts }
+      return { { revision = 1, name = "a.review.json", path = "/s/a.review.json" } }
+    end,
+    reviews_index = function(_, opts)
+      calls[#calls + 1] = { fn = "reviews_index", opts = opts }
+      return { { revision = 1, name = "a.review.json", path = "/s/a.review.json" } }
+    end,
+  }
+  local repo = { label = "old", slug = "own__old", common_dir = "/old/.git" }
+
+  ok("[13c] *** the mode is pinned to active on an incapable backend ***",
+    tree.archived_mode(repo) == "active", tree.archived_mode(repo))
+
+  reset()
+  tree.toggle_archived({ kind = "reviews", repo = repo })
+  ok("[13c] *** za REFUSES rather than claiming to show archives ***",
+    tree.archived_mode(repo) == "active", tree.archived_mode(repo))
+  ok("[13c] and it names what is missing",
+    last():find("archive_review", 1, true) ~= nil, last())
 
   package.loaded["worktree.repos"] = nil
 end)()
