@@ -2138,15 +2138,21 @@ local function _confirm(opts, on_yes)
     local b = type(opts.body) == "table" and table.concat(opts.body, "  ") or tostring(opts.body)
     prompt = prompt .. "  " .. b
   end
+  -- The fallback carries the SAME safety contract as the modal. A picker has no
+  -- notion of a default, so ORDER is the whole mechanism: its first row is what a
+  -- bare <CR> takes. For an irreversible question the declining answer therefore
+  -- comes FIRST — a hardcoded yes-first list is exactly the defect ADR-0195 §2.3
+  -- / SF2 names, and it would delete both review files on an older auto-core.
+  local items = opts.irreversible and { "no", "yes" } or { "yes", "no" }
   local function decide(choice)
     if choice ~= "yes" then decline(); return end
     on_yes()
   end
   local okc, float = pcall(require, "auto-core.ui.float")
   if okc and float and type(float.confirm) == "function" then
-    float.confirm(prompt, { on_choice = decide })
+    float.confirm(prompt, { items = items, on_choice = decide })
   else
-    vim.ui.select({ "yes", "no" }, { prompt = prompt }, decide)
+    vim.ui.select(items, { prompt = prompt }, decide)
   end
 end
 
