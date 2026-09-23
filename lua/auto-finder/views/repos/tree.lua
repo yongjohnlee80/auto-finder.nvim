@@ -187,6 +187,9 @@ end
 -- ─── cache ────────────────────────────────────────────────────
 
 M._expanded = {}
+-- Per-repo "is the reviews section showing archived rows" (ADR-0195 D4). Keyed
+-- on common_dir, the same identity every other per-repo cache uses.
+M._archived = {}
 M._cache = {}
 M._bufnr = nil
 M._rows = nil
@@ -389,6 +392,16 @@ local function _review_label(meta, posted)
   local tail = ""
   if meta.pr then tail = tail .. "  → #" .. tostring(meta.pr) end
   if posted then tail = tail .. "  [posted]" end
+  -- ARCHIVED rides at the very end (ADR-0195 D4). It is only ever drawn when the
+  -- section is showing archived rows at all, so the tag answers "why is this one
+  -- here" rather than decorating a row the user cannot act on.
+  --
+  -- A marker that could not be validated still HIDES the review (fail-closed), so
+  -- the row would otherwise look identically archived while meaning something
+  -- different: "deliberately hidden" vs "hidden because we cannot tell". The
+  -- second is a thing to go fix, so it says so.
+  if meta.archive_error then tail = tail .. "  [archived · marker unreadable]"
+  elseif meta.archived then tail = tail .. "  [archived]" end
   -- An UNDESCRIBED record — an older worktree.nvim's cheap `{revision, path,
   -- name}` — has no severity to report. It gets the bare filename rather than a
   -- badge that would read as "no comments" when the truth is "not looked at".
@@ -785,24 +798,42 @@ local function _render(bufnr)
         if type(backend.reviews_index) == "function" then
           local vid = "reviews:" .. repo.common_dir
           local vc = _cache(vid)
-          if not vc.index then vc.index = backend.reviews_index(repo) or {} end
+          local amode = M.archived_mode(repo)
+          if not vc.index then vc.index = backend.reviews_index(repo, { include_archived = amode }) or {} end
           -- The count includes UNSAVED drafts: a section that says "(2)" while
           -- holding two reviews and a draft is lying about what is inside it,
           -- and the draft is the row a reader is most likely looking for.
           local ndrafts = #_repo_drafts(repo)
           local ntotal = #vc.index + ndrafts
+          -- ARCHIVED reviews are hidden, so the count that hides them must also
+          -- SAY they exist — otherwise the only evidence of an archive is a row
+          -- that silently is not there, and `za` is a key you would have to
+          -- already know about to discover anything. Counting them costs one
+          -- directory scan and no document reads.
+          local narchived = 0
+          if amode == "active" and type(backend.reviews_index) == "function" then
+            narchived = #(backend.reviews_index(repo, { include_archived = "archived_only" }) or {})
+          end
+          local suffix = ""
+          if ntotal > 0 or narchived > 0 then
+            local bits = { tostring(ntotal) }
+            if ndrafts > 0 then
+              bits[#bits + 1] = ndrafts .. " draft" .. (ndrafts == 1 and "" or "s")
+            end
+            if narchived > 0 then bits[#bits + 1] = narchived .. " archived" end
+            suffix = "  (" .. table.concat(bits, ", ") .. ")"
+          end
+          if amode ~= "active" then suffix = suffix .. "  [showing archived]" end
           local vopen = container(1, {
             kind = "reviews", id = vid, repo = repo,
             hl = "AutoCoreSectionInactive",
             label = "reviews",
-            suffix = ntotal > 0
-              and ("  (" .. ntotal .. (ndrafts > 0
-                and (", " .. ndrafts .. " draft" .. (ndrafts == 1 and "" or "s"))
-                or "") .. ")")
-              or "",
+            suffix = suffix,
           })
           if vopen then
-            if not vc.items then vc.items = backend.reviews_all(repo) or {} end
+            if not vc.items then
+              vc.items = backend.reviews_all(repo, { include_archived = amode }) or {}
+            end
             if #vc.items == 0 then
               msg(2, "(no reviews recorded for this repository)")
             end
@@ -2761,9 +2792,19 @@ M.HELP = {
   "  N     CreatePR: open a PR for this worktree's branch (on a worktree)",
   "  #     associate this worktree with an EXISTING PR (on a worktree)",
   "  S     submit this review entry's findings to its PR (on a review)",
-  "  d     on a worktree, release it from its PR; on a review, remove the",
-  "        review / dissociate it from its PR — both confirm first",
+  "  d     on a worktree, release it from its PR; on a review, ARCHIVE it",
+  "        (or dissociate it, if it belongs to a PR) — both confirm first",
+  "  D     DELETE a review permanently — both files, cannot be undone",
+  "  za    show / hide archived reviews in the reviews section",
   "  A     attach review feedback to an in-progress task",
+  "",
+  "  ARCHIVE vs DELETE — d hides a review, D destroys it. Archiving leaves",
+  "  both halves of the pair on disk and in your KB, keeps every task",
+  "  `review:` reference resolving, and is undone with d again once za is",
+  "  showing archived rows. The section's count says how many are hidden,",
+  "  so an archive is never invisible. D removes the JSON and its Markdown",
+  "  and fences the revision: the confirm for it offers no default and puts",
+  "  the declining answer first, so a bare <Enter> cannot delete.",
   "",
   "  THE TOKEN — no PR key works until one is registered. There is no",
   "  ambient default, and nothing prompts you for it. From any buffer:",
@@ -2966,6 +3007,74 @@ end
 ---`d`, not `x`: in the diff view `x` DROPS A PENDING annotation that was never
 ---written, and using one key for "discard an unsaved draft" and "delete a file
 ---from disk" would blur the only distinction that matters here.
+-- ── ADR-0195 D4: `d` archives, `D` deletes ─────────────────────────────
+--
+-- `d` is REPURPOSED from delete to archive rather than archive getting a new
+-- key, and that is the point rather than a convenience: `d` is the key most
+-- likely to be pressed from muscle memory on a review the user only wanted to
+-- tidy away, and until now that keystroke destroyed both halves of the pair and
+-- fenced the revision. The safe gesture takes the familiar key; the destructive
+-- one takes a deliberate, differently-shaped act.
+--
+-- Permanent delete is NOT offered as a second item inside the archive modal.
+-- Making the safe gesture a doorway to the destructive one would give back
+-- exactly the muscle-memory protection the split exists to create (Lector, OQ-2).
+
+---archived_mode reports which listing this repo's reviews section is showing.
+---@param repo table
+---@return "active"|"all"
+function M.archived_mode(repo)
+  local key = repo and repo.common_dir
+  if not key then return "active" end
+  return M._archived[key] or "active"
+end
+
+---toggle_archived flips the reviews section between hiding and showing archived
+---reviews. This is what keeps archiving REVERSIBLE in practice: a hidden review
+---the user cannot get back to has been deleted as far as they are concerned.
+function M.toggle_archived(row)
+  local repo = row and row.repo
+  if not repo or not repo.common_dir then
+    logger.notify("repos: put the cursor on a repository or its reviews section",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local backend = _repos()
+  if not (backend and type(backend.reviews_all) == "function") then
+    logger.notify("repos: showing archived reviews needs a newer worktree.nvim",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  M._archived[repo.common_dir] = (M.archived_mode(repo) == "active") and "all" or "active"
+  -- The section cache holds BOTH the count and the rows, and they came from two
+  -- different calls: dropping only one would leave a count describing a listing
+  -- that is no longer on screen.
+  M.invalidate(nil)
+  _rerender()
+  logger.notify(M.archived_mode(repo) == "all"
+    and "repos: showing archived reviews"
+    or "repos: hiding archived reviews", { level = vim.log.levels.INFO })
+end
+
+---delete_review is `D` — the permanent, irreversible hard delete that `d` used
+---to be. Unchanged in behaviour; it simply no longer answers to the key someone
+---reaches for when they mean "tidy this away".
+function M.delete_review(row)
+  if not (row and (row.kind == "review" or row.kind == "review_file")
+      and row.review and row.review.path) then
+    logger.notify("repos: put the cursor on a review to delete it",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  local backend = _repos()
+  if not (backend and type(backend.remove_review) == "function") then
+    logger.notify("repos: removing a review needs a newer worktree.nvim (remove_review)",
+      { level = vim.log.levels.WARN })
+    return
+  end
+  M._delete_review(row, backend)
+end
+
 function M.remove_review(row)
   -- `d` on a WORKTREE releases it from its PR — the symmetric half of `#`.
   -- Checked before the review guard so the key means one thing per row kind
@@ -3047,6 +3156,76 @@ function M.remove_review(row)
     return
   end
 
+  -- `d` on a plain review ARCHIVES it (ADR-0195 D4). This is the gesture the
+  -- task actually asked for — "I don't want to delete them and keep them as
+  -- record in my KB" — and until now the only thing this key could do was
+  -- destroy the pair. `D` is the permanent delete.
+  local label = tostring(meta.name or meta.path)
+  if not (type(backend.archive_review) == "function"
+      and type(backend.unarchive_review) == "function") then
+    logger.notify("repos: archiving a review needs a newer worktree.nvim "
+      .. "(archive_review) — `D` still deletes permanently",
+      { level = vim.log.levels.WARN })
+    return
+  end
+
+  -- An archived row is only reachable while the section is showing archived
+  -- reviews, and there `d` is the natural inverse: the same key that hid it
+  -- brings it back. An archive nobody can undo is a delete with extra steps.
+  if meta.archived then
+    local function go_unarchive()
+      local ok, err = backend.unarchive_review(row.repo, meta.path)
+      if not ok then
+        logger.notify("repos: could not restore " .. label .. " — " .. tostring(err),
+          { level = vim.log.levels.ERROR })
+        return
+      end
+      M.invalidate(nil)
+      _rerender()
+      logger.notify("repos: restored " .. label, { level = vim.log.levels.INFO })
+    end
+    _confirm({
+      title          = "Restore this review to the active list?",
+      body           = { label },
+      yes            = "Restore",
+      cancel_message = "repos: restore cancelled",
+    }, go_unarchive)
+    return
+  end
+
+  local function go_archive()
+    local ok, err = backend.archive_review(row.repo, meta.path)
+    if not ok then
+      logger.notify("repos: could not archive " .. label .. " — " .. tostring(err),
+        { level = vim.log.levels.ERROR })
+      return
+    end
+    M.invalidate(nil)
+    _rerender()
+    logger.notify("repos: archived " .. label .. " (za shows archived, D deletes)",
+      { level = vim.log.levels.INFO })
+  end
+
+  -- REVERSIBLE, so it keeps its affirmative default. The body says plainly that
+  -- nothing is destroyed, because the whole point of the key change is that a
+  -- user pressing `d` from habit is no longer one <CR> from a hard delete.
+  _confirm({
+    title          = "Archive this review?",
+    body           = {
+      label,
+      "Both files stay on disk and in your KB — it is hidden from the list, not deleted.",
+      "Press za in the reviews section to see archived reviews again.",
+    },
+    yes            = "Archive",
+    cancel_message = "repos: archive cancelled",
+  }, go_archive)
+end
+
+---_delete_review is the permanent hard delete, reached from `D` alone.
+---@param row table
+---@param backend table
+function M._delete_review(row, backend)
+  local meta = row.review
   -- The RAW filename, not the elided row label: a prompt that is about to
   -- delete something names it exactly as the filesystem does.
   local label = tostring(meta.name or meta.path)
@@ -3257,8 +3436,17 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.repos: push this repository (confirms first)")
   set("S", function() M.submit_review(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: submit this review entry to its PR")
+  -- `d` ARCHIVES a plain review (ADR-0195 D4) and keeps its existing meaning
+  -- everywhere else: dissociate, for a worktree or a PR-associated review, was
+  -- already non-destructive. `D` is the permanent delete `d` used to be —
+  -- deliberately a different key, because `d` is the one pressed from muscle
+  -- memory on a review the user only wanted to tidy away.
   set("d", function() M.remove_review(_row_under_cursor(panel_winid)) end,
-    "auto-finder.repos: remove review / dissociate from its PR (confirms first)")
+    "auto-finder.repos: archive review / dissociate from its PR (confirms first)")
+  set("D", function() M.delete_review(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: DELETE review permanently — both files (confirms first)")
+  set("za", function() M.toggle_archived(_row_under_cursor(panel_winid)) end,
+    "auto-finder.repos: show / hide archived reviews")
   set("A", function() M.attach_review_to_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.repos: attach review to in-progress task")
   set("p", function() M.associate_review(_row_under_cursor(panel_winid)) end,

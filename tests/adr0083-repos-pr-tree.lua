@@ -173,7 +173,19 @@ ok("assoc: HELP says how to associate and how to release",
     and help_text:find("d on the worktree releases it", 1, true) ~= nil)
 ok("assoc: HELP distinguishes d on a worktree from d on a review",
   help_text:find("d     on a worktree, release it from its PR", 1, true) ~= nil
-    and help_text:find("on a review, remove the", 1, true) ~= nil)
+    and help_text:find("on a review, ARCHIVE it", 1, true) ~= nil)
+-- ADR-0195 D4 repurposed `d` and gave the destructive act its own key. A help
+-- overlay that still described `d` as removing would be teaching the muscle
+-- memory the split exists to retrain, so the two keys must be told apart HERE,
+-- where a user actually looks, not only in the code.
+ok("assoc: HELP documents D as the permanent delete, separately from d",
+  help_text:find("D     DELETE a review permanently", 1, true) ~= nil
+    and help_text:find("cannot be undone", 1, true) ~= nil)
+ok("assoc: HELP documents the za toggle that makes archiving reversible",
+  help_text:find("za    show / hide archived reviews", 1, true) ~= nil)
+ok("assoc: HELP explains archive vs delete, not just the keys",
+  help_text:find("ARCHIVE vs DELETE", 1, true) ~= nil
+    and help_text:find("bare <Enter> cannot delete", 1, true) ~= nil)
 
 -- The overlay is capped at the window height and says nothing about it, so a
 -- reader who cannot see the bottom has no reason to think there IS a bottom.
