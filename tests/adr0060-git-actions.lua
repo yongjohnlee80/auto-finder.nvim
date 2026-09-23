@@ -647,6 +647,80 @@ end)()
   package.loaded["worktree.repos"] = nil
 end)()
 
+-- ── [11b] the LEGACY-FLOAT branch carries the same ordering ─────────────
+--
+-- [11] nils float.confirm, so it only ever reaches the raw vim.ui.select last
+-- resort. That left the middle rung untested: an auto-core new enough to have
+-- `float.confirm` but too old for `ui.modal`. Its safety depends entirely on the
+-- call passing `items = items` — and lector proved the gap by deleting exactly
+-- that argument, which reintroduces yes-first bare Enter while the suite stayed
+-- 99/0. A branch that no cell enters is not covered by the cells around it.
+;(function()
+  local removed = {}
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    remove_review = function(repo, path)
+      removed[#removed + 1] = { repo = repo, path = path }
+      return true, nil, { path = path, document_removed = true }
+    end,
+  }
+
+  local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  -- Modal ABSENT, float.confirm PRESENT: the exact older-auto-core rung.
+  package.loaded["auto-core.ui.modal"] = { open = nil }
+
+  local seen = nil
+  local function float_stub(enter)
+    package.loaded["auto-core.ui.float"] = {
+      confirm = function(prompt, opts)
+        seen = { prompt = prompt, items = opts and opts.items }
+        -- Model a bare <CR>: float.confirm's picker takes its FIRST item.
+        if opts and opts.on_choice then opts.on_choice(enter and enter(opts) or nil) end
+      end,
+    }
+  end
+
+  local row = {
+    kind = "review",
+    repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+    review = { name = "own__myrepo@1cfe731.r1.review.json",
+               path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+               short = "1cfe731", revision = 1, severities = {} },
+  }
+
+  float_stub(function(opts) return opts.items and opts.items[1] end)
+  tree.remove_review(row)
+  -- Assert the LIST REACHED THE CALL before indexing it: dropping `items = items`
+  -- leaves it nil, and that must read as a failure, not a crash.
+  ok("[11b] *** the legacy float.confirm RECEIVES the item list ***",
+    seen ~= nil and type(seen.items) == "table", seen and vim.inspect(seen))
+  ok("[11b] *** and it is DECLINE-first ***",
+    seen and type(seen.items) == "table" and seen.items[1] == "no",
+    seen and vim.inspect(seen.items))
+  ok("[11b] *** so a bare <CR> on that auto-core removes NOTHING ***",
+    #removed == 0, #removed)
+
+  -- (control) the affirmative is still reachable through the same branch.
+  float_stub(function() return "yes" end)
+  tree.remove_review(row)
+  ok("[11b] (control) choosing yes still removes exactly that review",
+    #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
+
+  -- (control) a REVERSIBLE question keeps its affirmative first here too.
+  package.loaded["worktree.repos"] = { available = function() return true end,
+                                       push = function() end }
+  float_stub(function(opts) return opts.items and opts.items[1] end)
+  tree.git_push({ kind = "repo", repo = { label = "myrepo", common_dir = "/x/.git" } })
+  ok("[11b] (control) a REVERSIBLE question is still affirmative-first",
+    seen and type(seen.items) == "table" and seen.items[1] == "yes",
+    seen and vim.inspect(seen.items))
+
+  package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
+  package.loaded["worktree.repos"] = nil
+end)()
+
 -- [12] ADR-0195 D5 — the migration manifest, asserted by SET-EQUALITY.
 --
 -- A count alone is not an audit. r0's manifest was WRONG while its count looked
