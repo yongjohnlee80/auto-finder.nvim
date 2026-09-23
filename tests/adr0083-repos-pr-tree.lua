@@ -345,18 +345,22 @@ tree.invalidate(nil); tree.on_focus(nil, tbuf)
 -- ── 7. Dissociation still works on a review carrying meta.pr ──
 local _, rrow = line_of_row(function(r) return r.kind == "review" and r.review and r.review.pr == 42 end)
 local confirm_called = false
-package.loaded["auto-core.ui.float"] = {
-  confirm = function(prompt, opts)
+-- ADR-0195 D3: the confirm surface is now `ui.modal`, whose detail lives in the
+-- BODY rather than in a single truncated prompt line. Assert title+body together.
+package.loaded["auto-core.ui.modal"] = {
+  open = function(o)
     confirm_called = true
+    local body = type(o.body) == "table" and table.concat(o.body, "  ") or tostring(o.body or "")
+    local shown = tostring(o.title or "") .. "  " .. body
     ok("r9: dissociation prompt names PR #42 and keeps disk files",
-      prompt:find("Dissociate review", 1, true) ~= nil and prompt:find("from PR #42", 1, true) ~= nil
-        and prompt:find("Files on disk will NOT be deleted", 1, true) ~= nil, prompt)
-    opts.on_choice("yes")
+      shown:find("Dissociate review", 1, true) ~= nil and shown:find("from PR #42", 1, true) ~= nil
+        and shown:find("Files on disk will NOT be deleted", 1, true) ~= nil, shown)
+    o.on_choice(true)
   end,
 }
 notes = {}
 tree.remove_review(rrow)
-ok("r9: float.confirm called for dissociation (via review.pr)", confirm_called)
+ok("r9: ui.modal opened for dissociation (via review.pr)", confirm_called)
 ok("r9: dissociation notification logged",
   last_note() and last_note().msg:find("dissociated review", 1, true) ~= nil, vim.inspect(notes))
 local after = vim.json.decode(table.concat(vim.fn.readfile(mock_review.path), "\n"))
@@ -682,15 +686,18 @@ do
   local seen, confirm_prompt = nil, nil
   local orig_assoc, orig_dissoc = pr_mod.associate, pr_mod.dissociate
   local answer = "yes"
-  -- Section 7 leaves a float stub installed whose `confirm` runs an `ok(...)`
-  -- of its own on EVERY call, so any later confirm re-fires that assertion
-  -- against an unrelated prompt. Install our own for this block and put the
-  -- previous one back, rather than editing a cell we are not testing.
-  local prev_float = package.loaded["auto-core.ui.float"]
-  package.loaded["auto-core.ui.float"] = {
-    confirm = function(prompt, opts)
-      confirm_prompt = prompt
-      if opts and opts.on_choice then opts.on_choice(answer) end
+  -- Section 7 leaves a modal stub installed whose `open` runs an `ok(...)` of
+  -- its own on EVERY call, so any later confirm re-fires that assertion against
+  -- an unrelated prompt. Install our own for this block and put the previous one
+  -- back, rather than editing a cell we are not testing.
+  local prev_modal = package.loaded["auto-core.ui.modal"]
+  package.loaded["auto-core.ui.modal"] = {
+    open = function(o)
+      -- The detail this block asserts on now lives in the BODY (ADR-0195 D3),
+      -- so flatten title + body for the existing find() checks.
+      local body = type(o.body) == "table" and table.concat(o.body, "  ") or tostring(o.body or "")
+      confirm_prompt = tostring(o.title or "") .. "  " .. body
+      if o.on_choice then o.on_choice(answer == "yes") end
     end,
   }
 
@@ -890,7 +897,7 @@ do
     vim.inspect(notes))
 
   pr_mod.associate, pr_mod.dissociate = orig_assoc, orig_dissoc
-  package.loaded["auto-core.ui.float"] = prev_float
+  package.loaded["auto-core.ui.modal"] = prev_modal
 end
 
 -- ── 10. G = get_pr_for_repo: success + error surfacing (C10-C12) ──

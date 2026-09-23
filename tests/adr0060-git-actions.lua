@@ -154,9 +154,13 @@ end)()
   local asked = nil
   local orig_select = vim.ui.select
   local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
   -- Force the fallback path so the assertion does not depend on which
   -- confirm primitive is present.
+  -- Both surfaces are nil'd: `_confirm` prefers `ui.modal` (ADR-0195 D3) and
+  -- only then falls back to `float.confirm`, then to `vim.ui.select`.
   package.loaded["auto-core.ui.float"] = { confirm = nil }
+  package.loaded["auto-core.ui.modal"] = { open = nil }
   vim.ui.select = function(items, opts, cb) asked = opts and opts.prompt; cb("no") end
 
   local repo_row = { kind = "repo", repo = { label = "myrepo", common_dir = "/x/.git" } }
@@ -180,6 +184,7 @@ end)()
 
   vim.ui.select = orig_select
   package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
   package.loaded["worktree.repos"] = nil
 end)()
 
@@ -374,7 +379,11 @@ end)()
   local asked = nil
   local orig_select = vim.ui.select
   local orig_float = package.loaded["auto-core.ui.float"]
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  -- Both surfaces are nil'd: `_confirm` prefers `ui.modal` (ADR-0195 D3) and
+  -- only then falls back to `float.confirm`, then to `vim.ui.select`.
   package.loaded["auto-core.ui.float"] = { confirm = nil }
+  package.loaded["auto-core.ui.modal"] = { open = nil }
   vim.ui.select = function(_, opts, cb) asked = opts and opts.prompt; cb("no") end
 
   local row = {
@@ -511,6 +520,65 @@ end)()
 
   vim.ui.select = orig_select
   package.loaded["auto-core.ui.float"] = orig_float
+  package.loaded["auto-core.ui.modal"] = orig_modal
+  package.loaded["worktree.repos"] = nil
+end)()
+
+-- ── [10] ADR-0195 D3: the delete confirm is an IRREVERSIBLE modal ───────
+-- [9] proves the gate exists through the degraded fallback. This proves the
+-- SHAPE of the real one: the raw filename moves into the modal's BODY, where it
+-- is readable, and irreversibility is passed as an ENFORCED construction input
+-- rather than left to the caller's answer ordering — auto-core is what drops the
+-- affirmative default and puts the decline first.
+;(function()
+  local removed = {}
+  package.loaded["worktree.repos"] = {
+    available = function() return true end,
+    remove_review = function(repo, path)
+      removed[#removed + 1] = { repo = repo, path = path }
+      return true, nil, { path = path, document_removed = true }
+    end,
+  }
+  local seen, answer = nil, false
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  package.loaded["auto-core.ui.modal"] = {
+    open = function(o) seen = o; if o.on_choice then o.on_choice(answer) end end,
+  }
+
+  local row = {
+    kind = "review",
+    repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
+    review = { name = "own__myrepo@1cfe731.r1.review.json",
+               path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
+               short = "1cfe731", revision = 1, severities = {} },
+  }
+
+  tree.remove_review(row)
+  local body = seen
+    and (type(seen.body) == "table" and table.concat(seen.body, "  ") or tostring(seen.body))
+    or ""
+  ok("[10] d opens the shared modal", seen ~= nil)
+  ok("[10] *** the delete is declared IRREVERSIBLE ***",
+    seen ~= nil and seen.reversibility == "irreversible", seen and tostring(seen.reversibility))
+  ok("[10] the BODY carries the raw review filename, not a truncated prompt line",
+    body:find("own__myrepo@1cfe731.r1.review.json", 1, true) ~= nil, body)
+  ok("[10] the body says both halves go and it cannot be undone",
+    body:find("Markdown", 1, true) ~= nil
+      and body:lower():find("cannot be undone", 1, true) ~= nil, body)
+  ok("[10] it offers a cancel-role answer for auto-core to order first", (function()
+    for _, it in ipairs((seen and seen.items) or {}) do
+      if it.role == "cancel" then return true end
+    end
+    return false
+  end)())
+  ok("[10] *** declining removes nothing ***", #removed == 0, #removed)
+
+  answer = true
+  tree.remove_review(row)
+  ok("[10] (control) confirming removes exactly that review, once",
+    #removed == 1 and removed[1].path == row.review.path, vim.inspect(removed))
+
+  package.loaded["auto-core.ui.modal"] = orig_modal
   package.loaded["worktree.repos"] = nil
 end)()
 
