@@ -946,6 +946,133 @@ ok("p5: and no ▾ remains when nothing is expanded",
 ok("p5: the two states are DISTINGUISHABLE (the nit's actual defect)",
   collapsed ~= shown)
 
+-- ── ADR-0195 D4: the archive transition, RENDERED ───────────────────────
+--
+-- [13b] in the git-actions suite checks the mode flag and the source strings,
+-- and that is not the claim. The claim is that the user SEES different rows.
+-- Deleting `M.invalidate(nil)` from `toggle_archived` leaves that suite at
+-- 127/0 while the visible rows and the count stay cached — the flag flips and
+-- the panel does not move. So the boundary this asserts is the painted buffer.
+;(function()
+  -- A previous cell collapsed EVERYTHING, so the repo has to be re-expanded or
+  -- this block asserts against an empty tree — where an "is it gone?" cell
+  -- passes because nothing was ever drawn. The fixture cell below is the
+  -- positive control that catches exactly that.
+  tree._expanded["repo:" .. repo.common_dir] = true
+  local rid = "reviews:" .. repo.common_dir
+  tree._expanded[rid] = true
+  tree.invalidate(nil); paint()
+
+  local rname = vim.fn.fnamemodify(_rvres.json_path, ":t")
+  local short = rname:gsub("^" .. vim.pesc(repo.slug) .. "@", "")
+  -- Read the section line rather than hardcoding a total: this fixture has
+  -- written several reviews by now, and an expectation pinned to a number is one
+  -- an unrelated earlier cell can invalidate.
+  local function section()
+    for _, l in ipairs(vim.api.nvim_buf_get_lines(buf, 0, -1, false)) do
+      if l:find("reviews", 1, true) and l:find("(", 1, true) then return l end
+    end
+    return ""
+  end
+  local n0 = tonumber(section():match("%((%d+)")) or 0
+  ok("d4: fixture — the review is visible and the section counts it",
+    text():find(short, 1, true) ~= nil and n0 > 0, section())
+  ok("d4: fixture — nothing is archived yet",
+    section():find("archived", 1, true) == nil, section())
+
+  -- CI pins an OLDER worktree.nvim on purpose, and on that one archiving does
+  -- not exist — so this block asserts a different, equally real contract there
+  -- rather than skipping. Both configurations end up checked: the transition
+  -- where it is possible, the untouched legacy rendering where it is not.
+  local capable = type(backend.archive_review) == "function"
+    and type(backend.unarchive_review) == "function"
+  if not capable then
+    local before = section()
+    local rows_before = #tree._rows
+    local orig_modal_l = package.loaded["auto-core.ui.modal"]
+    package.loaded["auto-core.ui.modal"] = {
+      open = function(o)
+        for _, it in ipairs(o.items or {}) do
+          if it.role == "confirm" then o.on_choice(it.value); return end
+        end
+      end,
+    }
+    local r
+    for _, x in ipairs(tree._rows) do
+      if x.kind == "review" and x.review and x.review.path == _rvres.json_path then r = x end
+    end
+    tree.remove_review(r)
+    tree.toggle_archived({ kind = "reviews", repo = repo })
+    tree.invalidate(nil); paint()
+    ok("[legacy] *** an incapable backend renders the section UNCHANGED ***",
+      section() == before, ("%s vs %s"):format(section(), before))
+    ok("[legacy] *** and the count never claims anything is archived ***",
+      section():find("archived", 1, true) == nil, section())
+    ok("[legacy] the review row is still there — d archived nothing",
+      text():find(short, 1, true) ~= nil, section())
+    ok("[legacy] and the row count did not move", #tree._rows == rows_before,
+      ("%d vs %d"):format(#tree._rows, rows_before))
+    package.loaded["auto-core.ui.modal"] = orig_modal_l
+    return
+  end
+
+  -- Auto-confirm every modal so the public handlers run end to end.
+  local orig_modal = package.loaded["auto-core.ui.modal"]
+  package.loaded["auto-core.ui.modal"] = {
+    open = function(o)
+      for _, it in ipairs(o.items or {}) do
+        if it.role == "confirm" then o.on_choice(it.value); return end
+      end
+    end,
+  }
+  local function review_row()
+    for _, r in ipairs(tree._rows) do
+      if r.kind == "review" and r.review and r.review.path == _rvres.json_path then return r end
+    end
+  end
+
+  -- ARCHIVE through `d`, then repaint: the row must LEAVE the buffer.
+  local row = review_row()
+  ok("d4: fixture — the review row is addressable", row ~= nil)
+  tree.remove_review(row)
+  paint()
+  ok("d4: *** after archiving, the row is GONE from the painted buffer ***",
+    text():find(short, 1, true) == nil, text())
+  ok("d4: *** and the count SAYS what it is hiding ***",
+    text():find("1 archived", 1, true) ~= nil, text())
+  ok("d4: *** and the VISIBLE total dropped by exactly one ***",
+    tonumber(section():match("%((%d+)")) == n0 - 1,
+    ("%s (was %d)"):format(section(), n0))
+
+  -- `za` must bring it BACK on screen — this is the cell that reds when the
+  -- invalidation is removed, because the mode flips either way.
+  tree.toggle_archived({ kind = "reviews", repo = repo })
+  paint()
+  ok("d4: *** za re-paints the archived row into the buffer ***",
+    text():find(short, 1, true) ~= nil, text())
+  ok("d4: *** and the row says it is archived ***",
+    text():find("[archived]", 1, true) ~= nil, text())
+  ok("d4: the header announces the mode",
+    text():find("showing archived", 1, true) ~= nil, text())
+
+  -- UNARCHIVE through `d` on the archived row, then repaint.
+  local arow = review_row()
+  ok("d4: fixture — the archived row is addressable", arow ~= nil)
+  ok("d4: and it carries the archived flag the handler branches on",
+    arow ~= nil and arow.review.archived == true, arow and vim.inspect(arow.review.archived))
+  tree.remove_review(arow)
+  paint()
+  ok("d4: *** after restoring, the row is no longer tagged archived ***",
+    text():find(short, 1, true) ~= nil and text():find("[archived]", 1, true) == nil, text())
+
+  tree.toggle_archived({ kind = "reviews", repo = repo })
+  paint()
+  ok("d4: za back to active leaves the restored review visible",
+    text():find(short, 1, true) ~= nil and text():find("showing archived", 1, true) == nil, text())
+
+  package.loaded["auto-core.ui.modal"] = orig_modal
+end)()
+
 vim.fn.delete(sb, "rf")
 print(string.format("\n%d passed, %d failed", pass, fail))
 vim.cmd(fail > 0 and "cq" or "qa!")
