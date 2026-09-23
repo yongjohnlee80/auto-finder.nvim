@@ -2,6 +2,79 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.4.31] — 2026-09-23 — `d` archives a review instead of deleting it, and `D` deletes
+
+Patch. Completes ADR-0195 across auto-core, worktree.nvim and auto-finder.
+Reviewed by lector (five rounds across the two auto-finder PRs).
+
+**A key changed meaning — read this one before you next press `d`.**
+
+| key | on a review row |
+| --- | --- |
+| `d` | **archives** it (reversible; the files stay on disk and in your KB), or **restores** it when the archived rows are showing. Unchanged on a worktree, and on a PR-associated review: both were already non-destructive dissociations. |
+| `D` | deletes it **permanently** — both halves of the pair, revision fenced. Irreversible modal: no affirmative default, the declining answer first, so a bare `<Enter>` cannot delete. |
+| `za` | show / hide archived reviews, per repository. |
+
+`d` was *repurposed* rather than archiving taking a new key, on purpose: `d` is
+the key pressed from muscle memory on a review you only wanted to tidy away, and
+until now that keystroke destroyed the pair and fenced the revision. Permanent
+delete is deliberately **not** offered as a second item inside the archive modal
+— making the safe gesture a doorway to the destructive one would give back the
+protection the split creates.
+
+**The section count tells you what it is hiding** — `reviews  (2, 1 archived)`.
+An archive whose only evidence is a row that silently is not there would make
+`za` a key you had to already know about. Rows and count are requested with the
+same mode; they reach the store through different calls, and a mode applied to
+only one of them is how a section comes to read `(3)` over two rows.
+
+An archived row is tagged `[archived]`, or `[archived · marker unreadable]` when
+its marker failed validation. Both are hidden, but "deliberately hidden" and
+"hidden because we cannot tell" are different situations and only one is worth
+going to fix.
+
+**Confirmations are now the shared auto-core modal.** Title, body and choices, so
+a long review filename is readable in the body instead of truncated into a
+one-line prompt. Destructive questions declare themselves irreversible and the
+modal enforces the treatment.
+
+Degrades on an older auto-core, decline-first in every fallback path. The archive
+listing is gated on the archive **interface**, not on an optional argument: an
+older worktree.nvim keeps the exact pre-feature rows and count rather than being
+handed an option it would discard.
+
+**Commit-row detail in the multi-commit diff view.** In the `O` view, putting the
+cursor on a commit header now shows that commit — message, author, stat —
+instead of repainting the first file's diff.
+
+Requires **worktree.nvim v0.5.20** for archiving; older versions keep the
+previous listing and say so when you press `d` or `za`.
+
+## [v0.4.30] — 2026-09-18 — a review drafted from a commit can acquire its PR
+
+**`repos` (ADR-0083 r11).** `p` on a review row attaches a PR to a review that
+has none, or re-points one that already names a PR. No credential is needed;
+nothing here talks to the forge.
+
+This closes a dead end. The `pr` key was written at draft creation and only
+there, so a review drafted from a commit context could never be posted: `S`
+refused it, and the panel offered nothing that could supply what `S` wanted. The
+only route was to delete the review and redo it from the PR view, discarding the
+findings already written.
+
+`d` migrates onto the same writer. It used to read the review JSON, mutate it in
+memory and write it back raw, skipping the schema and pair checks every other
+writer of a canonical review performs. Both directions now go through
+`worktree.review.amend_pr_association`.
+
+A review drafted with no PR warns once, at draft time, naming `p` as the
+recovery. The old failure arrived at `S`, after every finding had been written.
+
+The help text said `S` can never submit such a review and to associate first.
+That was true when nothing could supply a missing PR, and is false now.
+
+Requires **worktree.nvim v0.5.19**. Reviewed by `agent:zen` across three rounds.
+
 ## [v0.4.29] — 2026-09-11 — `#` binds a worktree to an existing PR, and the PR keys check for a token first
 
 Patch. ADR-0083 Amendment r10.7. Needs worktree.nvim **v0.5.17**, which ships
@@ -3874,3 +3947,29 @@ Redraw on resize + winbar prefix tuning.
 ## [v0.1.0] — Initial release
 
 Multi-section file explorer panel.
+
+---
+
+## Where this record starts
+
+**Complete and contiguous from `v0.4.19` onward.** Every release from there
+to the newest tag has an entry here, and the entries are derived from each
+release's own annotated tag message.
+
+**Before `v0.4.19` the record is partial.** auto-finder.nvim has been tagged since
+`v0.1.0`; of the 105 releases older than `v0.4.19`, 69 have an entry here and
+the rest do not. This is historical, not an omission introduced by any one
+change.
+
+Those gaps are largely unrecoverable rather than merely unwritten: **31 of the
+older tags are lightweight**, carrying no message at all. There is no published
+note to restore for them, and reconstructing one from the commit range would be
+writing history after the fact rather than recording it — so the boundary is
+stated here instead of being filled in with narrative nobody wrote at the time.
+
+To read what an older release actually said:
+
+```sh
+git tag -n99 <tag>          # annotated tags carry their release notes
+git log <older>..<newer>    # for the lightweight ones, the commits are the record
+```
