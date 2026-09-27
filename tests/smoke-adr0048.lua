@@ -1180,7 +1180,11 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
 ;(function()
   local tests_view = require("auto-finder.views.tests")
   local debug_view = require("auto-finder.views.debug")
-  local header = require("auto-finder.views._state_header")
+  -- Guarded: an unguarded require raises and ABORTS the suite, hiding every
+  -- later cell. A missing header must read as red, not as silence.
+  local ok_hdr, header = pcall(require, "auto-finder.views._state_header")
+  ok("p49: auto-finder.views._state_header loads", ok_hdr, tostring(header))
+  if not ok_hdr then return end
   local ok_ctx, ctxm = pcall(require, "auto-run.context")
   ok("p49: this auto-run.nvim ships auto-run.context", ok_ctx, tostring(ctxm))
   if not ok_ctx then return end
