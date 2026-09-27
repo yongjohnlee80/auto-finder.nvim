@@ -3166,48 +3166,24 @@ end)
 --   A16 — dbase placeholder migration: focus dbase from cold;
 --         placeholder paints; real dbee mount completes
 --         without losing editor window or duplicating dbee UI
-print("\n[35] ADR 0026 Phase 7 — loading-placeholder (A3/A13/A14/A16)")
+-- v0.5.2: `shared.loading` (the placeholder factory) is deleted. Its last
+-- users were the neo-tree fork glue and nvim-dbee's deferred mount, and both
+-- are gone (ADR-0200, v0.4.0), so its cells went with it. The window/view
+-- infrastructure and the A16 no-backend cells below still apply.
+print("\n[35] ADR 0026 Phase 7 — mount infrastructure (A3/A16)")
 section(function()
-local loading = require("auto-finder.shared.loading")
 local window  = require("auto-finder.shared.window")
 local views   = require("auto-finder.views")
 
 -- ── infrastructure ──
-ok("shared.loading.buffer exists",
-  type(loading.buffer) == "function")
-ok("shared.loading.is_placeholder exists",
-  type(loading.is_placeholder) == "function")
-ok("shared.loading.matches exists",
-  type(loading.matches) == "function")
+ok("shared.loading is retired (no module on the runtimepath)",
+  not pcall(require, "auto-finder.shared.loading"))
 ok("shared.window.is_auto_finder_panel exists",
   type(window.is_auto_finder_panel) == "function")
 ok("shared.window.is_any_panel exists",
   type(window.is_any_panel) == "function")
 ok("views.active() exists",
   type(views.active) == "function")
-
--- Build a placeholder; assert shape + buffer-local tags.
-do
-  local b = loading.buffer({ view = "test", generation = 42, message = "Loading…" })
-  ok("loading.buffer returns a valid bufnr",
-    type(b) == "number" and vim.api.nvim_buf_is_valid(b))
-  ok("placeholder buffer has nofile/wipe options",
-    vim.bo[b].buftype == "nofile"
-      and vim.bo[b].bufhidden == "wipe")
-  ok("placeholder buffer is read-only",
-    vim.bo[b].readonly == true)
-  ok("loading.is_placeholder identifies the buffer",
-    loading.is_placeholder(b) == true)
-  ok("loading.matches identifies view+generation",
-    loading.matches(b, "test", 42) == true)
-  ok("loading.matches rejects wrong view",
-    loading.matches(b, "other", 42) == false)
-  ok("loading.matches rejects wrong generation",
-    loading.matches(b, "test", 99) == false)
-  -- Cleanup the test buffer; bufhidden=wipe handles when it's
-  -- unloaded, but explicit delete is cleaner for smoke isolation.
-  pcall(vim.api.nvim_buf_delete, b, { force = true })
-end
 
 -- A3 is partial: the files / buffers / repos views mount synchronously (a
 -- buffer on first get_buffer), because the auto-core Registry binds keymaps
@@ -3494,7 +3470,7 @@ do
     { id = "32", phase = "A1/A2 + watched-dir translation", marker = "%[32%] ADR 0026 A1/A2" },
     { id = "33", phase = "Phase 5 — git cache",             marker = "%[33%] ADR 0026 Phase 5" },
     { id = "34", phase = "Phase 6 — buffers + repos",       marker = "%[34%] ADR 0026 Phase 6" },
-    { id = "35", phase = "Phase 7 — loading-placeholder",   marker = "%[35%] ADR 0026 Phase 7" },
+    { id = "35", phase = "Phase 7 — mount infrastructure",  marker = "%[35%] ADR 0026 Phase 7" },
     { id = "36", phase = "Phase 8 — shared/logging sweep",  marker = "%[36%] ADR 0026 Phase 8" },
     { id = "37", phase = "Phase 9 — acceptance audit",      marker = "%[37%] ADR 0026 Phase 9" },
   }
