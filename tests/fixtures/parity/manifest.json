@@ -1,8 +1,9 @@
-{"captured_from":"1c3a3c6","catppuccin":"edefef779ab08ce1a4a404713e3012b0d202bd35","mini.icons":"f642e3ba8c12afbc8f32f6d77ef6597eac56786f","nvim":"0.12.5+v0.12.5","scenarios":[
+{"captured_from":"bac3db7","catppuccin":"edefef779ab08ce1a4a404713e3012b0d202bd35","mini.icons":"f642e3ba8c12afbc8f32f6d77ef6597eac56786f","nvim":"0.12.5+v0.12.5","scenarios":[
   "files-w38-git",
   "files-w38-nogit",
   "files-w38-git-marks",
   "files-w70-git",
   "buffers-w38",
-  "buffers-w70"
+  "buffers-w70",
+  "marks-w38"
 ]}

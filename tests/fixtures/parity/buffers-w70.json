@@ -30,4 +30,4 @@
   {"col":8,"end_col":16,"end_row":5,"hl":"NeoTreeFileName","hl_resolved":[],"priority":4096,"row":5},
   {"col":16,"end_col":19,"end_row":5,"hl":"NeoTreeBufferNumber","hl_resolved":{"fg":"#f5c2e7"},"priority":4096,"row":5},
   {"col":59,"end_col":73,"end_row":5,"hl":"NeoTreeFileStats","hl_resolved":{"fg":"#64677d"},"priority":4096,"row":5}
-],"width":70}
+],"width":70,"win":{"cursorline":true,"cursorlineopt":"line","foldcolumn":"0","list":false,"number":false,"relativenumber":false,"signcolumn":"auto","spell":false,"winhighlight":"Normal:NeoTreeNormal,NormalNC:NeoTreeNormalNC,SignColumn:NeoTreeSignColumn,CursorLine:NeoTreeCursorLine,FloatBorder:NeoTreeFloatBorder,StatusLine:NeoTreeStatusLine,StatusLineNC:NeoTreeStatusLineNC,VertSplit:NeoTreeVertSplit,EndOfBuffer:NeoTreeEndOfBuffer,WinSeparator:NeoTreeWinSeparator","wrap":false}}

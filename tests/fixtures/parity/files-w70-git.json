@@ -122,4 +122,4 @@
   {"col":3,"end_col":8,"end_row":26,"hl":"MiniIconsYellow","hl_resolved":{"fg":"#f9e2af","italic":true},"priority":4096,"row":26},
   {"col":8,"end_col":16,"end_row":26,"hl":"NeoTreeFileName","hl_resolved":[],"priority":4096,"row":26},
   {"col":59,"end_col":73,"end_row":26,"hl":"NeoTreeFileStats","hl_resolved":{"fg":"#64677d"},"priority":4096,"row":26}
-],"width":70}
+],"width":70,"win":{"cursorline":true,"cursorlineopt":"line","foldcolumn":"0","list":false,"number":false,"relativenumber":false,"signcolumn":"auto","spell":false,"winhighlight":"Normal:NeoTreeNormal,NormalNC:NeoTreeNormalNC,SignColumn:NeoTreeSignColumn,CursorLine:NeoTreeCursorLine,FloatBorder:NeoTreeFloatBorder,StatusLine:NeoTreeStatusLine,StatusLineNC:NeoTreeStatusLineNC,VertSplit:NeoTreeVertSplit,EndOfBuffer:NeoTreeEndOfBuffer,WinSeparator:NeoTreeWinSeparator","wrap":false}}
