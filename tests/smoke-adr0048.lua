@@ -1696,8 +1696,8 @@ print("\n[50] ADR 0199 §6.2 — debug pane entry-point management")
     local toasts, real_vn = {}, vim.notify
     vim.notify = function(msg) toasts[#toasts + 1] = tostring(msg) end
     edit("env.SECRET_TOKEN", "SECRET_TOKEN " .. SENTINEL)
+    settle()   -- the toast is delivered on a later tick; capture it first
     vim.notify = real_vn
-    settle()
     local ring = vim.inspect(require("auto-core.log").recent(1000))
     ok("p50: a malformed env answer is refused with a message naming the form",
       #toasts == 1 and toasts[1]:find("KEY=VALUE", 1, true) ~= nil, vim.inspect(toasts))
