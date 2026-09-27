@@ -37,6 +37,12 @@ M.TOPICS = {
     payload = "{ kind = 'created'|'modified'|'deleted'|'dirty', path = string, dir = string }",
     publishers = { "auto-finder.core" },
   },
+  ["auto-finder.core.files:filters"] = {
+    doc = "An auto-core.files filter pref changed (translated from " ..
+          "state.core:files.<what>:changed). The files view re-filters.",
+    payload = "{ what = 'show_hidden'|'show_dotfiles' }",
+    publishers = { "auto-finder.core" },
+  },
   ["auto-finder.core.git:changed"] = {
     doc = "Git status cache mutated by a translated " ..
           "core.git.state:changed event. Coarse-grained; " ..

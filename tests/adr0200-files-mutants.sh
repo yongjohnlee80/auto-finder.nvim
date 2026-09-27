@@ -43,7 +43,8 @@ import json
 F = "lua/auto-finder/views/files/init.lua"
 M = [
   ("hide keeps its directory watches", F,
-   '  disarm_all(S.model)\n  require("auto-finder.core.watchers").unwatch_owner(model_mod.WATCH_OWNER)\n  if S.subs', '  if S.subs'),
+   '  disarm_all(S.model)\n  require("auto-finder.core.watchers").unwatch_owner(model_mod.WATCH_OWNER)\n  require("auto-finder.core.watchers").unwatch_git_owner',
+   '  require("auto-finder.core.watchers").unwatch_git_owner'),
   ("hide keeps its subscriptions", F,
    '  if S.subs then pcall(function() S.subs:dispose_all() end) end\n  if S.augroup then pcall(vim.api.nvim_del_augroup_by_id, S.augroup); S.augroup = nil end\n  stop_timers()\n  pending_reads = {}',
    '  if S.augroup then pcall(vim.api.nvim_del_augroup_by_id, S.augroup); S.augroup = nil end\n  stop_timers()\n  pending_reads = {}'),
@@ -75,6 +76,14 @@ M = [
    '  if root.children == nil then', '  if true then'),
   ("a dropped key is mapped again", F,
    '  C = "close_node",', '  C = "close_node", P = "refresh",'),
+  ("hide keeps its git watches", F,
+   '  require("auto-finder.core.watchers").unwatch_git_owner(model_mod.WATCH_OWNER)\n  if S.subs', '  if S.subs'),
+  ("the view holds no git watch (an external commit never recolours)", F,
+   '    watchers.watch_git(repo, model_mod.WATCH_OWNER)\n', ''),
+  ("directory watches inherit fs.watch's default ignore list", "lua/auto-finder/core/watchers.lua",
+   '{ recursive = false, self_extend = false, ignore = {} }', '{ recursive = false, self_extend = false }'),
+  ("filter prefs never reach the view", "lua/auto-finder/core/init.lua",
+   '      require("auto-finder.core.events").publish("auto-finder.core.files:filters", { what = what })\n', ''),
 ]
 for m in M:
     print(json.dumps(m))

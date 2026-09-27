@@ -92,7 +92,7 @@ function M.snapshot_now(cwd)
   end
 
   -- auto-core.git.status resolves cwd → repo_root internally. On
-  -- cache miss it shells out to `git status --porcelain=v1` and
+  -- cache miss it shells out to `git status --porcelain=v2 -z` and
   -- caches the result; on hit it returns `(entries, cached_at_ms)`.
   local entries, cached_at_or_err = gs.get(cwd)
   if not entries then

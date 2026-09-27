@@ -56,7 +56,10 @@ function M.watch_dir(path, owner)
   end
   local fs_watch = _fs_watch_mod()
   if not fs_watch then return false end
-  local h = fs_watch.start(path, { recursive = false, self_extend = false })
+  -- ignore = {}: fs.watch's default list (/build/, /dist/, /target/, …) matches the FULL path, so an
+  -- expanded build/ — or any cwd below such a directory — would never update. One non-recursive watch
+  -- reports only direct children, and `.git` is never listed, so there is nothing here to filter.
+  local h = fs_watch.start(path, { recursive = false, self_extend = false, ignore = {} })
   if not h then return false end
   M._dirs[path] = { handle = h, owners = { [owner] = true } }
   return true
@@ -94,6 +97,55 @@ function M.dir_watch_count(owner)
   return n
 end
 
+-- ── per-REPO git watches (git.watch: `.git/HEAD` + index), refcounted by owner ─────────────────────
+-- The files slot holds one for each repo whose colours it shows, so a commit / add / checkout run from a
+-- terminal (no working-tree event) still recolours; the repos slot holds one per watched worktree
+-- (`_repo_git` below). A path watched by both shares one handle.
+M._gits = {}  -- { [path] = { handle = <git.watch handle>, owners = { [owner] = true } } }
+
+---@param path string  repo / worktree root
+---@param owner any
+---@return boolean ok
+function M.watch_git(path, owner)
+  local g = M._gits[path]
+  if g then
+    g.owners[owner] = true
+    return true
+  end
+  local git_watch = _git_watch_mod()
+  if not git_watch then return false end
+  local h = git_watch.start(path)   -- resolves the per-worktree git_dir
+  if not h then return false end
+  M._gits[path] = { handle = h, owners = { [owner] = true } }
+  return true
+end
+
+function M.unwatch_git(path, owner)
+  local g = M._gits[path]
+  if not g then return end
+  g.owners[owner] = nil
+  if next(g.owners) == nil then
+    local git_watch = _git_watch_mod()
+    if git_watch then pcall(git_watch.stop, g.handle) end
+    M._gits[path] = nil
+  end
+end
+
+function M.unwatch_git_owner(owner)
+  local paths = {}
+  for path, g in pairs(M._gits) do if g.owners[owner] then paths[#paths + 1] = path end end
+  for _, path in ipairs(paths) do M.unwatch_git(path, owner) end
+end
+
+---Number of git watches, all or those `owner` holds.
+function M.git_watch_count(owner)
+  local n = 0
+  for _, g in pairs(M._gits) do
+    if owner == nil or g.owners[owner] then n = n + 1 end
+  end
+  return n
+end
+
 ---Stop every watcher this module opened. Used by `core.stop` at session teardown.
 function M.close_all()
   local fs_watch = _fs_watch_mod()
@@ -102,6 +154,11 @@ function M.close_all()
     M._dirs[path] = nil
   end
   M.close_watched()
+  local git_watch = _git_watch_mod()
+  for path, g in pairs(M._gits) do
+    if git_watch then pcall(git_watch.stop, g.handle) end
+    M._gits[path] = nil
+  end
 end
 
 -- ── per-WATCHED-WORKTREE live watchers (ADR-0060 §2.3) ────────────────
@@ -117,7 +174,8 @@ end
 -- handles plus one recursive working-tree `fs.watch`.
 --
 -- Repos-owned handle maps, keyed by absolute worktree PATH:
-M._repo_git = {}  -- { [path] = <git.watch handle> }
+M._repo_git = {}  -- { [path] = <git.watch handle> } — the repos owner's entries in `_gits`
+local REPOS = "repos.watched"
 M._repo_fs  = {}  -- { [path] = <fs.watch handle> }
 
 ---The set of currently-watched worktree paths, from worktree.nvim's registry.
@@ -153,17 +211,14 @@ function M.reconcile_watched()
   local fs_watch  = _fs_watch_mod()
   local want = _watched_set()
 
-  -- git.watch: arm the newly-wanted, stop the no-longer-wanted.
+  -- git.watch: arm the newly-wanted, stop the no-longer-wanted (shared with the files slot's holds).
   if git_watch then
     for path in pairs(want) do
-      if not M._repo_git[path] then
-        local h = git_watch.start(path)   -- resolves the per-worktree git_dir
-        if h then M._repo_git[path] = h end
-      end
+      if not M._repo_git[path] and M.watch_git(path, REPOS) then M._repo_git[path] = M._gits[path].handle end
     end
-    for path, h in pairs(M._repo_git) do
+    for path in pairs(M._repo_git) do
       if not want[path] then
-        pcall(git_watch.stop, h)
+        M.unwatch_git(path, REPOS)
         M._repo_git[path] = nil
       end
     end
@@ -225,10 +280,9 @@ end
 ---Stop every per-worktree watcher (git + working-tree). Folded into
 ---`close_all` so `core.stop` tears the whole set down.
 function M.close_watched()
-  local git_watch = _git_watch_mod()
   local fs_watch  = _fs_watch_mod()
-  for path, h in pairs(M._repo_git) do
-    if git_watch then pcall(git_watch.stop, h) end
+  for path in pairs(M._repo_git) do
+    M.unwatch_git(path, REPOS)   -- the handle survives while the files slot still holds it
     M._repo_git[path] = nil
   end
   for path, h in pairs(M._repo_fs) do
@@ -241,6 +295,7 @@ end
 ---simulate auto-core bus reset taking the underlying handles).
 function M._reset_for_tests()
   M._dirs = {}
+  M._gits = {}
   M._repo_git = {}
   M._repo_fs = {}
 end

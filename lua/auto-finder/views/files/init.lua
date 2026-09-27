@@ -238,7 +238,10 @@ function M.git_refresh()
     if n and n.repo_root then repos[dir] = true end
   end
   local status = require("auto-core.git.status")
+  local watchers = require("auto-finder.core.watchers")
   for repo in pairs(repos) do
+    -- a commit / add / checkout from a terminal touches only .git/: this watch is what recolours then
+    watchers.watch_git(repo, model_mod.WATCH_OWNER)
     status.get_async(repo, { ignored = true }, function(entries)
       if not rawequal(token, model.token) or not S.shown then return end
       S.git[repo] = entries and gitc.build(entries, repo) or nil
@@ -294,6 +297,11 @@ function M.watch_count()
   return require("auto-finder.core.watchers").dir_watch_count(model_mod.WATCH_OWNER)
 end
 
+---Number of repo git watches the view holds (tests, benchmark).
+function M.git_watch_count()
+  return require("auto-finder.core.watchers").git_watch_count(model_mod.WATCH_OWNER)
+end
+
 -- ── reads ──────────────────────────────────────────────────────────────────────────────────────────
 local function read_then_paint(path, fresh, cb)
   local model = S.model
@@ -342,6 +350,7 @@ function M.suspend()
   if S.search then require("auto-finder.views.files.search").cancel() end
   disarm_all(S.model)
   require("auto-finder.core.watchers").unwatch_owner(model_mod.WATCH_OWNER)
+  require("auto-finder.core.watchers").unwatch_git_owner(model_mod.WATCH_OWNER)
   if S.subs then pcall(function() S.subs:dispose_all() end) end
   if S.augroup then pcall(vim.api.nvim_del_augroup_by_id, S.augroup); S.augroup = nil end
   stop_timers()
@@ -380,6 +389,7 @@ function M.reroot(root)
     S.model.token = nil
   end
   disarm_all(S.model)
+  require("auto-finder.core.watchers").unwatch_git_owner(model_mod.WATCH_OWNER)
   new_model(root)
   if S.shown then
     S.model.token = {}
@@ -446,17 +456,15 @@ subscribe = function()
       vim.schedule(function() M.reroot(vim.fn.getcwd()) end)
     end
   end)
-  local ok, core = pcall(require, "auto-core")
-  if ok and core.files then
-    S.subs:replace("files-hidden", "state.core:files.show_hidden:changed", function()
+  S.subs:replace("files-filters", "auto-finder.core.files:filters", function(payload)
+    if type(payload) ~= "table" or not S.model then return end
+    if payload.what == "show_hidden" then
       apply_hidden(); M.paint()
-    end)
-    S.subs:replace("files-dotfiles", "state.core:files.show_dotfiles:changed", function()
-      if not S.model then return end
+    elseif payload.what == "show_dotfiles" then
       S.model.show_dotfiles = show_dotfiles()
       for _, d in ipairs(model_mod.expanded_dirs(S.model)) do read_then_paint(d, true) end
-    end)
-  end
+    end
+  end)
 
   S.augroup = vim.api.nvim_create_augroup("auto-finder.files.view", { clear = true })
   vim.api.nvim_create_autocmd("DiagnosticChanged", {

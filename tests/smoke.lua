@@ -2730,6 +2730,8 @@ do
       ["\"core.file:"]       = true,
       ["\"core.git.state:"]  = true,
       ["\"worktree:"]        = true,
+      ["\"core.fs."]         = true,   -- core.fs.dir:dirty (ADR-0200)
+      ["\"state.core:"]      = true,   -- auto-core.files prefs; core translates them to files:filters
     }) do
       if content:find(forbidden, 1, true) then
         violations[#violations + 1] = path .. " contains " .. forbidden

@@ -153,6 +153,12 @@ function M.ensure_started(cfg)
       kind = "dirty", path = payload.path, dir = payload.path,
     })
   end)
+  -- auto-core.files prefs → auto-finder.core.files:filters (the files view re-filters without a git read)
+  for _, what in ipairs({ "show_hidden", "show_dotfiles" }) do
+    _sub("upstream_files_" .. what, "state.core:files." .. what .. ":changed", function()
+      require("auto-finder.core.events").publish("auto-finder.core.files:filters", { what = what })
+    end)
+  end
 
   -- core.git.state:changed → auto-finder.core.git:changed
   -- ADR 0026 Phase 5: also flip core.git's readiness to 'cold' so

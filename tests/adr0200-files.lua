@@ -52,7 +52,7 @@ local function git(dir, ...)
   return vim.system({ "git", "-C", dir, ... }, { text = true }):wait()
 end
 mk("a/one.txt"); mk("a/deep/two.txt"); mk("b/three.txt"); mk("c/four.txt"); mk("top.txt"); mk(".hidden")
-mk("wide/.keep"); mk("f1/f2/leaf.txt")
+mk("wide/.keep"); mk("f1/f2/leaf.txt"); mk("build/out.txt")
 for i = 1, 20000 do vim.uv.fs_close(vim.uv.fs_open(ROOT .. "/wide/f" .. i, "w", 420)) end
 git(ROOT, "init", "-q", "-b", "main"); git(ROOT, "config", "user.email", "t@example.invalid"); git(ROOT, "config", "user.name", "t")
 vim.fn.writefile({ "ignored_dir/" }, ROOT .. "/.gitignore")
@@ -121,9 +121,12 @@ section("[2] a hidden pane does nothing; the next show catches up", function()
   ok("precondition: while shown, a create in an expanded dir reads that dir", reads_of(ROOT .. "/a") >= 1,
     vim.inspect(READS))
   ok("precondition: while shown, watches are held", fview.watch_count() >= 3, fview.watch_count())
+  wait(function() return fview.git_watch_count() >= 1 end)
+  ok("precondition: while shown, the repo's git watch is held", fview.git_watch_count() >= 1, fview.git_watch_count())
   af.close()
   ok("after close: the view is suspended", S.shown == false)
   ok("after close: zero directory watches held", fview.watch_count() == 0, fview.watch_count())
+  ok("after close: zero git watches held", fview.git_watch_count() == 0, fview.git_watch_count())
   vim.wait(400)
   reset_counts()
   for i = 1, 30 do vim.fn.writefile({ "x" }, ROOT .. "/a/burst" .. i .. ".txt") end
@@ -268,6 +271,17 @@ section("[7] live updates read only the directory they name", function()
   ok("a nameless (dirty) event re-reads the directory", reads_of(ROOT .. "/b") >= 1, vim.inspect(READS))
 end)
 
+section("[7b] a directory named like build output still updates live", function()
+  -- auto-core.fs.watch's default ignore list (/build/, /dist/, /target/, …) is matched against the full
+  -- path; a directory the user expanded must not inherit it
+  expand("build")
+  reset_counts()
+  vim.fn.writefile({ "x" }, ROOT .. "/build/fresh.txt")
+  wait(function() return visible_paths()[ROOT .. "/build/fresh.txt"] end, 1500)
+  ok("a create in an expanded build/ appears", visible_paths()[ROOT .. "/build/fresh.txt"] == true,
+    vim.inspect(READS))
+end)
+
 section("[8] git colours", function()
   wait(function() return S.git[S.repo_top or ""] ~= nil end, 3000)
   ok("precondition: the repo's status was read", S.repo_top == ROOT and S.git[ROOT] ~= nil, tostring(S.repo_top))
@@ -303,6 +317,19 @@ section("[8] git colours", function()
   require("auto-core.events").publish("core.git.state:changed", { repo_root = ROOT, git_dir = ROOT .. "/.git", kind = "index" })
   vim.wait(900)
   ok("a git-state event reads no directory", #READS == 0, vim.inspect(READS))
+
+  -- an external commit touches only .git/ (no working-tree event): the view's own git watch must see it
+  vim.wait(400)
+  reset_counts()
+  git(ROOT, "add", "a/g1.txt"); git(ROOT, "commit", "-q", "-m", "g1")
+  wait(function()
+    for _, r in ipairs(STATUS) do if r == ROOT then return true end end
+  end, 3000)
+  local reread = false
+  for _, r in ipairs(STATUS) do if r == ROOT then reread = true end end
+  ok("an external `git commit` (no file event) re-reads the repo's status", reread, vim.inspect(STATUS))
+  wait(function() return S.git[ROOT] and S.git[ROOT][ROOT .. "/a/g1.txt"] == nil end, 1500)
+  ok("…and the committed file loses its untracked colour", S.git[ROOT] and S.git[ROOT][ROOT .. "/a/g1.txt"] == nil)
 end)
 
 section("[9] keymaps: kept keys act, dropped keys are unmapped", function()
