@@ -2024,7 +2024,20 @@ print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profile
   local function text(b) return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
   local function press(view, w, b, key, row)
     view.on_focus(w, b)
-    if row then vim.api.nvim_win_set_cursor(w, { row.lnum, 0 }) end
+    if row then
+      -- Re-find the row in the FRESH render: line numbers shift as edits add
+      -- rows, and a stale lnum can land on the wrong row or out of range. A
+      -- row that is gone makes the cell fail, never the suite abort.
+      local same
+      for _, r in ipairs(view._rows or {}) do
+        if r.kind == row.kind and r.name == row.name and r.field == row.field and r.section == row.section
+            and r.key == row.key and (r.parent and r.parent.name) == (row.parent and row.parent.name) then
+          same = r
+        end
+      end
+      if not same then return false end
+      vim.api.nvim_win_set_cursor(w, { same.lnum, 0 })
+    end
     local m
     for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do if k.lhs == key then m = k end end
     if m then m.callback() end
