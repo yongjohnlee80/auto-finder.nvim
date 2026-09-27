@@ -1686,6 +1686,67 @@ print("\n[50] ADR 0199 §6.2 — debug pane entry-point management")
   edit("program", nil)
   ok("p50: a cancelled prompt changes nothing", store.get("m5-api").program == "bash")
 
+  -- Lector M5a P1: a MALFORMED env answer can still carry a secret
+  -- ("TOKEN my-secret" has no `=`). It must never be echoed: not into the
+  -- pane, not into a toast, not into the auto-core log ring. The real log
+  -- path runs here — only vim.notify is captured.
+  do
+    local SENTINEL = "zq-sentinel-secret-7731"
+    logm.notify, logm.warn = real_notify, real_warn
+    local toasts, real_vn = {}, vim.notify
+    vim.notify = function(msg) toasts[#toasts + 1] = tostring(msg) end
+    edit("env.SECRET_TOKEN", "SECRET_TOKEN " .. SENTINEL)
+    vim.notify = real_vn
+    settle()
+    local ring = vim.inspect(require("auto-core.log").recent(1000))
+    ok("p50: a malformed env answer is refused with a message naming the form",
+      #toasts == 1 and toasts[1]:find("KEY=VALUE", 1, true) ~= nil, vim.inspect(toasts))
+    ok("p50: …and its text reaches neither the toast, the log ring, nor the pane",
+      not table.concat(toasts, "\n"):find(SENTINEL, 1, true) and not ring:find(SENTINEL, 1, true)
+        and not text():find(SENTINEL, 1, true), "leaked")
+    ok("p50: …and the stored value is unchanged", store.get("m5-api").env.SECRET_TOKEN == "rotated")
+    logm.notify = function(msg) said[#said + 1] = tostring(msg) end
+    logm.warn = function(_, msg) said[#said + 1] = tostring(msg) end
+  end
+
+  -- Lector M5a P2: a freshly scaffolded entry has no args, env_files,
+  -- build_flags or env — the rows must still be there, or `e` has nowhere to
+  -- add them and the JSON file is the only way.
+  do
+    local fp, fe = reg.scaffold("debug", "m5-fresh", "go")
+    ok("p50: fixture — a fresh go debug scaffold", fp ~= nil, tostring(fe))
+    debug_view.on_focus(w, b)
+    local fr = find(function(r) return r.kind == "entry" and r.name == "m5-fresh" end)
+    vim.api.nvim_win_set_cursor(w, { fr.lnum, 0 })
+    keys().o.callback()
+    debug_view.on_focus(w, b)
+    local function frow(field)
+      return find(function(r) return r.kind == "detail" and r.field == field
+        and r.parent and r.parent.name == "m5-fresh" end)
+    end
+    ok("p50: a fresh entry shows editable rows for args, env_files, build_flags and a new env var",
+      frow("args") and frow("env_files") and frow("build_flags") and frow("env+"), text())
+    local function fedit(field, answer)
+      debug_view.on_focus(w, b)
+      local r = frow(field)
+      if not r then return end
+      vim.api.nvim_win_set_cursor(w, { r.lnum, 0 })
+      stub_input(answer)
+      keys().e.callback()
+    end
+    fedit("args", "-v -count=1")
+    fedit("env_files", "${worktree}/.env")
+    fedit("build_flags", "-tags=integration")
+    fedit("env+", "NEW_KEY=fresh-value-991")
+    local fx = store.get("m5-fresh")
+    ok("p50: …and e fills each in place, without opening the file",
+      vim.deep_equal(fx.args, { "-v", "-count=1" }) and vim.deep_equal(fx.env_files, { "${worktree}/.env" })
+        and fx.build_flags == "-tags=integration" and (fx.env or {}).NEW_KEY == "fresh-value-991", vim.inspect(fx))
+    settle()
+    ok("p50: …and the added env value stays masked in the pane", not text():find("fresh-value-991", 1, true), text())
+    pcall(store.remove, "m5-fresh")
+  end
+
   -- `a` adds an entry point through auto-run's scaffold API.
   debug_view.on_focus(w, b)
   entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
