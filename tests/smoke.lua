@@ -3167,7 +3167,7 @@ end)
 --         placeholder paints; real dbee mount completes
 --         without losing editor window or duplicating dbee UI
 -- v0.5.2: `shared.loading` (the placeholder factory) is deleted. Its last
--- users were the neo-tree fork glue and nvim-dbee's deferred mount, and both
+-- users were the retired fork's glue and nvim-dbee's deferred mount, and both
 -- are gone (ADR-0200, v0.4.0), so its cells went with it. The window/view
 -- infrastructure and the A16 no-backend cells below still apply.
 print("\n[35] ADR 0026 Phase 7 — mount infrastructure (A3/A16)")
