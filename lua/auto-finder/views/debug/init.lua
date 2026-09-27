@@ -580,11 +580,13 @@ local function _render(bufnr)
     emit_detail(row_parent, "kind",    eff.kind)
     emit_detail(row_parent, "runtime", eff.runtime or "go")
     emit_detail(row_parent, "program", eff.program)
-    if type(eff.args) == "table" and #eff.args > 0 then
-      emit_detail(row_parent, "args", table.concat(eff.args, " "))
-    end
+    -- Shown even when unset, so `e` can fill them in place on a fresh entry
+    -- (Lector M5a P2) — rendering only populated fields left no row to add
+    -- one on.
+    emit_detail(row_parent, "args",
+      type(eff.args) == "table" and #eff.args > 0 and table.concat(eff.args, " ") or nil)
     emit_detail(row_parent, "cwd", eff.cwd)
-    if type(eff.build_flags) == "string" and eff.build_flags ~= "" then
+    if eff.runtime ~= "rust" then   -- go build flags; rust carries Cargo identity instead
       emit_detail(row_parent, "build_flags", eff.build_flags)
     end
     -- Cargo identity (ADR 0194 §2.3.4): shown for rust entries even when
@@ -594,9 +596,8 @@ local function _render(bufnr)
       emit_detail(row_parent, "cargo_target", eff.cargo_target)
       emit_detail(row_parent, "cargo_target_kind", eff.cargo_target_kind)
     end
-    if type(eff.env_files) == "table" and #eff.env_files > 0 then
-      emit_detail(row_parent, "env_files", table.concat(eff.env_files, ", "))
-    end
+    emit_detail(row_parent, "env_files",
+      type(eff.env_files) == "table" and #eff.env_files > 0 and table.concat(eff.env_files, ", ") or nil)
     if type(eff.env) == "table" and next(eff.env) ~= nil then
       local keys = {}
       for k in pairs(eff.env) do keys[#keys + 1] = k end
@@ -606,6 +607,8 @@ local function _render(bufnr)
         emit_detail(row_parent, "env." .. k, text, { masked = masked })
       end
     end
+    -- The entry owns its whole env (ADR 0199 §6.2): a row to add a variable.
+    emit_detail(row_parent, "env+", "(e adds KEY=VALUE)")
     emit_detail(row_parent, "origin", eff.origin)
     if meta and type(meta.layers) == "table" then
       emit_detail(row_parent, "layers", table.concat(meta.layers, " → "))
@@ -1041,14 +1044,18 @@ local function _edit_property(row)
   end
   local field, name = row.field, row.parent.name
   local env_key = type(field) == "string" and field:match("^env%.(.+)$") or nil
-  if not (SCALAR_FIELDS[field] or LIST_FIELDS[field] or env_key) then return false end
+  local env_add = field == "env+"
+  if not (SCALAR_FIELDS[field] or LIST_FIELDS[field] or env_key or env_add) then return false end
   local ar = _auto_run()
   if not ar then return true end
   local eff, gerr = ar.store.get(name)
   if not eff then _say(_errtext(gerr), "error"); return true end
 
   local default, prompt
-  if env_key then
+  if env_add then
+    default = ""
+    prompt = name .. " · new env var (KEY=VALUE): "
+  elseif env_key then
     -- Prefill the KEY only: a secret value must never reach the prompt, the
     -- same boundary as the buffer (§8.2). References (${…}, cmd:) are not
     -- secrets and are shown, so they prefill too.
@@ -1066,11 +1073,15 @@ local function _edit_property(row)
   vim.ui.input({ prompt = prompt, default = default }, function(answer)
     if answer == nil then return end   -- cancelled: change nothing
     local patch
-    if env_key then
+    if env_add and answer == "" then return end   -- nothing typed: nothing to add
+    if env_key or env_add then
       local k, v = answer:match("^%s*([%w_%.%-]+)=(.*)$")
-      if not k then return _say("env must be KEY=VALUE (got '" .. answer .. "')", "warn") end
+      -- Never echo the answer: a malformed one can still carry the secret
+      -- ("TOKEN my-secret"), and this message reaches a toast and the log
+      -- ring — the masking boundary (§8.2) covers diagnostics too.
+      if not k then return _say("env must be KEY=VALUE — nothing was changed", "warn") end
       patch = { env = { [k] = v ~= "" and v or vim.NIL } }
-      if k ~= env_key then patch.env[env_key] = vim.NIL end   -- a renamed key
+      if env_key and k ~= env_key then patch.env[env_key] = vim.NIL end   -- a renamed key
     elseif LIST_FIELDS[field] then
       local list = _shell_split(answer)
       patch = { [field] = #list > 0 and list or vim.NIL }
