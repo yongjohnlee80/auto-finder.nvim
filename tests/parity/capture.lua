@@ -236,6 +236,25 @@ local function decorate_buffers()
   vim.cmd("edit " .. ROOT .. "/Makefile")
 end
 
+-- The fork learns a buffer is modified only from BufModifiedSet AFTER its view subscribed, so the edit is
+-- made (flag false -> true) once the view is mounted — the steady state of editing with the pane open.
+local function touch_modified()
+  local buf = vim.fn.bufnr(ROOT .. "/docs/readme.md")
+  vim.bo[buf].modified = false
+  vim.api.nvim_buf_set_lines(buf, 0, 0, false, { "unsaved edit" })
+  settle(function() return vim.bo[buf].modified end, 500)
+end
+
+-- Listed, unnamed, empty buffers left by the harness's own open/close cycles are not part of the look.
+local function wipe_scratch()
+  for _, b in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.bo[b].buflisted and vim.api.nvim_buf_get_name(b) == "" and vim.fn.bufwinid(b) == -1
+        and not vim.bo[b].modified then
+      pcall(vim.api.nvim_buf_delete, b, { force = true })
+    end
+  end
+end
+
 local function scenario_files(name, opts)
   pcall(af.close)
   af.state.user_width = nil
@@ -264,6 +283,7 @@ local function scenario_files(name, opts)
     mark("zeta.txt", "cut_to_clipboard")
     mark("Makefile", "copy_to_clipboard")
   end
+  touch_modified()
   local bufnr = vim.api.nvim_win_get_buf(af.state.panel_winid)
   if opts.git then
     settle(function() return has_git_span(bufnr) end, 5000)
@@ -273,8 +293,11 @@ local function scenario_files(name, opts)
   save(name, dump(bufnr, af.state.panel_winid))
 end
 
-local function scenario_buffers(name)
+local function scenario_buffers(name, width)
+  wipe_scratch()
+  if width then af.resize(width) else af.reset_width() end
   af.focus("buffers")
+  touch_modified()
   local bufnr
   settle(function()
     bufnr = vim.api.nvim_win_get_buf(af.state.panel_winid)
@@ -290,6 +313,7 @@ scenario_files("files-w38-nogit", { git = false })
 scenario_files("files-w38-git-marks", { git = true, marks = true })
 scenario_files("files-w70-git", { git = true, width = 70 })
 scenario_buffers("buffers-w38")
+scenario_buffers("buffers-w70", 70)
 
 local f = assert(io.open(out_dir .. "/manifest.json", "w"))
 f:write(vim.json.encode(manifest))
