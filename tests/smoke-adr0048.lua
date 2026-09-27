@@ -1740,6 +1740,134 @@ print("\n[50] ADR 0199 §6.2 — debug pane entry-point management")
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ── [51] ADR 0199 §6.2 — the tests pane's Test configs section ───────
+-- The tests pane's Config section listed launch.json configs to use as the
+-- base — the header's `b` does that now. What the pane lacked was the test
+-- CONFIG: the kind=test store configs, which one applies to each runtime and
+-- why, and a way to pick, clear and create one. The shared per-kind pick
+-- (ADR 0199 r3 §3.2) lives here as its own row, clearable.
+print("\n[51] ADR 0199 §6.2 — tests pane Test configs section")
+;(function()
+  local tests_view = require("auto-finder.views.tests")
+  local okc, cfgm = pcall(require, "auto-run.adapters.config")
+  ok("p51: this auto-run.nvim has per-runtime test picks", okc and type(cfgm.pick) == "function")
+  if not (okc and type(cfgm.pick) == "function") then return end
+  local store = require("auto-run.store")
+  local exec = require("auto-run.exec")
+  local discovery = require("auto-run.discovery")
+  local worktree = require("auto-core.git.worktree")
+  tests_view._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "-af-m5b"
+  vim.fn.mkdir(repo, "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s",
+    "commit", "-q", "--allow-empty", "-m", "init" }, { text = true }):wait()
+  local f = assert(io.open(repo .. "/go.mod", "w")); f:write("module example.com/m5b\n\ngo 1.21\n"); f:close()
+  local t = repo .. "/calc_test.go"
+  f = assert(io.open(t, "w")); f:write("package m5b\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n"); f:close()
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  discovery._reset_for_tests()
+  exec.clear_pick(nil)
+
+  vim.cmd("topleft 70vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = tests_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  tests_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function find(pred)
+    for _, r in ipairs(tests_view._rows or {}) do if pred(r) then return r end end
+  end
+  local function line_of(r) return r and vim.api.nvim_buf_get_lines(b, r.lnum - 1, r.lnum, false)[1] or "" end
+  local function keys()
+    local k = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do k[m.lhs] = m end
+    return setmetatable(k, { __index = function() return { callback = function() end } end })
+  end
+  local function press(key, row)
+    tests_view.on_focus(w, b)
+    if row then vim.api.nvim_win_set_cursor(w, { row.lnum, 0 }) end
+    keys()[key].callback()
+    tests_view.on_focus(w, b)
+  end
+  local function trow(name)
+    tests_view.on_focus(w, b)
+    return find(function(r) return r.kind == "test-config" and r.name == name end)
+  end
+  local real_input, real_select = vim.ui.input, vim.ui.select
+
+  ok("p51: the launch.json Config section is gone from the tests pane",
+    not text():find("Config (", 1, true), text())
+  local hdr = find(function(r) return r.kind == "test-configs-header" end)
+  ok("p51: a Test configs section is present, and states that there are none",
+    hdr ~= nil and line_of(hdr):find("Test configs (0)", 1, true) ~= nil
+      and text():find("no test configs", 1, true) ~= nil, text())
+
+  discovery.parse_file(t, require("auto-run.adapters").get("go"))
+  store.add({ name = "tc-unit", kind = "test", runtime = "go" }, { tier = "tracked" })
+  store.add({ name = "tc-int", kind = "test", runtime = "go" }, { tier = "tracked" })
+  store.add({ name = "tc-any", kind = "test" }, { tier = "tracked" })
+  store.add({ name = "tc-run", kind = "run", runtime = "go", program = "sh" }, { tier = "tracked" })
+  tests_view.on_focus(w, b)
+  local first = cfgm.test_config_name("go")
+  local other = first == "tc-unit" and "tc-int" or "tc-unit"
+  ok("p51: the section lists the kind=test configs only",
+    trow("tc-unit") and trow("tc-int") and trow("tc-any") and not trow("tc-run"), text())
+  ok("p51: the config that applies is marked, with the resolver's reason",
+    line_of(trow(first)):find("applies to go (first)", 1, true) ~= nil
+      and not line_of(trow(other)):find("applies to", 1, true), line_of(trow(first)) .. " | " .. line_of(trow(other)))
+  ok("p51: a generic config says it serves any runtime",
+    line_of(trow("tc-any")):find("any runtime", 1, true) ~= nil, line_of(trow("tc-any")))
+
+  press("s", trow(other))
+  local n1, s1 = cfgm.test_config_name("go")
+  ok("p51: s on a config picks it for its runtime", n1 == other and s1 == "picked", tostring(n1) .. " " .. tostring(s1))
+  ok("p51: …and the mark moves", line_of(trow(other)):find("applies to go (picked)", 1, true) ~= nil, line_of(trow(other)))
+  press("s", trow(other))
+  local n2, s2 = cfgm.test_config_name("go")
+  ok("p51: s on the runtime's own pick clears it", n2 == first and s2 == "first", tostring(n2) .. " " .. tostring(s2))
+
+  press("s", trow("tc-any"))
+  local n3, s3 = cfgm.test_config_name("go")
+  ok("p51: s on a generic config picks it for the one discovered runtime", n3 == "tc-any" and s3 == "picked",
+    tostring(n3) .. " " .. tostring(s3))
+  cfgm.pick("go", nil)
+
+  exec.remember_pick("test", other)
+  tests_view.on_focus(w, b)
+  local sp = find(function(r) return r.kind == "test-shared-pick" end)
+  ok("p51: the shared per-kind pick has its own row", sp ~= nil and line_of(sp):find(other, 1, true) ~= nil, text())
+  press("s", sp)
+  ok("p51: s on the shared-pick row clears it",
+    (exec.picks() or {}).test == nil and cfgm.test_config_name("go") == first, vim.inspect(exec.picks()))
+  ok("p51: …and the row goes", find(function(r) return r.kind == "test-shared-pick" end) == nil, text())
+
+  -- `a` in the section creates a test config through auto-run's scaffold API.
+  vim.ui.select = function(items, _, cb)
+    for i, it in ipairs(items) do if tostring(it) == "go" then return cb(it, i) end end
+    cb(nil, nil)
+  end
+  vim.ui.input = function(_, cb) cb("tc-new") end
+  press("a", find(function(r) return r.kind == "test-configs-header" end))
+  local nw = store.get("tc-new")
+  ok("p51: a on the section creates a test config for the chosen runtime",
+    nw and nw.kind == "test" and nw.runtime == "go", vim.inspect(nw))
+  vim.ui.input, vim.ui.select = real_input, real_select
+
+  for _, n in ipairs({ "tc-unit", "tc-int", "tc-any", "tc-run", "tc-new" }) do pcall(store.remove, n) end
+  exec.clear_pick(nil)
+  tests_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  discovery._reset_for_tests()
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
