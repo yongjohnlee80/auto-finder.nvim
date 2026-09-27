@@ -6,13 +6,12 @@
 ---  Entry Points   auto-run store configs (`kind = debug | run`),
 ---                 grouped by kind, provenance/tier annotated
 ---                 (merge layers + origin from `store.list()`).
----  Config         the `kind=debug` VSCode launch.json configs
----                 auto-run parses, with a `*` marker on the per-repo
----                 selected config. Selecting one makes it the active
----                 base merged into every subsequent launch. Shared
----                 renderer in `views/_config_section.lua` (tests view
----                 shows `kind=test`). `o` expands resolved fields
----                 with env VALUES masked (§8.2).
+---                 `o` fans an entry out into property rows; `e` on
+---                 a property edits it in place (ADR 0199 §6.2), env
+---                 VALUES masked (§8.2). `a` adds one, `E` exports it
+---                 to launch.json, `I` imports from launch.json. The
+---                 launch.json base is chosen in the header (`b`) —
+---                 the old Config section duplicated it and is gone.
 ---  Env            candidate env files (§8.4, r5) with a `*` marker
 ---                 on the per-repo selection; rows dim when the
 ---                 file is missing. Shared renderer/actions in
@@ -81,7 +80,6 @@ local FILETYPE = "auto-finder"
 
 local HL = {
   header_entries     = "AutoFinderDebugHeaderEntries",
-  header_config      = "AutoFinderDebugHeaderConfig",
   header_env         = "AutoFinderDebugHeaderEnv",
   header_sessions    = "AutoFinderDebugHeaderSessions",
   header_breakpoints = "AutoFinderDebugHeaderBreakpoints",
@@ -110,7 +108,6 @@ local function _apply_default_highlights()
     vim.api.nvim_set_hl(0, name, { default = true, link = link })
   end
   set(HL.header_entries,     "Title")
-  set(HL.header_config,      "Type")
   set(HL.header_env,         "Type")
   set(HL.header_sessions,    "Statement")
   set(HL.header_breakpoints, "DiagnosticWarn")
@@ -147,12 +144,11 @@ end
 -- feeds the launches the entries above it start.
 local BUCKETS = {
   entries     = { header = "Entry Points",    hl_header = HL.header_entries     },
-  config      = { header = "Config",          hl_header = HL.header_config      },
   env         = { header = "Env",             hl_header = HL.header_env         },
   sessions    = { header = "Active Sessions", hl_header = HL.header_sessions    },
   breakpoints = { header = "Breakpoints",     hl_header = HL.header_breakpoints },
 }
-local BUCKET_ORDER = { "entries", "config", "env", "sessions", "breakpoints" }
+local BUCKET_ORDER = { "entries", "env", "sessions", "breakpoints" }
 
 -- ─── module state ─────────────────────────────────────────────
 
@@ -162,8 +158,6 @@ M._bufnr = nil
 --   { kind="bucket-header",  lnum, section }
 --   { kind="kind-header",    lnum, cfg_kind }
 --   { kind="entry",          lnum, name, cfg }
---   { kind="config",         lnum, name, runtime, selected }
---   { kind="config-detail",  lnum, name }   -- expanded field child
 --   { kind="env-file",       lnum, path, source, exists, selected, synthetic? }
 --   { kind="env-var",        lnum, path, key, file_lnum }
 --   { kind="env-error",      lnum, path, file_lnum }
@@ -207,7 +201,6 @@ local env_section = require("auto-finder.views._env_section")
 
 -- Shared Config-section renderer/actions (launch-config selection) —
 -- this view passes kind="debug"; the tests view kind="test".
-local config_section = require("auto-finder.views._config_section")
 
 ---Confirm wrapper — module-level so tests can stub bulk-destructive
 ---confirmation without monkey-patching vim.fn.
@@ -594,6 +587,13 @@ local function _render(bufnr)
     if type(eff.build_flags) == "string" and eff.build_flags ~= "" then
       emit_detail(row_parent, "build_flags", eff.build_flags)
     end
+    -- Cargo identity (ADR 0194 §2.3.4): shown for rust entries even when
+    -- unset, so `e` can pin a package or target in place.
+    if eff.runtime == "rust" then
+      emit_detail(row_parent, "cargo_package", eff.cargo_package)
+      emit_detail(row_parent, "cargo_target", eff.cargo_target)
+      emit_detail(row_parent, "cargo_target_kind", eff.cargo_target_kind)
+    end
     if type(eff.env_files) == "table" and #eff.env_files > 0 then
       emit_detail(row_parent, "env_files", table.concat(eff.env_files, ", "))
     end
@@ -658,23 +658,6 @@ local function _render(bufnr)
           end
         end
       end
-    end
-  end
-
-  -- ── Config (launch-config selection) — above Env ────────────
-  do
-    local cfg_list, cfg_reason = config_section.collect("debug")
-    emit_bucket_header("config", cfg_list and #cfg_list or 0)
-    if not M._collapsed.config then
-      config_section.emit({
-        list     = cfg_list,
-        reason   = cfg_reason,
-        kind     = "debug",
-        lines    = lines,
-        mark     = mark,
-        rows     = rows,
-        expanded = M._expanded,
-      })
     end
   end
 
@@ -869,9 +852,6 @@ local function _open(row)
     return
   end
 
-  -- Config rows: open launch.json at the entry.
-  if config_section.open(row, _open_file) then return end
-
   -- Env rows: file opens the file, var/error opens at its line
   -- (editor-routed — §8.4 r5).
   if env_section.open(row, _open_file) then return end
@@ -915,10 +895,6 @@ local function _toggle_expand(row)
   if not row then return end
   if row.kind == "bucket-header" then
     _toggle_collapsed(row.section)
-    _rerender()
-    return
-  end
-  if config_section.toggle_expand(row, M._expanded) then
     _rerender()
     return
   end
@@ -991,12 +967,189 @@ local function _debug_entry(row)
   end
 end
 
+-- ─── in-place editing, adding, importing (ADR 0199 §6.2) ────────
+
+---A user-visible result of an explicit action: a toast, and a ring entry.
+local function _say(msg, level)
+  log().notify(msg, { component = "view.debug", level = level or "info", notify = true })
+end
+
+---auto-run's setters return `{ code, message }` tables or strings.
+local function _errtext(err)
+  if type(err) == "table" then return tostring(err.message or err.code or vim.inspect(err)) end
+  return tostring(err)
+end
+
+-- Fields `e` edits in place, by shape. Anything else (kind, origin, layers,
+-- file) keeps the old `e`: open the config's file.
+local SCALAR_FIELDS = {
+  program = true, cwd = true, build_flags = true, runtime = true,
+  cargo_package = true, cargo_target = true, cargo_target_kind = true,
+}
+local LIST_FIELDS = { args = true, env_files = true }
+
+---Split one line the way a POSIX shell splits words: whitespace separates,
+---'…' is literal, "…" and a bare backslash escape the next character.
+---@param line string
+---@return string[]
+local function _shell_split(line)
+  local out, cur, i, n, have = {}, {}, 1, #line, false
+  local quote
+  while i <= n do
+    local ch = line:sub(i, i)
+    if quote == "'" then
+      if ch == "'" then quote = nil else cur[#cur + 1] = ch end
+    elseif quote == '"' then
+      if ch == '"' then quote = nil
+      elseif ch == "\\" and i < n then i = i + 1; cur[#cur + 1] = line:sub(i, i)
+      else cur[#cur + 1] = ch end
+    elseif ch == "'" or ch == '"' then quote = ch; have = true
+    elseif ch == "\\" and i < n then i = i + 1; cur[#cur + 1] = line:sub(i, i); have = true
+    elseif ch:match("%s") then
+      if have or #cur > 0 then out[#out + 1] = table.concat(cur); cur, have = {}, false end
+    else cur[#cur + 1] = ch; have = true end
+    i = i + 1
+  end
+  if have or #cur > 0 then out[#out + 1] = table.concat(cur) end
+  return out
+end
+
+---Inverse of `_shell_split` for a prefill: quote only what needs it.
+---@param list string[]
+---@return string
+local function _shell_join(list)
+  local parts = {}
+  for _, a in ipairs(list or {}) do
+    a = tostring(a)
+    if a ~= "" and a:match("^[%w%._/:=@%%+,%-${}]+$") then
+      parts[#parts + 1] = a
+    else
+      parts[#parts + 1] = "'" .. a:gsub("'", [['\'']]) .. "'"
+    end
+  end
+  return table.concat(parts, " ")
+end
+
+---`e` on a property row: edit that property in place through `store.update`.
+---Returns false when the row is not an editable property (the caller then
+---opens the config file, as `e` always did).
+---@param row table?
+---@return boolean handled
+local function _edit_property(row)
+  if not (row and row.kind == "detail" and row.parent and row.parent.kind == "entry") then
+    return false
+  end
+  local field, name = row.field, row.parent.name
+  local env_key = type(field) == "string" and field:match("^env%.(.+)$") or nil
+  if not (SCALAR_FIELDS[field] or LIST_FIELDS[field] or env_key) then return false end
+  local ar = _auto_run()
+  if not ar then return true end
+  local eff, gerr = ar.store.get(name)
+  if not eff then _say(_errtext(gerr), "error"); return true end
+
+  local default, prompt
+  if env_key then
+    -- Prefill the KEY only: a secret value must never reach the prompt, the
+    -- same boundary as the buffer (§8.2). References (${…}, cmd:) are not
+    -- secrets and are shown, so they prefill too.
+    local text, masked = _masked_env_value((eff.env or {})[env_key])
+    default = env_key .. "=" .. (masked and "" or text)
+    prompt = name .. " · env (KEY=VALUE; empty VALUE removes it): "
+  elseif LIST_FIELDS[field] then
+    default = _shell_join(eff[field])
+    prompt = name .. " · " .. field .. " (shell words; empty clears): "
+  else
+    default = eff[field] ~= nil and tostring(eff[field]) or ""
+    prompt = name .. " · " .. field .. " (empty clears): "
+  end
+
+  vim.ui.input({ prompt = prompt, default = default }, function(answer)
+    if answer == nil then return end   -- cancelled: change nothing
+    local patch
+    if env_key then
+      local k, v = answer:match("^%s*([%w_%.%-]+)=(.*)$")
+      if not k then return _say("env must be KEY=VALUE (got '" .. answer .. "')", "warn") end
+      patch = { env = { [k] = v ~= "" and v or vim.NIL } }
+      if k ~= env_key then patch.env[env_key] = vim.NIL end   -- a renamed key
+    elseif LIST_FIELDS[field] then
+      local list = _shell_split(answer)
+      patch = { [field] = #list > 0 and list or vim.NIL }
+    else
+      patch = { [field] = answer ~= "" and answer or vim.NIL }
+    end
+    local res, uerr = ar.store.update(name, patch)
+    if not res then
+      local msg = _errtext(uerr)
+      if msg:find("launch.json shim", 1, true) then msg = msg .. " — press I to import it" end
+      _say(msg, "error")
+    end
+  end)
+  return true
+end
+
+---`a` off the Env rows: add an entry point — kind, runtime, name — through
+---auto-run's one scaffold API, then fan it out so its properties are ready
+---for `e`.
+local function _add_entry()
+  local okr, reg = pcall(require, "auto-run.adapters")
+  if not okr or type(reg.scaffold) ~= "function" then
+    return _say("this auto-run.nvim cannot scaffold configs — update it", "warn")
+  end
+  vim.ui.select({ "debug", "run" }, { prompt = "New entry point — kind" }, function(kind)
+    if not kind then return end
+    local rts = reg.scaffold_runtimes()
+    vim.ui.select(rts, { prompt = "New " .. kind .. " entry point — runtime" }, function(rt)
+      if not rt then return end
+      vim.ui.input({ prompt = "Name: " }, function(name)
+        if not name or name == "" then return end
+        local path, err = reg.scaffold(kind, name, rt)
+        if not path then return _say(_errtext(err), "error") end
+        M._expanded["entry:" .. name] = true
+        _say("created " .. kind .. " entry point '" .. name .. "' (" .. rt .. ") — e on a property edits it")
+      end)
+    end)
+  end)
+end
+
+---`I`: import launch.json entries into the store (one, or all). Conflicts
+---are skipped, never overwritten, and reported.
+local function _import()
+  local oki, import = pcall(require, "auto-run.import")
+  if not oki or type(import.import) ~= "function" or type(import.entries) ~= "function" then
+    return _say("this auto-run.nvim cannot import launch.json", "warn")
+  end
+  local entries, eerr = import.entries()
+  if not entries then return _say(_errtext(eerr), "warn") end
+  if #entries == 0 then return _say("launch.json has no configurations") end
+  local items, labels = { false }, { "(all " .. #entries .. ")" }
+  for _, e in ipairs(entries) do
+    items[#items + 1] = e.name
+    labels[#labels + 1] = tostring(e.name) .. "  [" .. tostring(e.kind or "?") .. "]"
+  end
+  vim.ui.select(labels, { prompt = "Import from launch.json" }, function(_, idx)
+    if not idx then return end
+    local summary, err = import.import(items[idx] or nil)
+    if not summary then return _say(_errtext(err), "error") end
+    local parts = { "imported " .. #summary.imported
+      .. (#summary.imported > 0 and (": " .. table.concat(summary.imported, ", ")) or "") }
+    if #summary.skipped > 0 then
+      parts[#parts + 1] = "skipped " .. #summary.skipped .. " already in the store: "
+        .. table.concat(summary.skipped, ", ")
+    end
+    if #summary.errors > 0 then
+      parts[#parts + 1] = "errors: " .. table.concat(summary.errors, "; ")
+    end
+    _say(table.concat(parts, " · "), #summary.errors > 0 and "warn" or "info")
+  end)
+end
+
 ---`e`: edit the entry point's config file (editor-routed); on an
 ---env-var row, edit that value in place (§8.4 r5).
 ---@param row table?
 local function _edit_config(row)
   if not row then return end
   if env_section.edit_var(row) then return end
+  if _edit_property(row) then return end
   local name = row.kind == "entry" and row.name
     or (row.kind == "detail" and row.parent and row.parent.kind == "entry"
         and row.parent.name)
@@ -1020,7 +1173,7 @@ end
 local function _export_config(row)
   if not (row and row.kind == "entry") then
     log().info("view.debug",
-      "`a` exports an Entry Point to launch.json — put the cursor on a config")
+      "`E` exports an Entry Point to launch.json — put the cursor on a config")
     return
   end
   local ok_i, import = pcall(require, "auto-run.import")
@@ -1038,6 +1191,7 @@ local function _export_config(row)
   log().info("view.debug", "exported '" .. row.name .. "' → " .. path)
   _open_file(path)
 end
+
 
 ---`x`: terminate the session under the cursor.
 ---@param row table?
@@ -1178,7 +1332,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("d", function() _debug_entry(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: debug the entry point under cursor (dap)")
   set("e", function() _edit_config(_row_under_cursor(panel_winid)) end,
-    "auto-finder.debug: edit the entry point's config file; on an env var, edit its value")
+    "auto-finder.debug: on a property row: edit it in place (env values masked); on an entry: open its config file; on an env var: edit its value")
   set("a", function()
     local row = _row_under_cursor(panel_winid)
     if row and (row.kind == "env-file"
@@ -1186,21 +1340,24 @@ local function _apply_keymaps(bufnr, panel_winid)
       env_section.add(row.kind == "env-file" and row or nil)
       return
     end
-    _export_config(row)
+    _add_entry()
   end,
-    "auto-finder.debug: env row/header → add KEY=VALUE; entry → export config to launch.json (new: $WORKSPACE/.config)")
+    "auto-finder.debug: env row/header → add KEY=VALUE; elsewhere → add an entry point (kind, runtime, name)")
+  set("E", function() _export_config(_row_under_cursor(panel_winid)) end,
+    "auto-finder.debug: export the entry point under cursor to launch.json (new: <worktree>/.config)")
+  set("I", function() _import() end,
+    "auto-finder.debug: import launch.json configurations into the store (one, or all; conflicts skipped)")
   set("s", function()
       local row = _row_under_cursor(panel_winid)
-      -- On a Config or Env row: select THAT row, as before. Anywhere else —
+      -- On an Env row: select THAT row, as before. Anywhere else —
       -- including the header's Env row — open the env chooser, so the key
       -- works from wherever the cursor is (ADR 0199 §5.2).
       if row and row.kind ~= "state-env" then
-        if config_section.select(row) then return end
         if env_section.select(row) then return end
       end
       require("auto-finder.views._state_header").choose_env()
     end,
-    "auto-finder.debug: select the env file (on a Config/Env row: that row; elsewhere: choose from a list)")
+    "auto-finder.debug: select the env file (on an Env row: that row; elsewhere: choose from a list)")
   set("w", function() require("auto-finder.views._state_header").choose_worktree() end,
     "auto-finder.debug: choose the Active worktree (auto-core's — every plugin follows it; the cwd stays)")
   set("b", function() require("auto-finder.views._state_header").choose_base() end,
