@@ -1572,6 +1572,170 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
   vim.fn.delete(repo2, "rf")
 end)()
 
+-- ── [50] ADR 0199 §6.2 — manage entry points from the debug pane ──────
+-- One store-backed Entry Points list, edited in place: `e` on a property
+-- row edits it (env values stay masked), `a` adds an entry point through
+-- auto-run's one scaffold API, `E` exports to launch.json (it was `a`), `I`
+-- imports from launch.json. The launch.json Config section is gone: the
+-- header's `b` chooses the base it duplicated.
+print("\n[50] ADR 0199 §6.2 — debug pane entry-point management")
+;(function()
+  local debug_view = require("auto-finder.views.debug")
+  local okr = pcall(require, "auto-run.adapters")
+  local reg = okr and require("auto-run.adapters") or {}
+  ok("p50: this auto-run.nvim has adapters.scaffold", type(reg.scaffold) == "function")
+  if type(reg.scaffold) ~= "function" then return end
+  local store = require("auto-run.store")
+  local import = require("auto-run.import")
+  local worktree = require("auto-core.git.worktree")
+  debug_view._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "-af-m5"
+  vim.fn.mkdir(repo .. "/.vscode", "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s",
+    "commit", "-q", "--allow-empty", "-m", "init" }, { text = true }):wait()
+  local f = assert(io.open(repo .. "/.vscode/launch.json", "w"))
+  f:write(vim.json.encode({ version = "0.2.0", configurations = {
+    { name = "LJ One", type = "go", request = "launch", mode = "debug", program = "${workspaceFolder}/cmd/one" } } }))
+  f:close()
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  local pa, ea = store.add({ name = "m5-api", kind = "run", runtime = "go", program = "sh",
+    args = { "-c", "true" }, env = { SECRET_TOKEN = "hunter2" } })
+  ok("p50: fixture entry point", pa ~= nil, tostring(ea))
+
+  vim.cmd("topleft 70vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function find(pred)
+    for _, r in ipairs(debug_view._rows or {}) do if pred(r) then return r end end
+  end
+  local function keys()
+    local t = {}
+    for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do t[k.lhs] = k end
+    return setmetatable(t, { __index = function() return { callback = function() end } end })
+  end
+  local function settle() vim.wait(300, function() return false end) end
+  local real_input, real_select = vim.ui.input, vim.ui.select
+  local logm = require("auto-finder.log")
+  local real_notify, said = logm.notify, {}
+  logm.notify = function(msg) said[#said + 1] = tostring(msg) end
+  local real_warn = logm.warn
+  logm.warn = function(_, msg) said[#said + 1] = tostring(msg) end
+
+  ok("p50: the launch.json Config section is gone (the header's b chooses the base)",
+    not text():find("Config (", 1, true) and find(function(r) return r.kind == "state-base" end) ~= nil,
+    text())
+
+  -- `o` fans out, `e` edits a property in place.
+  local k = keys()
+  local entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
+  vim.api.nvim_win_set_cursor(w, { entry.lnum, 0 })
+  k.o.callback()
+  debug_view.on_focus(w, b)
+  local function detail(field)
+    return find(function(r) return r.kind == "detail" and r.field == field
+      and r.parent and r.parent.name == "m5-api" end)
+  end
+  ok("p50: o fans the entry point out into property rows",
+    detail("program") ~= nil and detail("args") ~= nil and detail("env.SECRET_TOKEN") ~= nil, text())
+
+  local prompts = {}
+  local function stub_input(answer)
+    vim.ui.input = function(opts, cb) prompts[#prompts + 1] = opts; cb(answer) end
+  end
+  local function edit(field, answer)
+    debug_view.on_focus(w, b)
+    local r = detail(field)
+    if not r then return false end
+    vim.api.nvim_win_set_cursor(w, { r.lnum, 0 })
+    prompts = {}
+    stub_input(answer)
+    keys().e.callback()
+    return true
+  end
+
+  edit("program", "bash")
+  ok("p50: e on program edits it in place, prefilled with the current value",
+    store.get("m5-api").program == "bash" and prompts[1] and prompts[1].default == "sh",
+    vim.inspect(prompts) .. vim.inspect(store.get("m5-api").program))
+  edit("args", [[-c "echo hi"]])
+  ok("p50: e on args edits the list as one shell-split line",
+    vim.deep_equal(store.get("m5-api").args, { "-c", "echo hi" }), vim.inspect(store.get("m5-api").args))
+  edit("env.SECRET_TOKEN", "SECRET_TOKEN=rotated")
+  ok("p50: e on an env row never shows the value — the prompt is prefilled with KEY= only",
+    prompts[1] and prompts[1].default == "SECRET_TOKEN=", vim.inspect(prompts))
+  ok("p50: …and writes KEY=VALUE through the store", store.get("m5-api").env.SECRET_TOKEN == "rotated",
+    vim.inspect(store.get("m5-api").env))
+  settle()
+  ok("p50: …and the value never reaches the buffer",
+    not text():find("rotated", 1, true) and not text():find("hunter2", 1, true), text())
+  edit("cwd", "")
+  ok("p50: an empty answer clears the field", store.get("m5-api").cwd == nil, vim.inspect(store.get("m5-api").cwd))
+  said = {}
+  edit("program", nil)
+  ok("p50: a cancelled prompt changes nothing", store.get("m5-api").program == "bash")
+
+  -- `a` adds an entry point through auto-run's scaffold API.
+  debug_view.on_focus(w, b)
+  entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
+  vim.api.nvim_win_set_cursor(w, { entry.lnum, 0 })
+  local asked = {}
+  vim.ui.select = function(items, opts, cb)
+    asked[#asked + 1] = { prompt = opts and opts.prompt, items = items }
+    local want = #asked == 1 and "debug" or "go"
+    for i, it in ipairs(items) do if tostring(it) == want then return cb(it, i) end end
+    cb(nil, nil)
+  end
+  stub_input("m5-new")
+  keys().a.callback()
+  local new = store.get("m5-new")
+  ok("p50: a asks kind, runtime and name, then scaffolds through auto-run",
+    new and new.kind == "debug" and new.runtime == "go" and #asked == 2, vim.inspect(asked) .. vim.inspect(new))
+  settle()
+  ok("p50: …and the new entry point appears", find(function(r) return r.kind == "entry" and r.name == "m5-new" end) ~= nil,
+    text())
+
+  -- `E` exports (moved from `a`).
+  local exported
+  local real_export = import.export
+  import.export = function(name) exported = name; return repo .. "/.vscode/launch.json", nil end
+  debug_view.on_focus(w, b)
+  entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
+  vim.api.nvim_win_set_cursor(w, { entry.lnum, 0 })
+  keys().E.callback()
+  import.export = real_export
+  ok("p50: E exports the entry point under the cursor to launch.json", exported == "m5-api", tostring(exported))
+
+  -- `I` imports from launch.json.
+  said = {}
+  vim.ui.select = function(items, _, cb)
+    for i, it in ipairs(items) do if tostring(it):find("LJ One", 1, true) then return cb(it, i) end end
+    cb(nil, nil)
+  end
+  keys().I.callback()
+  local lj = store.get("LJ One")
+  ok("p50: I imports the chosen launch.json entry into the store",
+    lj and lj.origin == "launch.json" and store.config_file("LJ One") ~= nil,
+    vim.inspect(lj) .. " file=" .. tostring(store.config_file("LJ One")))
+  ok("p50: …and says what it did", #said >= 1 and said[#said]:find("imported", 1, true) ~= nil, vim.inspect(said))
+
+  vim.ui.input, vim.ui.select = real_input, real_select
+  logm.notify, logm.warn = real_notify, real_warn
+  for _, n in ipairs({ "m5-api", "m5-new", "LJ One" }) do pcall(store.remove, n) end
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
