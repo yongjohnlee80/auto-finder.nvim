@@ -144,7 +144,13 @@ function M.select(row)
   if row.kind == "test-shared-pick" then
     -- auto-run announces the change (run.config:changed), which re-renders
     -- the panes; nothing is published from here on auto-run's behalf.
-    d.exec.clear_pick("test")
+    -- Check the persisted outcome: a failed write leaves the pick in place,
+    -- and saying "cleared" then would misstate the state (Lector M5b).
+    local ok, err = d.exec.clear_pick("test")
+    if ok == nil and err ~= nil then
+      say("could not clear the shared test pick: " .. errtext(err), "error")
+      return true
+    end
     say("cleared the shared test pick '" .. tostring(row.name) .. "'")
     return true
   end
