@@ -1,0 +1,15 @@
+{
+ "nvim": "0.12.5+v0.12.5",
+ "captured_from": "901e598",
+ "mini.icons": "f642e3ba8c12afbc8f32f6d77ef6597eac56786f",
+ "catppuccin": "edefef779ab08ce1a4a404713e3012b0d202bd35",
+ "scenarios": [
+  "files-w38-git",
+  "files-w38-nogit",
+  "files-w38-git-marks",
+  "files-w70-git",
+  "buffers-w38",
+  "buffers-w70"
+ ],
+ "auto-core": "021b022 (preserve/git-read-wip \u2014 the only commit defining git.repo.discover/discover_async, ADR-0200 rationale \u00a7R7)"
+}
