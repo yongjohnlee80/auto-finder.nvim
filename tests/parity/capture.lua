@@ -221,10 +221,28 @@ do
   manifest.nvim = tostring(vim.version())
 end
 
+-- Canonical JSON (sorted keys, one span per line): vim.json.encode's key order varies run to run, and a
+-- provenance re-run must be comparable with cmp, and a golden change reviewable as a diff.
+local function canon(v, indent)
+  indent = indent or ""
+  if type(v) ~= "table" then return vim.json.encode(v) end
+  if vim.islist(v) then
+    if #v == 0 then return "[]" end
+    local parts = {}
+    for _, x in ipairs(v) do parts[#parts + 1] = indent .. "  " .. canon(x, indent .. "  ") end
+    return "[\n" .. table.concat(parts, ",\n") .. "\n" .. indent .. "]"
+  end
+  local keys = vim.tbl_keys(v)
+  table.sort(keys)
+  local parts = {}
+  for _, k in ipairs(keys) do parts[#parts + 1] = vim.json.encode(k) .. ":" .. canon(v[k], indent) end
+  return "{" .. table.concat(parts, ",") .. "}"
+end
+
 local function save(name, data)
   local path = out_dir .. "/" .. name .. ".json"
   local f = assert(io.open(path, "w"))
-  f:write(vim.json.encode(data))
+  f:write(canon(data) .. "\n")
   f:close()
   manifest.scenarios[#manifest.scenarios + 1] = name
   print(string.format("  captured %-24s lines=%d spans=%d width=%s",
@@ -324,7 +342,7 @@ scenario_buffers("buffers-w38")
 scenario_buffers("buffers-w70", 70)
 
 local f = assert(io.open(out_dir .. "/manifest.json", "w"))
-f:write(vim.json.encode(manifest))
+f:write(canon(manifest) .. "\n")
 f:close()
 print(string.format("\n%d passed, 0 failed", #manifest.scenarios))
 vim.fn.delete(SANDBOX, "rf")
