@@ -356,9 +356,26 @@ scenario_buffers("buffers-w70", 70)
 -- The marks slot has its own renderer; captured for the WINDOW look the fork applies to it (and to every
 -- other filetype=auto-finder view), which must survive the fork's deletion.
 if wanted("marks-w38") then
+  if not (af.state.panel_winid and vim.api.nvim_win_is_valid(af.state.panel_winid)) then
+    local ok_setup, err = pcall(af.setup, {
+      width = { default = 38, min = 25, max = 100 },
+      default_section = 1,
+      sections = { "config", "files", "buffers", "marks" },
+      neo_tree = consumer_neo_tree(false),
+    })
+    if not ok_setup then die("setup: " .. tostring(err)) end
+    af.open(true)
+  end
   af.reset_width()
-  vim.cmd("edit " .. ROOT .. "/src/main.lua")
-  vim.cmd("normal! ma")
+  local editor
+  for _, w in ipairs(vim.api.nvim_list_wins()) do
+    if w ~= af.state.panel_winid and vim.api.nvim_win_get_config(w).relative == "" then editor = w; break end
+  end
+  if not editor then die("marks-w38: no editor window") end
+  vim.api.nvim_win_call(editor, function()
+    vim.cmd("edit " .. ROOT .. "/src/main.lua")
+    vim.cmd("normal! ma")
+  end)
   af.focus("marks")
   local bufnr
   settle(function()
