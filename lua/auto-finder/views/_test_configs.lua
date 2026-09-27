@@ -151,7 +151,11 @@ function M.select(row)
 
   local function toggle(rt)
     local current, source = d.cfg.test_config_name(rt)
-    local target = (current == row.name and source == "picked") and nil or row.name
+    -- Explicit if/else, NOT `(cond) and nil or row.name`: with nil as the
+    -- "true" branch Lua's and/or falls through to row.name, so the clear
+    -- never happened (caught by [51]).
+    local target = row.name
+    if current == row.name and source == "picked" then target = nil end
     local ok, err = d.cfg.pick(rt, target)
     if not ok then return say(errtext(err), "error") end
     if target == nil then say("cleared the " .. rt .. " test pick") end
