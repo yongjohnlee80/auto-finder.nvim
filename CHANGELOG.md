@@ -2,6 +2,29 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.1] — 2026-09-27 — the tests and debug panes say what will run, and manage it (ADR 0199)
+
+Patch. Needs **auto-run v0.1.15** (older auto-run: a one-line notice, the rest of
+the pane renders) and, for the Active-worktree selector to list a bare repo
+cloned in place, auto-core **v0.2.31**. Reviewed by Lector (ADR 0199 M3–M6).
+
+- **State header** at the top of both panes, never collapsible: Active worktree
+  (`w` — sets auto-core's active worktree, never the cwd), Env (`s`), Base
+  (`b`), and in the tests pane the Test config per runtime with why (`c`).
+  Every row states its value or its absence; values come from
+  `auto-run.context`, so the header cannot disagree with what runs. Both panes
+  re-render on `core.active_worktree:changed`.
+- **Tests pane — Test configs section** replaces the launch.json Config section:
+  the `kind=test` configs, a `*` on the one each runtime resolves to, `s` to pick
+  or clear, the shared per-kind pick as its own clearable row, `a` to create one.
+- **Debug pane — entry points edited in place**: `o` fans one out into property
+  rows (unset fields included), `e` edits a row, `a` adds an entry point
+  (auto-run's `adapters.scaffold`), `E` exports to `launch.json` (it was `a`),
+  `I` imports. Env values stay masked in the buffer, the prompt and every
+  diagnostic. The launch.json Config section is gone — the header's `b` chooses
+  the base it duplicated.
+- `views/_config_section.lua` is removed (no remaining user).
+
 ## [v0.5.0] — 2026-09-27 — the files and buffers slots without the neo-tree fork (ADR-0200)
 
 **Minor, breaking.** Move your caret to `^0.5.0`. Needs auto-core **v0.2.30**

@@ -33,7 +33,7 @@ Last verified: **2026-08-23**, `tests/run-all.sh` → **OK**, 9 suites,
 
 | suite | file | assertions | defends | status |
 |---|---|---:|---|---|
-| smoke | `smoke.lua` | 672 | the whole panel/section/view/state surface — setup, width/pin, winfixbuf, section switching, store+namespace migration, buffers/repos/marks slots, live-refresh wiring, log wrapper, follow-mode, ADR-0026 core refactor (phases 1-9), views.todos + automation panel rendering, ADR-0040 restore/async-git, ADR-0059 files:changed classification, views._config_section, dbase facade (the renderer itself moved to autodb — ADR-0078) | live |
+| smoke | `smoke.lua` | 672 | the whole panel/section/view/state surface — setup, width/pin, winfixbuf, section switching, store+namespace migration, buffers/repos/marks slots, live-refresh wiring, log wrapper, follow-mode, ADR-0026 core refactor (phases 1-9), views.todos + automation panel rendering, ADR-0040 restore/async-git, ADR-0059 files:changed classification, dbase facade (the renderer itself moved to autodb — ADR-0078) | live |
 | smoke_automation | `smoke-automation.lua` | 36 | ADR-0035 [41] automation diagnostics (malformed-cron/execute diagnostics, lifecycle guards, bash-disabled indicator) + [42] `s`-modal scaffold on `automated` promotion | live (isolated, natural headless geometry — see below) |
 | smoke_adr0044 | `smoke-adr0044.lua` | 6 | ADR-0044 [45] `worktree:switched` re-anchors the panel tree to the new cwd WITHOUT displacing a non-panel editor split | live (isolated) |
 | adr0048 | `smoke-adr0048.lua` | 146 | ADR-0048 Phase 3 [46] views.tests (auto-run discovery consumer), [47] views.debug (entry points/sessions/breakpoints + secret masking), [48] r5 Env section | live (isolated — canonical home for [46]/[47]) |
@@ -68,8 +68,10 @@ and non-monotonic in source order; they are labels, not an ordering.)
   dbase writes; async git runner + marks read-cache.
 - `[50 ADR-0059]` — files:changed does only the work the event
   requires (classification: kind+visibility → skip/redraw/scan).
-- `[48]` — views._config_section: launch-config kind filter, select,
-  masked expand (env secret never reaches the buffer).
+- `[48]` — RETIRED with `views._config_section` (ADR 0199 M5): the base is
+  chosen by the state header's `b`. Coverage now lives in smoke-adr0048
+  `[49]`–`[51]` (header, debug entry points incl. the env masking boundary,
+  Test configs).
 - `[49]` — RETIRED by ADR-0078: the renderer moved to
   `autodb.views.drawer`, and its coverage moved with it to autodb's own
   suite (§[18]). What stays here is the FACADE — the placeholder path

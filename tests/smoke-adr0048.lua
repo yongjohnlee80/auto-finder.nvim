@@ -1170,6 +1170,792 @@ print("\n[48] ADR-0048 r5 — Env section (tests + debug views)")
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ── [49] ADR 0199 §5.2 — the state header at the top of both panes ──
+-- A selection used to be visible only while its section was expanded, neither
+-- pane stated what would run, and a switch of active worktree left the panes
+-- showing the old one. Every header row must state its value OR its absence,
+-- read only auto-run.context (the owner execution reads), and re-render when
+-- that state changes. Each row's key must open that row's chooser.
+print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
+;(function()
+  local tests_view = require("auto-finder.views.tests")
+  local debug_view = require("auto-finder.views.debug")
+  -- Guarded: an unguarded require raises and ABORTS the suite, hiding every
+  -- later cell. A missing header must read as red, not as silence.
+  local ok_hdr, header = pcall(require, "auto-finder.views._state_header")
+  ok("p49: auto-finder.views._state_header loads", ok_hdr, tostring(header))
+  if not ok_hdr then return end
+  local ok_ctx, ctxm = pcall(require, "auto-run.context")
+  ok("p49: this auto-run.nvim ships auto-run.context", ok_ctx, tostring(ctxm))
+  if not ok_ctx then return end
+  local cfgm = require("auto-run.adapters.config")
+  local store = require("auto-run.store")
+  local env = require("auto-run.env")
+  local import = require("auto-run.import")
+  local exec = require("auto-run.exec")
+  local discovery = require("auto-run.discovery")
+  local worktree = require("auto-core.git.worktree")
+  tests_view._reset_for_tests()
+  debug_view._reset_for_tests()
+
+  local function wf(path, text)
+    vim.fn.mkdir(vim.fn.fnamemodify(path, ":h"), "p")
+    local f = assert(io.open(path, "w")); f:write(text); f:close()
+  end
+  local function make_repo(dir)
+    vim.fn.mkdir(dir, "p")
+    vim.system({ "git", "init", "-q", "-b", "main", dir }, { text = true }):wait()
+    vim.system({ "git", "-C", dir, "-c", "user.email=s@t", "-c", "user.name=s",
+      "commit", "-q", "--allow-empty", "-m", "init" }, { text = true }):wait()
+  end
+  local repo = vim.fn.tempname() .. "-af-hdr"
+  make_repo(repo)
+  wf(repo .. "/go.mod", "module example.com/afhdr\n\ngo 1.21\n")
+  local calc_test = repo .. "/calc_test.go"
+  wf(calc_test, "package afhdr\n\nimport \"testing\"\n\nfunc TestAdd(t *testing.T) {}\n")
+  wf(repo .. "/.vscode/launch.json", vim.json.encode({ version = "0.2.0", configurations = {
+    { name = "HdrBase", type = "go", request = "launch", mode = "debug", program = "${workspaceFolder}" } } }))
+  wf(repo .. "/hdr.env", "HDR=1\n")
+  local repo2 = vim.fn.tempname() .. "-af-hdr-other"
+  make_repo(repo2)
+
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  discovery._reset_for_tests()
+  exec.clear_pick(nil)
+  env.set_selected(nil)
+  import.set_selected(nil)
+
+  vim.cmd("topleft 70vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = tests_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  tests_view.on_focus(w, b)
+
+  local function text_of(buf)
+    return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+  end
+  local function row_line(view, buf, kind)
+    for _, r in ipairs(view._rows or {}) do
+      if r.kind == kind then
+        return vim.api.nvim_buf_get_lines(buf, r.lnum - 1, r.lnum, false)[1], r
+      end
+    end
+  end
+  -- Let every render already queued via vim.schedule run BEFORE an action
+  -- whose own event is under test; otherwise a leftover render picks up the
+  -- new state and passes the cell with the subscription deleted (measured).
+  local function settle() vim.wait(300, function() return false end) end
+  local function wait_for(view, buf, kind, needle)
+    vim.wait(1000, function()
+      local l = row_line(view, buf, kind)
+      return l ~= nil and l:find(needle, 1, true) ~= nil
+    end, 10)
+    return (row_line(view, buf, kind))
+  end
+
+  -- ── rows present, in order, with every ABSENCE stated ────────────
+  local order = { "state-worktree", "state-env", "state-base", "state-test-config" }
+  local lnums = {}
+  for i, k in ipairs(order) do
+    local _, r = row_line(tests_view, b, k)
+    lnums[i] = r and r.lnum or -1
+  end
+  ok("p49: tests header has Active worktree / Env / Base / Test config rows, in order",
+    lnums[1] > 0 and lnums[2] == lnums[1] + 1 and lnums[3] == lnums[2] + 1
+      and lnums[4] == lnums[3] + 1, vim.inspect(lnums) .. "\n" .. text_of(b))
+  local wt = row_line(tests_view, b, "state-worktree") or ""
+  ok("p49: Active worktree names the active worktree",
+    wt:find(vim.fn.fnamemodify(repo, ":t"), 1, true) ~= nil, wt)
+  ok("p49: no env selected → Env states '(process env only)'",
+    (row_line(tests_view, b, "state-env") or ""):find("(process env only)", 1, true) ~= nil,
+    tostring(row_line(tests_view, b, "state-env")))
+  ok("p49: no base → Base states '(none)'",
+    (row_line(tests_view, b, "state-base") or ""):find("(none)", 1, true) ~= nil,
+    tostring(row_line(tests_view, b, "state-base")))
+  ok("p49: nothing discovered → the Test config row is still there, stating why",
+    (row_line(tests_view, b, "state-test-config") or ""):find("no test positions discovered yet", 1, true) ~= nil,
+    tostring(row_line(tests_view, b, "state-test-config")))
+
+  -- ── values follow the owner, and re-render on its events ─────────
+  discovery.parse_file(calc_test, require("auto-run.adapters").get("go"))
+  for _, n in ipairs({ "hdr-a", "hdr-b" }) do
+    store.add({ name = n, kind = "test", runtime = "go" }, { tier = "tracked" })
+  end
+  tests_view.on_focus(w, b)
+  local first = cfgm.test_config_name("go")
+  local other = first == "hdr-a" and "hdr-b" or "hdr-a"
+  local tc = row_line(tests_view, b, "state-test-config") or ""
+  ok("p49: Test config shows the resolver's answer and its source (first)",
+    tc:find("go: " .. first .. " (first)", 1, true) ~= nil, tc)
+
+  settle()
+  cfgm.pick("go", other)
+  tc = wait_for(tests_view, b, "state-test-config", "(picked)") or ""
+  ok("p49: a pick re-renders the row (run.config:changed) and says (picked)",
+    tc:find("go: " .. other .. " (picked)", 1, true) ~= nil, tc)
+
+  cfgm.pick("go", nil)
+  exec.remember_pick("test", other)
+  tests_view.on_focus(w, b)
+  tc = row_line(tests_view, b, "state-test-config") or ""
+  ok("p49: the shared per-kind pick is labelled (shared pick), not (picked)",
+    tc:find("go: " .. other .. " (shared pick)", 1, true) ~= nil, tc)
+
+  local st = store.read_state()
+  st.test_picks = { go = "hdr-gone" }
+  store.write_state(st)
+  tests_view.on_focus(w, b)
+  tc = row_line(tests_view, b, "state-test-config") or ""
+  ok("p49: a stale runtime pick is SHOWN behind the shared pick, not hidden",
+    tc:find("(shared pick)", 1, true) ~= nil
+      and tc:find("pick 'hdr-gone' does not apply to go", 1, true) ~= nil, tc)
+  st = store.read_state(); st.test_picks = nil; store.write_state(st)
+  exec.clear_pick(nil)
+
+  settle()
+  env.set_selected(repo .. "/hdr.env")
+  local el = wait_for(tests_view, b, "state-env", "hdr.env") or ""
+  ok("p49: selecting an env file re-renders Env (run.env:changed) with its path",
+    el:find("hdr.env", 1, true) ~= nil and el:find("MISSING", 1, true) == nil, el)
+  os.remove(repo .. "/hdr.env")
+  tests_view.on_focus(w, b)
+  el = row_line(tests_view, b, "state-env") or ""
+  ok("p49: a selected env file that vanished is shown as MISSING",
+    el:find("hdr.env — MISSING", 1, true) ~= nil, el)
+  env.set_selected(nil)
+  wf(repo .. "/hdr.env", "HDR=1\n")
+
+  settle()
+  import.set_selected("HdrBase")
+  local bl = wait_for(tests_view, b, "state-base", "HdrBase") or ""
+  ok("p49: selecting a base re-renders Base with its name",
+    bl:find("HdrBase", 1, true) ~= nil, bl)
+  import.set_selected(nil)
+
+  -- ── keys: each header row's key opens THAT row's chooser ─────────
+  local real_select = vim.ui.select
+  local seen
+  local function stub_select(choose)
+    seen = {}
+    vim.ui.select = function(items, opts, cb)
+      seen[#seen + 1] = { items = items, prompt = opts and opts.prompt }
+      local idx = choose(items)
+      cb(idx and items[idx] or nil, idx)
+    end
+  end
+  local function index_of(items, needle)
+    for i, it in ipairs(items) do
+      if tostring(it):find(needle, 1, true) then return i end
+    end
+  end
+  -- A missing key must read as a red cell, not raise on a nil callback and
+  -- abort the suite (measured: it did), so absent keys become no-ops.
+  local function keymap_table(buf)
+    local t = {}
+    for _, k in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do t[k.lhs] = k end
+    return setmetatable(t, { __index = function() return { callback = function() end } end })
+  end
+  local maps = keymap_table(b)
+  ok("p49: tests pane maps s, b and c", rawget(maps, "s") and rawget(maps, "b") and rawget(maps, "c"))
+
+  tests_view.on_focus(w, b)
+  local _, wrow = row_line(tests_view, b, "state-worktree")
+  vim.api.nvim_win_set_cursor(w, { wrow.lnum, 0 })
+  stub_select(function(items) return index_of(items, "hdr.env") end)
+  maps.s.callback()
+  ok("p49: `s` off a Config/Env row opens the env chooser and applies the choice",
+    #seen == 1 and env.get_selected() == repo .. "/hdr.env",
+    vim.inspect(seen) .. " selected=" .. tostring(env.get_selected()))
+  env.set_selected(nil)
+
+  stub_select(function(items) return index_of(items, "HdrBase") end)
+  maps.b.callback()
+  ok("p49: `b` opens the base chooser and applies the choice",
+    #seen == 1 and import.get_selected() == "HdrBase", vim.inspect(seen))
+  import.set_selected(nil)
+
+  exec.remember_pick("test", other)
+  cfgm.pick("go", first)
+  stub_select(function(items) return 1 end)
+  maps.c.callback()
+  ok("p49: `c`'s clear option names where clearing lands (the shared pick)",
+    #seen == 1 and tostring(seen[1].items[1]):find("use shared pick '" .. other .. "'", 1, true) ~= nil,
+    vim.inspect(seen))
+  local cn, cs = cfgm.test_config_name("go")
+  ok("p49: …and choosing it lands exactly there", cn == other and cs == "shared",
+    tostring(cn) .. " (" .. tostring(cs) .. ")")
+  exec.clear_pick(nil)
+  stub_select(function(items) return index_of(items, other) end)
+  maps.c.callback()
+  cn, cs = cfgm.test_config_name("go")
+  ok("p49: `c` writes the runtime's pick", cn == other and cs == "picked",
+    tostring(cn) .. " (" .. tostring(cs) .. ")")
+  cfgm.pick("go", nil)
+  vim.ui.select = real_select
+
+  -- ── debug pane: the same header, minus Test config ───────────────
+  vim.cmd("topleft 70vnew")
+  local w2 = vim.api.nvim_get_current_win()
+  vim.wo[w2].winfixbuf = false
+  local b2 = debug_view.get_buffer(w2)
+  vim.api.nvim_win_set_buf(w2, b2)
+  debug_view.on_focus(w2, b2)
+  local have = {}
+  for _, k in ipairs(order) do have[k] = row_line(debug_view, b2, k) ~= nil end
+  ok("p49: debug header has Active worktree / Env / Base rows",
+    have["state-worktree"] and have["state-env"] and have["state-base"], text_of(b2))
+  ok("p49: debug header has NO Test config row (entries own their config)",
+    not have["state-test-config"], text_of(b2))
+  ok("p49: the empty Entry Points hint names what actually creates a config",
+    text_of(b2):find("`a` scaffolds one", 1, true) == nil
+      and text_of(b2):find("<leader>rc", 1, true) == nil
+      and text_of(b2):find("`a` adds one", 1, true) ~= nil and text_of(b2):find("`I` imports", 1, true) ~= nil,
+    text_of(b2))
+  local dmaps = keymap_table(b2)
+  ok("p49: debug pane maps s and b", rawget(dmaps, "s") and rawget(dmaps, "b"))
+  local _, dwrow = row_line(debug_view, b2, "state-worktree")
+  vim.api.nvim_win_set_cursor(w2, { dwrow.lnum, 0 })
+  stub_select(function(items) return index_of(items, "hdr.env") end)
+  dmaps.s.callback()
+  ok("p49: debug `s` off a Config/Env row opens the env chooser",
+    #seen == 1 and env.get_selected() == repo .. "/hdr.env", vim.inspect(seen))
+  env.set_selected(nil)
+  stub_select(function(items) return index_of(items, "HdrBase") end)
+  dmaps.b.callback()
+  ok("p49: debug `b` opens the base chooser", #seen == 1 and import.get_selected() == "HdrBase",
+    vim.inspect(seen))
+  import.set_selected(nil)
+  vim.ui.select = real_select
+
+  -- ── a worktree switch re-renders BOTH panes on its own event ─────
+  -- Nothing else is rendered by the cell: the only trigger is auto-core's
+  -- core.active_worktree:changed. DRAIN first: the cells above queue renders
+  -- via vim.schedule, and measured on VM43 thirteen of them were still pending
+  -- here — they flushed after the switch and turned this cell green with the
+  -- subscription deleted. Draining, then asserting the panes still show the
+  -- OLD worktree, leaves the switch's own event as the only way to pass.
+  settle()
+  local label2 = vim.fn.fnamemodify(repo2, ":t")
+  ok("p49: precondition — both headers still show the previous worktree",
+    not (row_line(tests_view, b, "state-worktree") or ""):find(label2, 1, true)
+      and not (row_line(debug_view, b2, "state-worktree") or ""):find(label2, 1, true))
+  worktree.set_active(repo2)
+  local t1 = wait_for(tests_view, b, "state-worktree", label2) or ""
+  local t2 = wait_for(debug_view, b2, "state-worktree", label2) or ""
+  ok("p49: switching the active worktree re-renders the tests header",
+    t1:find(label2, 1, true) ~= nil, t1)
+  ok("p49: switching the active worktree re-renders the debug header",
+    t2:find(label2, 1, true) ~= nil, t2)
+  worktree.set_active(repo)
+
+  -- ── `w`: choose the Active worktree (ADR 0199 §7.2, M4) ──────────
+  -- Lists every worktree under the workspace as `<repo> (<branch>) —
+  -- <relative path>`, marks the current one, and sets auto-core's active
+  -- worktree — the one owner — without changing the cwd.
+  do
+    local ws = vim.fn.tempname() .. "-af-ws"
+    vim.fn.mkdir(ws, "p")
+    make_repo(ws .. "/alpha")
+    vim.fn.mkdir(ws .. "/beta", "p")
+    vim.system({ "git", "clone", "-q", "--bare", ws .. "/alpha", ws .. "/beta/.git" }, { text = true }):wait()
+    vim.system({ "git", "-C", ws .. "/beta", "worktree", "add", "-q", "-b", "feat", ws .. "/beta/feat" },
+      { text = true }):wait()
+    local prev_ws = worktree.get_workspace_root()
+    worktree.set_workspace_root(ws)
+    worktree.set_active(ws .. "/alpha")
+    local cwd_before = vim.fn.getcwd()
+
+    tests_view.on_focus(w, b)
+    local wl = row_line(tests_view, b, "state-worktree") or ""
+    ok("p49w: the Active worktree row names its key [w]", wl:find("[w]", 1, true) ~= nil, wl)
+    maps = keymap_table(b)
+    ok("p49w: tests pane maps w", rawget(maps, "w") ~= nil)
+    local offered
+    stub_select(function(items)
+      offered = items
+      return index_of(items, "beta/feat")
+    end)
+    maps.w.callback()
+    local labels = vim.tbl_map(tostring, offered or {})
+    ok("p49w: w lists every worktree under the workspace as <repo> (<branch>) — <path>",
+      index_of(labels, "alpha (main) — alpha") ~= nil
+        and index_of(labels, "beta (feat) — beta/feat") ~= nil, vim.inspect(labels))
+    ok("p49w: …and marks the current one",
+      index_of(labels, "* alpha (main)") ~= nil, vim.inspect(labels))
+    ok("p49w: choosing sets auto-core's active worktree",
+      worktree.get_active() == require("auto-core.fs.path").normalize(ws .. "/beta/feat"),
+      tostring(worktree.get_active()))
+    ok("p49w: …and never changes the cwd", vim.fn.getcwd() == cwd_before, vim.fn.getcwd())
+    dmaps = keymap_table(b2)
+    ok("p49w: debug pane maps w", rawget(dmaps, "w") ~= nil)
+    vim.ui.select = real_select
+
+    -- A non-repository anchor says what to do about it.
+    local v2 = header.values({ worktree = { is_repo = false, label = "nvim-plugins", source = "cwd" },
+      env = {}, base = {}, runtimes = {}, tests = {} })
+    ok("p49w: a non-repository row says `w` chooses one", v2.worktree.text:find("w to choose one", 1, true) ~= nil,
+      v2.worktree.text)
+
+    worktree.set_workspace_root(prev_ws)
+    worktree.set_active(repo)
+    vim.fn.delete(ws, "rf")
+  end
+
+  -- ── chooser errors read as messages; missing env files are labelled ──
+  -- (Lector M3b notes.) A structured error was stringified as a table
+  -- address, and a referenced env file that does not exist was offered like
+  -- any other and then failed when chosen.
+  do
+    local logm = require("auto-finder.log")
+    local real_notify, said = logm.notify, {}
+    logm.notify = function(msg) said[#said + 1] = tostring(msg) end
+    local real_set = env.set_selected
+    env.set_selected = function() return nil, { code = "boom", message = "injected: cannot select" } end
+    stub_select(function(items) return index_of(items, "hdr.env") end)
+    header.choose_env()
+    env.set_selected = real_set
+    ok("p49e: a structured chooser error shows its message, not a table address",
+      #said == 1 and said[1]:find("injected: cannot select", 1, true) ~= nil
+        and said[1]:find("table: 0x", 1, true) == nil, vim.inspect(said))
+
+    local pm, pe = store.add({ name = "hdr-missing-ref", kind = "run", program = "sh",
+      env_files = { "${worktree}/nowhere.env" } }, { tier = "tracked" })
+    ok("p49e: fixture config referencing a missing env file", pm ~= nil, tostring(pe))
+    said = {}
+    local offered
+    stub_select(function(items) offered = items; return index_of(items, "nowhere.env") end)
+    header.choose_env()
+    local ml = offered and offered[index_of(offered, "nowhere.env") or 0] or ""
+    ok("p49e: a missing env file is labelled missing in the chooser",
+      tostring(ml):find("missing", 1, true) ~= nil, vim.inspect(offered))
+    ok("p49e: …and choosing it explains why instead of trying",
+      env.get_selected() == nil and #said == 1 and said[1]:find("does not exist", 1, true) ~= nil,
+      vim.inspect(said) .. " selected=" .. tostring(env.get_selected()))
+    store.remove("hdr-missing-ref", { tier = "tracked" })
+    logm.notify = real_notify
+    vim.ui.select = real_select
+  end
+
+  -- ── degrade: an auto-run without auto-run.context ────────────────
+  local saved = package.loaded["auto-run.context"]
+  package.loaded["auto-run.context"] = nil
+  package.preload["auto-run.context"] = function() error("hidden for the degrade probe") end
+  -- pcall: a header that raises here would otherwise abort the suite
+  -- (measured) instead of failing this cell.
+  local okr, rerr = pcall(tests_view.on_focus, w, b)
+  local dt = text_of(b)
+  ok("p49: without auto-run.context the header says so and the pane still renders",
+    okr and dt:find("cannot report run state", 1, true) ~= nil and dt:find("Tests —", 1, true) ~= nil,
+    tostring(rerr) .. "\n" .. dt)
+  package.preload["auto-run.context"] = nil
+  package.loaded["auto-run.context"] = saved
+
+  -- ── the value table itself: non-repo ─────────────────────────────
+  local v = header.values({ worktree = { is_repo = false, label = "nvim-plugins", source = "cwd" },
+    env = {}, base = {}, runtimes = {}, tests = {} })
+  ok("p49: a non-repository worktree is stated, with where it came from",
+    v.worktree.text:find("not a repository", 1, true) ~= nil
+      and v.worktree.text:find("from cwd", 1, true) ~= nil and v.worktree.tone == "warn",
+    vim.inspect(v.worktree))
+
+  -- ── cleanup ──────────────────────────────────────────────────────
+  for _, n in ipairs({ "hdr-a", "hdr-b" }) do store.remove(n, { tier = "tracked" }) end
+  debug_view.on_close()
+  tests_view.on_close()
+  pcall(vim.api.nvim_win_close, w2, true)
+  pcall(vim.api.nvim_win_close, w, true)
+  discovery._reset_for_tests()
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+  vim.fn.delete(repo2, "rf")
+end)()
+
+-- ── [50] ADR 0199 §6.2 — manage entry points from the debug pane ──────
+-- One store-backed Entry Points list, edited in place: `e` on a property
+-- row edits it (env values stay masked), `a` adds an entry point through
+-- auto-run's one scaffold API, `E` exports to launch.json (it was `a`), `I`
+-- imports from launch.json. The launch.json Config section is gone: the
+-- header's `b` chooses the base it duplicated.
+print("\n[50] ADR 0199 §6.2 — debug pane entry-point management")
+;(function()
+  local debug_view = require("auto-finder.views.debug")
+  local okr = pcall(require, "auto-run.adapters")
+  local reg = okr and require("auto-run.adapters") or {}
+  ok("p50: this auto-run.nvim has adapters.scaffold", type(reg.scaffold) == "function")
+  if type(reg.scaffold) ~= "function" then return end
+  local store = require("auto-run.store")
+  local import = require("auto-run.import")
+  local worktree = require("auto-core.git.worktree")
+  debug_view._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "-af-m5"
+  vim.fn.mkdir(repo .. "/.vscode", "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s",
+    "commit", "-q", "--allow-empty", "-m", "init" }, { text = true }):wait()
+  local f = assert(io.open(repo .. "/.vscode/launch.json", "w"))
+  f:write(vim.json.encode({ version = "0.2.0", configurations = {
+    { name = "LJ One", type = "go", request = "launch", mode = "debug", program = "${workspaceFolder}/cmd/one" } } }))
+  f:close()
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  local pa, ea = store.add({ name = "m5-api", kind = "run", runtime = "go", program = "sh",
+    args = { "-c", "true" }, env = { SECRET_TOKEN = "hunter2" } })
+  ok("p50: fixture entry point", pa ~= nil, tostring(ea))
+
+  vim.cmd("topleft 70vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function find(pred)
+    for _, r in ipairs(debug_view._rows or {}) do if pred(r) then return r end end
+  end
+  local function keys()
+    local t = {}
+    for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do t[k.lhs] = k end
+    return setmetatable(t, { __index = function() return { callback = function() end } end })
+  end
+  local function settle() vim.wait(300, function() return false end) end
+  local real_input, real_select = vim.ui.input, vim.ui.select
+  local logm = require("auto-finder.log")
+  local real_notify, said = logm.notify, {}
+  logm.notify = function(msg) said[#said + 1] = tostring(msg) end
+  local real_warn = logm.warn
+  logm.warn = function(_, msg) said[#said + 1] = tostring(msg) end
+
+  ok("p50: the launch.json Config section is gone (the header's b chooses the base)",
+    not text():find("Config (", 1, true) and find(function(r) return r.kind == "state-base" end) ~= nil,
+    text())
+
+  -- `o` fans out, `e` edits a property in place.
+  local k = keys()
+  local entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
+  vim.api.nvim_win_set_cursor(w, { entry.lnum, 0 })
+  k.o.callback()
+  debug_view.on_focus(w, b)
+  local function detail(field)
+    return find(function(r) return r.kind == "detail" and r.field == field
+      and r.parent and r.parent.name == "m5-api" end)
+  end
+  ok("p50: o fans the entry point out into property rows",
+    detail("program") ~= nil and detail("args") ~= nil and detail("env.SECRET_TOKEN") ~= nil, text())
+
+  local prompts = {}
+  local function stub_input(answer)
+    vim.ui.input = function(opts, cb) prompts[#prompts + 1] = opts; cb(answer) end
+  end
+  local function edit(field, answer)
+    debug_view.on_focus(w, b)
+    local r = detail(field)
+    if not r then return false end
+    vim.api.nvim_win_set_cursor(w, { r.lnum, 0 })
+    prompts = {}
+    stub_input(answer)
+    keys().e.callback()
+    return true
+  end
+
+  edit("program", "bash")
+  ok("p50: e on program edits it in place, prefilled with the current value",
+    store.get("m5-api").program == "bash" and prompts[1] and prompts[1].default == "sh",
+    vim.inspect(prompts) .. vim.inspect(store.get("m5-api").program))
+  edit("args", [[-c "echo hi"]])
+  ok("p50: e on args edits the list as one shell-split line",
+    vim.deep_equal(store.get("m5-api").args, { "-c", "echo hi" }), vim.inspect(store.get("m5-api").args))
+  edit("env.SECRET_TOKEN", "SECRET_TOKEN=rotated")
+  ok("p50: e on an env row never shows the value — the prompt is prefilled with KEY= only",
+    prompts[1] and prompts[1].default == "SECRET_TOKEN=", vim.inspect(prompts))
+  ok("p50: …and writes KEY=VALUE through the store", store.get("m5-api").env.SECRET_TOKEN == "rotated",
+    vim.inspect(store.get("m5-api").env))
+  settle()
+  ok("p50: …and the value never reaches the buffer",
+    not text():find("rotated", 1, true) and not text():find("hunter2", 1, true), text())
+  -- Set first, so clearing is observable: the fixture has no cwd, and a
+  -- clear of an absent field would pass with the edit doing nothing.
+  edit("cwd", repo)
+  ok("p50: e on cwd sets it", store.get("m5-api").cwd == repo, vim.inspect(store.get("m5-api").cwd))
+  edit("cwd", "")
+  ok("p50: an empty answer clears the field", store.get("m5-api").cwd == nil, vim.inspect(store.get("m5-api").cwd))
+  said = {}
+  edit("program", nil)
+  ok("p50: a cancelled prompt changes nothing", store.get("m5-api").program == "bash")
+
+  -- Lector M5a P1: a MALFORMED env answer can still carry a secret
+  -- ("TOKEN my-secret" has no `=`). It must never be echoed: not into the
+  -- pane, not into a toast, not into the auto-core log ring. The real log
+  -- path runs here — only vim.notify is captured.
+  do
+    local SENTINEL = "zq-sentinel-secret-7731"
+    logm.notify, logm.warn = real_notify, real_warn
+    local toasts, real_vn = {}, vim.notify
+    vim.notify = function(msg) toasts[#toasts + 1] = tostring(msg) end
+    edit("env.SECRET_TOKEN", "SECRET_TOKEN " .. SENTINEL)
+    settle()   -- the toast is delivered on a later tick; capture it first
+    vim.notify = real_vn
+    local ring = vim.inspect(require("auto-core.log").recent(1000))
+    ok("p50: a malformed env answer is refused with a message naming the form",
+      #toasts == 1 and toasts[1]:find("KEY=VALUE", 1, true) ~= nil, vim.inspect(toasts))
+    ok("p50: …and its text reaches neither the toast, the log ring, nor the pane",
+      not table.concat(toasts, "\n"):find(SENTINEL, 1, true) and not ring:find(SENTINEL, 1, true)
+        and not text():find(SENTINEL, 1, true), "leaked")
+    ok("p50: …and the stored value is unchanged", store.get("m5-api").env.SECRET_TOKEN == "rotated")
+    logm.notify = function(msg) said[#said + 1] = tostring(msg) end
+    logm.warn = function(_, msg) said[#said + 1] = tostring(msg) end
+  end
+
+  -- Lector M5a P2: a freshly scaffolded entry has no args, env_files,
+  -- build_flags or env — the rows must still be there, or `e` has nowhere to
+  -- add them and the JSON file is the only way.
+  do
+    local fp, fe = reg.scaffold("debug", "m5-fresh", "go")
+    ok("p50: fixture — a fresh go debug scaffold", fp ~= nil, tostring(fe))
+    debug_view.on_focus(w, b)
+    local fr = find(function(r) return r.kind == "entry" and r.name == "m5-fresh" end)
+    vim.api.nvim_win_set_cursor(w, { fr.lnum, 0 })
+    keys().o.callback()
+    debug_view.on_focus(w, b)
+    local function frow(field)
+      return find(function(r) return r.kind == "detail" and r.field == field
+        and r.parent and r.parent.name == "m5-fresh" end)
+    end
+    ok("p50: a fresh entry shows editable rows for args, env_files, build_flags and a new env var",
+      frow("args") and frow("env_files") and frow("build_flags") and frow("env+"), text())
+    local function fedit(field, answer)
+      debug_view.on_focus(w, b)
+      local r = frow(field)
+      if not r then return end
+      vim.api.nvim_win_set_cursor(w, { r.lnum, 0 })
+      stub_input(answer)
+      keys().e.callback()
+    end
+    fedit("args", "-v -count=1")
+    fedit("env_files", "${worktree}/.env")
+    fedit("build_flags", "-tags=integration")
+    fedit("env+", "NEW_KEY=fresh-value-991")
+    local fx = store.get("m5-fresh")
+    ok("p50: …and e fills each in place, without opening the file",
+      vim.deep_equal(fx.args, { "-v", "-count=1" }) and vim.deep_equal(fx.env_files, { "${worktree}/.env" })
+        and fx.build_flags == "-tags=integration" and (fx.env or {}).NEW_KEY == "fresh-value-991", vim.inspect(fx))
+    settle()
+    ok("p50: …and the added env value stays masked in the pane", not text():find("fresh-value-991", 1, true), text())
+    pcall(store.remove, "m5-fresh")
+  end
+
+  -- `a` adds an entry point through auto-run's scaffold API.
+  debug_view.on_focus(w, b)
+  entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
+  vim.api.nvim_win_set_cursor(w, { entry.lnum, 0 })
+  local asked = {}
+  vim.ui.select = function(items, opts, cb)
+    asked[#asked + 1] = { prompt = opts and opts.prompt, items = items }
+    local want = #asked == 1 and "debug" or "go"
+    for i, it in ipairs(items) do if tostring(it) == want then return cb(it, i) end end
+    cb(nil, nil)
+  end
+  stub_input("m5-new")
+  keys().a.callback()
+  local new = store.get("m5-new")
+  ok("p50: a asks kind, runtime and name, then scaffolds through auto-run",
+    new and new.kind == "debug" and new.runtime == "go" and #asked == 2, vim.inspect(asked) .. vim.inspect(new))
+  settle()
+  ok("p50: …and the new entry point appears", find(function(r) return r.kind == "entry" and r.name == "m5-new" end) ~= nil,
+    text())
+
+  -- `E` exports (moved from `a`).
+  local exported
+  local real_export = import.export
+  import.export = function(name) exported = name; return repo .. "/.vscode/launch.json", nil end
+  debug_view.on_focus(w, b)
+  entry = find(function(r) return r.kind == "entry" and r.name == "m5-api" end)
+  vim.api.nvim_win_set_cursor(w, { entry.lnum, 0 })
+  keys().E.callback()
+  import.export = real_export
+  ok("p50: E exports the entry point under the cursor to launch.json", exported == "m5-api", tostring(exported))
+
+  -- `I` imports from launch.json.
+  said = {}
+  vim.ui.select = function(items, _, cb)
+    for i, it in ipairs(items) do if tostring(it):find("LJ One", 1, true) then return cb(it, i) end end
+    cb(nil, nil)
+  end
+  keys().I.callback()
+  local lj = store.get("LJ One")
+  ok("p50: I imports the chosen launch.json entry into the store",
+    lj and lj.origin == "launch.json" and store.config_file("LJ One") ~= nil,
+    vim.inspect(lj) .. " file=" .. tostring(store.config_file("LJ One")))
+  ok("p50: …and says what it did", #said >= 1 and said[#said]:find("imported", 1, true) ~= nil, vim.inspect(said))
+
+  vim.ui.input, vim.ui.select = real_input, real_select
+  logm.notify, logm.warn = real_notify, real_warn
+  for _, n in ipairs({ "m5-api", "m5-new", "LJ One" }) do pcall(store.remove, n) end
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
+-- ── [51] ADR 0199 §6.2 — the tests pane's Test configs section ───────
+-- The tests pane's Config section listed launch.json configs to use as the
+-- base — the header's `b` does that now. What the pane lacked was the test
+-- CONFIG: the kind=test store configs, which one applies to each runtime and
+-- why, and a way to pick, clear and create one. The shared per-kind pick
+-- (ADR 0199 r3 §3.2) lives here as its own row, clearable.
+print("\n[51] ADR 0199 §6.2 — tests pane Test configs section")
+;(function()
+  local tests_view = require("auto-finder.views.tests")
+  local okc, cfgm = pcall(require, "auto-run.adapters.config")
+  ok("p51: this auto-run.nvim has per-runtime test picks", okc and type(cfgm.pick) == "function")
+  if not (okc and type(cfgm.pick) == "function") then return end
+  local store = require("auto-run.store")
+  local exec = require("auto-run.exec")
+  local discovery = require("auto-run.discovery")
+  local worktree = require("auto-core.git.worktree")
+  tests_view._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "-af-m5b"
+  vim.fn.mkdir(repo, "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s",
+    "commit", "-q", "--allow-empty", "-m", "init" }, { text = true }):wait()
+  local f = assert(io.open(repo .. "/go.mod", "w")); f:write("module example.com/m5b\n\ngo 1.21\n"); f:close()
+  local t = repo .. "/calc_test.go"
+  f = assert(io.open(t, "w")); f:write("package m5b\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n"); f:close()
+  local prev_active = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  discovery._reset_for_tests()
+  exec.clear_pick(nil)
+
+  vim.cmd("topleft 70vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = tests_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  tests_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function find(pred)
+    for _, r in ipairs(tests_view._rows or {}) do if pred(r) then return r end end
+  end
+  local function line_of(r) return r and vim.api.nvim_buf_get_lines(b, r.lnum - 1, r.lnum, false)[1] or "" end
+  local function keys()
+    local k = {}
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do k[m.lhs] = m end
+    return setmetatable(k, { __index = function() return { callback = function() end } end })
+  end
+  local function press(key, row)
+    tests_view.on_focus(w, b)
+    if row then vim.api.nvim_win_set_cursor(w, { row.lnum, 0 }) end
+    keys()[key].callback()
+    tests_view.on_focus(w, b)
+  end
+  local function trow(name)
+    tests_view.on_focus(w, b)
+    return find(function(r) return r.kind == "test-config" and r.name == name end)
+  end
+  local real_input, real_select = vim.ui.input, vim.ui.select
+  -- No real prompt may ever open in the suite: when `s` falls through to a
+  -- chooser (the red state did), a live vim.ui.select waits on stdin.
+  local stray = 0
+  vim.ui.select = function(_, _, cb) stray = stray + 1; cb(nil, nil) end
+  vim.ui.input = function(_, cb) stray = stray + 1; cb(nil) end
+
+  ok("p51: the launch.json Config section is gone from the tests pane",
+    not text():find("Config (", 1, true), text())
+  local hdr = find(function(r) return r.kind == "test-configs-header" end)
+  ok("p51: a Test configs section is present, and states that there are none",
+    hdr ~= nil and line_of(hdr):find("Test configs (0)", 1, true) ~= nil
+      and text():find("no test configs", 1, true) ~= nil, text())
+
+  discovery.parse_file(t, require("auto-run.adapters").get("go"))
+  store.add({ name = "tc-unit", kind = "test", runtime = "go" }, { tier = "tracked" })
+  store.add({ name = "tc-int", kind = "test", runtime = "go" }, { tier = "tracked" })
+  store.add({ name = "tc-any", kind = "test" }, { tier = "tracked" })
+  store.add({ name = "tc-run", kind = "run", runtime = "go", program = "sh" }, { tier = "tracked" })
+  tests_view.on_focus(w, b)
+  local first = cfgm.test_config_name("go")
+  local other = first == "tc-unit" and "tc-int" or "tc-unit"
+  ok("p51: the section lists the kind=test configs only",
+    trow("tc-unit") and trow("tc-int") and trow("tc-any") and not trow("tc-run"), text())
+  ok("p51: the config that applies is marked, with the resolver's reason",
+    line_of(trow(first)):find("applies to go (first)", 1, true) ~= nil
+      and not line_of(trow(other)):find("applies to", 1, true), line_of(trow(first)) .. " | " .. line_of(trow(other)))
+  ok("p51: a generic config says it serves any runtime",
+    line_of(trow("tc-any")):find("any runtime", 1, true) ~= nil, line_of(trow("tc-any")))
+
+  press("s", trow(other))
+  local n1, s1 = cfgm.test_config_name("go")
+  ok("p51: s on a config picks it for its runtime", n1 == other and s1 == "picked", tostring(n1) .. " " .. tostring(s1))
+  ok("p51: …and the mark moves", line_of(trow(other)):find("applies to go (picked)", 1, true) ~= nil, line_of(trow(other)))
+  press("s", trow(other))
+  local n2, s2 = cfgm.test_config_name("go")
+  ok("p51: s on the runtime's own pick clears it", n2 == first and s2 == "first", tostring(n2) .. " " .. tostring(s2))
+
+  press("s", trow("tc-any"))
+  local n3, s3 = cfgm.test_config_name("go")
+  ok("p51: s on a generic config picks it for the one discovered runtime", n3 == "tc-any" and s3 == "picked",
+    tostring(n3) .. " " .. tostring(s3))
+  cfgm.pick("go", nil)
+
+  ok("p51: s on a test config opens no chooser", stray == 0, "stray prompts: " .. stray)
+
+  exec.remember_pick("test", other)
+  tests_view.on_focus(w, b)
+  local sp = find(function(r) return r.kind == "test-shared-pick" end)
+  ok("p51: the shared per-kind pick has its own row", sp ~= nil and line_of(sp):find(other, 1, true) ~= nil, text())
+  -- A FAILED clear must not claim success (Lector M5b): the pick stays, the
+  -- row stays, and the user is told it failed — never "cleared".
+  do
+    local logm = require("auto-finder.log")
+    local real_notify, told = logm.notify, {}
+    logm.notify = function(msg, o) told[#told + 1] = { msg = tostring(msg), level = o and o.level } end
+    local real_ws = store.write_state
+    store.write_state = function() return false, "injected: read-only" end
+    press("s", sp)
+    store.write_state = real_ws
+    logm.notify = real_notify
+    ok("p51: a failed shared-pick clear says it failed, never 'cleared'",
+      #told == 1 and told[1].level == "error" and not told[1].msg:find("cleared the", 1, true),
+      vim.inspect(told))
+    ok("p51: …and the pick and its row remain", (exec.picks() or {}).test == other
+      and find(function(r) return r.kind == "test-shared-pick" end) ~= nil, vim.inspect(exec.picks()))
+    sp = find(function(r) return r.kind == "test-shared-pick" end)
+  end
+  press("s", sp)
+  ok("p51: s on the shared-pick row clears it",
+    (exec.picks() or {}).test == nil and cfgm.test_config_name("go") == first, vim.inspect(exec.picks()))
+  ok("p51: …and the row goes", find(function(r) return r.kind == "test-shared-pick" end) == nil, text())
+
+  -- `a` in the section creates a test config through auto-run's scaffold API.
+  vim.ui.select = function(items, _, cb)
+    for i, it in ipairs(items) do if tostring(it) == "go" then return cb(it, i) end end
+    cb(nil, nil)
+  end
+  vim.ui.input = function(_, cb) cb("tc-new") end
+  press("a", find(function(r) return r.kind == "test-configs-header" end))
+  local nw = store.get("tc-new")
+  ok("p51: a on the section creates a test config for the chosen runtime",
+    nw and nw.kind == "test" and nw.runtime == "go", vim.inspect(nw))
+  vim.ui.input, vim.ui.select = real_input, real_select
+
+  for _, n in ipairs({ "tc-unit", "tc-int", "tc-any", "tc-run", "tc-new" }) do pcall(store.remove, n) end
+  exec.clear_pick(nil)
+  tests_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  discovery._reset_for_tests()
+  worktree.set_active(prev_active)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
