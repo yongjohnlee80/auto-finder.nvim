@@ -1956,6 +1956,189 @@ print("\n[51] ADR 0199 §6.2 — tests pane Test configs section")
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ── [52] ADR 0199 §6.5 — finishing management in the panes ────────────
+-- After v0.5.1 a user still had to open files to delete a config, edit a test
+-- config, create an env file or delete a variable, or touch a profile. Every
+-- one of those is now a pane gesture on the owner's API: `D` deletes (always
+-- behind a confirm naming path, tier and git status), `o`/`e` edit test
+-- configs like entry points, `n` creates an env file, and a Profiles section
+-- lists and edits profiles (no `*` — choosing one is a config's `profile` row).
+print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profiles")
+;(function()
+  local okp, props = pcall(require, "auto-finder.views._config_props")
+  ok("p52: the shared property module exists", okp, tostring(props))
+  if not okp then return end
+  local tests_view = require("auto-finder.views.tests")
+  local debug_view = require("auto-finder.views.debug")
+  local store = require("auto-run.store")
+  local envm = require("auto-run.env")
+  local discovery = require("auto-run.discovery")
+  local worktree = require("auto-core.git.worktree")
+  tests_view._reset_for_tests(); debug_view._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "-af-pm"
+  vim.fn.mkdir(repo .. "/.vscode", "p")
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s", "commit", "-q", "--allow-empty", "-m", "i" }, { text = true }):wait()
+  local function wf(p, t) vim.fn.mkdir(vim.fn.fnamemodify(p, ":h"), "p"); local f = assert(io.open(p, "w")); f:write(t); f:close() end
+  wf(repo .. "/go.mod", "module example.com/pm\n\ngo 1.21\n")
+  wf(repo .. "/a_test.go", "package pm\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n")
+  wf(repo .. "/.env", "KEEP=1\nDROP_ME=secret-value-3141\n")
+  wf(repo .. "/.vscode/launch.json", vim.json.encode({ version = "0.2.0", configurations = {
+    { name = "LJ Only", type = "go", request = "launch", mode = "debug", program = "${workspaceFolder}" } } }))
+  local prev = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  discovery._reset_for_tests()
+  discovery.parse_file(repo .. "/a_test.go", require("auto-run.adapters").get("go"))
+  store.add({ name = "pm-test", kind = "test", runtime = "go" }, { tier = "tracked" })
+  store.add({ name = "pm-run", kind = "run", runtime = "go", program = "sh" }, { tier = "tracked" })
+  store.add({ name = "pm-run", kind = "run", runtime = "go", program = "bash" }, { tier = "shared" })
+  store.add({ name = "pm-prof", base_env_files = { "${worktree}/.env" }, runtime_env = { TOKEN = "prof-secret-2718" } },
+    { kind = "profiles", tier = "tracked" })
+
+  local real_input, real_select, real_confirm = vim.ui.input, vim.ui.select, props._confirm
+  local confirms = {}
+  local function answer_confirm(choice_label)
+    props._confirm = function(msg, choices)
+      confirms[#confirms + 1] = { msg = msg, choices = choices }
+      local i = 0
+      for c in (choices .. "\n"):gmatch("([^\n]*)\n") do
+        i = i + 1
+        if c:gsub("&", ""):find(choice_label, 1, true) then return i end
+      end
+      return 0
+    end
+  end
+  local function input(ans) vim.ui.input = function(_, cb) cb(ans) end end
+  local function open(view)
+    vim.cmd("topleft 70vnew")
+    local w = vim.api.nvim_get_current_win()
+    vim.wo[w].winfixbuf = false
+    local b = view.get_buffer(w)
+    vim.api.nvim_win_set_buf(w, b)
+    view.on_focus(w, b)
+    return w, b
+  end
+  local function find(view, pred) for _, r in ipairs(view._rows or {}) do if pred(r) then return r end end end
+  local function text(b) return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function press(view, w, b, key, row)
+    view.on_focus(w, b)
+    if row then vim.api.nvim_win_set_cursor(w, { row.lnum, 0 }) end
+    local m
+    for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do if k.lhs == key then m = k end end
+    if m then m.callback() end
+    view.on_focus(w, b)
+    return m ~= nil
+  end
+
+  -- ── tests pane: test configs edit like entry points ────────────────
+  local tw, tb = open(tests_view)
+  local tc = find(tests_view, function(r) return r.kind == "test-config" and r.name == "pm-test" end)
+  press(tests_view, tw, tb, "o", tc)
+  local function prop(view, name, field)
+    return find(view, function(r) return r.prop and r.field == field and r.parent and r.parent.name == name end)
+  end
+  ok("p52: o fans a test config out into property rows",
+    prop(tests_view, "pm-test", "build_flags") and prop(tests_view, "pm-test", "env+") and prop(tests_view, "pm-test", "profile"),
+    text(tb))
+  input("-count=1 -race")
+  press(tests_view, tw, tb, "e", prop(tests_view, "pm-test", "build_flags"))
+  ok("p52: e edits a test config's build flags in place", store.get("pm-test").build_flags == "-count=1 -race",
+    vim.inspect(store.get("pm-test").build_flags))
+  input("TC_SECRET=tc-secret-1618")
+  press(tests_view, tw, tb, "e", prop(tests_view, "pm-test", "env+"))
+  ok("p52: …and adds an env var, masked in the pane", (store.get("pm-test").env or {}).TC_SECRET == "tc-secret-1618"
+    and not text(tb):find("tc-secret-1618", 1, true), text(tb))
+
+  -- `D` on a test config: the confirm names the file, the tier and git status.
+  confirms = {}
+  answer_confirm("Delete")
+  tc = find(tests_view, function(r) return r.kind == "test-config" and r.name == "pm-test" end)
+  press(tests_view, tw, tb, "D", tc)
+  local tfile = confirms[1] and confirms[1].msg or ""
+  ok("p52: D on a test config asks first, naming its file, its tier and that git does not track it",
+    #confirms == 1 and tfile:find("pm-test.json", 1, true) and tfile:find("tracked", 1, true)
+      and tfile:find("not tracked by git", 1, true), tfile)
+  ok("p52: …and deletes it", store.get("pm-test") == nil)
+  pcall(vim.api.nvim_win_close, tw, true)
+
+  -- ── debug pane ─────────────────────────────────────────────────────
+  local dw, db = open(debug_view)
+  local ep = find(debug_view, function(r) return r.kind == "entry" and r.name == "pm-run" end)
+  confirms = {}
+  answer_confirm("local layer")
+  press(debug_view, dw, db, "D", ep)
+  local dmsg = confirms[1] and (confirms[1].msg .. "\n" .. confirms[1].choices) or ""
+  ok("p52: D with both tiers present names both files and offers the local layer alone",
+    dmsg:find("shared", 1, true) and dmsg:find("tracked", 1, true) and dmsg:find("local layer", 1, true), dmsg)
+  local left = store.files("pm-run")
+  ok("p52: …removing the local layer reveals the tracked one", left.tracked ~= nil and left.shared == nil
+    and store.get("pm-run").program == "sh", vim.inspect(left))
+  confirms = {}
+  local shim = find(debug_view, function(r) return r.kind == "entry" and r.name == "LJ Only" end)
+  press(debug_view, dw, db, "D", shim)
+  ok("p52: a launch.json entry is not deleted from the store — no confirm, it lives in launch.json",
+    #confirms == 0 and store.get("LJ Only") ~= nil)
+
+  -- an entry point's profile is a persistent, editable row
+  ep = find(debug_view, function(r) return r.kind == "entry" and r.name == "pm-run" end)
+  press(debug_view, dw, db, "o", ep)
+  input("pm-prof")
+  press(debug_view, dw, db, "e", prop(debug_view, "pm-run", "profile"))
+  ok("p52: e on an entry point's profile row selects that profile for it", store.get("pm-run").profile == "pm-prof",
+    vim.inspect(store.get("pm-run").profile))
+
+  -- env: `n` creates a file, `D` deletes a variable
+  input(".env.local")
+  press(debug_view, dw, db, "n", find(debug_view, function(r) return r.kind == "bucket-header" and r.section == "env" end))
+  ok("p52: n creates an env file where discovery lists it", vim.fn.filereadable(repo .. "/.env.local") == 1
+    and find(debug_view, function(r) return r.kind == "env-file" and r.path == repo .. "/.env.local" end) ~= nil, text(db))
+  local ef = find(debug_view, function(r) return r.kind == "env-file" and r.path == repo .. "/.env" end)
+  debug_view._expanded[require("auto-finder.views._env_section").expand_key(repo .. "/.env")] = true
+  debug_view.on_focus(dw, db)
+  local ev = find(debug_view, function(r) return r.kind == "env-var" and r.key == "DROP_ME" end)
+  confirms = {}
+  answer_confirm("Delete")
+  press(debug_view, dw, db, "D", ev)
+  ok("p52: D on an env var asks, then removes exactly that line",
+    #confirms == 1 and vim.deep_equal(vim.fn.readfile(repo .. "/.env"), { "KEEP=1" }), vim.inspect(vim.fn.readfile(repo .. "/.env")))
+  ok("p52: …and the confirm never shows the value", confirms[1] and not confirms[1].msg:find("secret-value-3141", 1, true),
+    confirms[1] and confirms[1].msg)
+
+  -- Profiles: listed and edited; no selection marker.
+  local ph = find(debug_view, function(r) return r.kind == "bucket-header" and r.section == "profiles" end)
+  local pr = find(debug_view, function(r) return r.kind == "profile" and r.name == "pm-prof" end)
+  ok("p52: a Profiles section lists the store's profiles", ph ~= nil and pr ~= nil, text(db))
+  ok("p52: …with no selection marker (choosing is a config's profile row)",
+    pr and not vim.api.nvim_buf_get_lines(db, pr.lnum - 1, pr.lnum, false)[1]:find("*", 1, true))
+  press(debug_view, dw, db, "o", pr)
+  ok("p52: o fans a profile out, its runtime_env masked",
+    prop(debug_view, "pm-prof", "base_env_files") and prop(debug_view, "pm-prof", "runtime_env.TOKEN")
+      and not text(db):find("prof-secret-2718", 1, true), text(db))
+  input("MODE=dev")
+  press(debug_view, dw, db, "e", prop(debug_view, "pm-prof", "runtime_env+"))
+  ok("p52: e adds a runtime_env var to the profile", (store.get_profile("pm-prof").runtime_env or {}).MODE == "dev",
+    vim.inspect(store.get_profile("pm-prof")))
+  input("pm-new")
+  press(debug_view, dw, db, "a", find(debug_view, function(r) return r.kind == "bucket-header" and r.section == "profiles" end))
+  ok("p52: a on the Profiles section creates a profile", store.get_profile("pm-new") ~= nil)
+  confirms = {}
+  answer_confirm("Delete")
+  press(debug_view, dw, db, "D", find(debug_view, function(r) return r.kind == "profile" and r.name == "pm-new" end))
+  ok("p52: D deletes a profile after the confirm", #confirms == 1 and store.get_profile("pm-new") == nil)
+
+  vim.ui.input, vim.ui.select, props._confirm = real_input, real_select, real_confirm
+  for _, n in ipairs({ "pm-run" }) do pcall(store.remove, n) end
+  pcall(store.remove, "pm-prof", { kind = "profiles" }); pcall(store.remove, "pm-prof", { kind = "profiles" })
+  debug_view.on_close(); tests_view.on_close()
+  pcall(vim.api.nvim_win_close, dw, true)
+  discovery._reset_for_tests()
+  worktree.set_active(prev)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
