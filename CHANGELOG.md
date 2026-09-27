@@ -2,6 +2,27 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.3] — 2026-09-27 — delete, edit test configs, create env files, manage profiles — in the panes (ADR 0199 §6.5)
+
+Patch. Needs **auto-run v0.1.16**. Reviewed by Lector (design + two rounds).
+Johno's ease-of-use review after v0.5.1: four jobs still sent users to JSON.
+
+- **`D` deletes** an entry point, test config, profile or env variable — always
+  after a confirm naming each file, its tier and whether git tracks it (else the
+  deletion is permanent). With a local layer over a tracked one the choice is
+  explicit (the local layer alone, so the tracked one applies again, or both).
+  A launch.json entry is refused: it lives in launch.json.
+- **Test configs are edited in place** — `o` / `e`, the same property rows as
+  entry points. One editor (`views/_config_props.lua`) for entry points, test
+  configs and profiles, so env values are masked in one place for all three.
+- **`n` creates an env file** where discovery lists it.
+- **Profiles section** (debug pane): list, edit, add, delete. No selection
+  marker — choosing a profile is a config's `profile` row, picked from the
+  existing profiles.
+- **List edits land exactly as typed** (env files, a profile's base env files
+  and secret manifests), also fixing v0.5.1's entry-point env-file edit, which
+  appended to the inherited list instead of replacing it.
+
 ## [v0.5.2] — 2026-09-27 — `shared/loading.lua` removed
 
 Patch. `lua/auto-finder/shared/loading.lua`, the generation-tagged "Loading…"

@@ -436,4 +436,56 @@ function M.add(row)
   _add_var_flow(path)
 end
 
+---`n`: create a new env file — asks for a name, placed in the worktree root
+---(`.config/<name>` or `.vscode/<name>` also work: where env discovery looks),
+---through auto-run's `env.create_file`, which refuses an existing file and
+---anything outside the repository (ADR 0199 §6.5).
+---@param _row table?  unused: the file always lands under the worktree
+function M.create_file(_row)
+  local env = _env()
+  if not env or type(env.create_file) ~= "function" then
+    return log().notify("this auto-run.nvim cannot create env files — update it",
+      { component = "view.env", level = "warn", notify = true })
+  end
+  local dirs = require("auto-run.store").resolve_run_dirs()
+  local root = dirs.root or dirs.anchor
+  vim.ui.input({
+    prompt = "New env file (in " .. vim.fn.fnamemodify(root, ":~")
+      .. "; .config/NAME or .vscode/NAME also work): ",
+    default = ".env.local",
+  }, function(name)
+    if not name or name == "" then return end
+    local path = name:sub(1, 1) == "/" and name or (root .. "/" .. name)
+    local ok, err = env.create_file(path)
+    if not ok then
+      return log().notify(tostring(err and err.message or err), { component = "view.env", level = "error", notify = true })
+    end
+    log().notify("created " .. vim.fn.fnamemodify(path, ":~") .. " — `a` on it adds a variable, `s` selects it",
+      { component = "view.env", notify = true })
+  end)
+end
+
+---`D` on an env variable: remove that line from its file, after a confirm
+---that names the key and the file — never the value (§8.2).
+---@param row table?
+---@return boolean handled
+function M.delete_var(row)
+  if not (row and row.kind == "env-var" and row.path and row.key) then return false end
+  local env = _env()
+  if not env or type(env.remove_var) ~= "function" then
+    log().notify("this auto-run.nvim cannot remove env variables — update it",
+      { component = "view.env", level = "warn", notify = true })
+    return true
+  end
+  local props = require("auto-finder.views._config_props")
+  local c = props._confirm("Remove " .. row.key .. " from " .. vim.fn.fnamemodify(row.path, ":~") .. "?",
+    "&Delete\n&Cancel", 2)
+  if c ~= 1 then return true end
+  local ok, err = env.remove_var(row.path, row.key)
+  if not ok then
+    log().notify(tostring(err and err.message or err), { component = "view.env", level = "error", notify = true })
+  end
+  return true
+end
+
 return M

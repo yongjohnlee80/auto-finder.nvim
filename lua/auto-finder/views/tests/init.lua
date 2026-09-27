@@ -104,6 +104,7 @@ local HL = {
   fm_value    = "AutoFinderTestsFmValue",     -- detail-row value
   fm_path     = "AutoFinderTestsFmPath",      -- path-shaped detail value
   fm_null     = "AutoFinderTestsFmNull",      -- (none) placeholder
+  fm_masked   = "AutoFinderTestsFmMasked",    -- (masked) env values in property rows
 }
 
 local NS = vim.api.nvim_create_namespace("auto-finder.tests.hl")
@@ -136,6 +137,7 @@ local function _apply_default_highlights()
   set(HL.fm_value,    "Normal")
   set(HL.fm_path,     "Directory")
   set(HL.fm_null,     "Comment")
+  set(HL.fm_masked,   "Comment")
 end
 
 _apply_default_highlights()
@@ -440,8 +442,11 @@ local function _render(bufnr)
   test_configs.emit({
     lines = lines, rows = rows, mark = mark,
     collapsed = M._collapsed[CONFIG_SECTION_ID] == true,
+    expanded = M._expanded,
     hl = { chevron = HL.chevron, header = HL.config_header, name = HL.test,
            marker = HL.glyph_pass, note = HL.duration, empty = HL.empty },
+    props_hl = { label = HL.fm_label, value = HL.fm_value, null = HL.fm_null,
+                 masked = HL.fm_masked, path = HL.fm_path },
   })
   lines[#lines + 1] = ""
 
@@ -647,6 +652,10 @@ local function _open(row)
     return
   end
   if test_configs.open(row, _open_file) then return end
+  if row.prop then   -- a test config's property row: its file row opens it
+    if row.filepath then _open_file(row.filepath) end
+    return
+  end
   if row.kind == "env-header" then
     -- Persisted via the same dir mechanism as folder collapse.
     _toggle_collapsed({ id = ENV_SECTION_ID, type = "dir" })
@@ -841,6 +850,13 @@ local function _toggle_expand(row)
     return
   end
   if env_section.toggle_expand(row, M._expanded) then
+    _rerender()
+    return
+  end
+  if row.kind == "test-config" then
+    -- Fan out into the shared property rows (ADR 0199 §6.5).
+    local key = "test-config:" .. tostring(row.name)
+    M._expanded[key] = not M._expanded[key] or nil
     _rerender()
     return
   end
@@ -1091,9 +1107,18 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("e", function()
       local row = _row_under_cursor(panel_winid)
       if env_section.edit_var(row) then return end
+      if require("auto-finder.views._config_props").edit(row) then return end
       test_configs.open(row, _open_file)
     end,
-    "auto-finder.tests: env var → edit its value (prefilled); test config → open its file")
+    "auto-finder.tests: property row → edit it in place (env values masked); env var → edit its value; test config → open its file")
+  set("D", function()
+      local row = _row_under_cursor(panel_winid)
+      if require("auto-finder.views._config_props").delete(row) then return end
+      env_section.delete_var(row)
+    end,
+    "auto-finder.tests: DELETE — test config / env var under cursor (asks first; names the file, its tier and git status)")
+  set("n", function() env_section.create_file(_row_under_cursor(panel_winid)) end,
+    "auto-finder.tests: new env file (in the worktree root, .config/ or .vscode/ — where env discovery looks)")
   set("a", function()
     local row = _row_under_cursor(panel_winid)
     if test_configs.add(row) then return end

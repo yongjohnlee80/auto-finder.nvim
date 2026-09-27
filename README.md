@@ -550,13 +550,15 @@ structured cap report when a bounded full scan aborts.
 | `r` | run position under cursor (test / file / namespace / folder = suite) |
 | `R` | re-run the last position run from this panel |
 | `d` | debug the test under cursor (dap strategy) |
-| `o` | toggle details on a test row / env file (KEY=VALUE); collapse on containers |
+| `o` | toggle details on a test row / env file (KEY=VALUE) / **test config** (its properties, like an entry point); collapse on containers |
 | `O` | toggle ALL: collapse everything if anything is open, else expand everything |
 | `i` | output float — the run's full terminal output (`go test` logs) |
 | `s` | test config → pick it for its runtime (again: clear); shared-pick row → clear it; env file → select it; elsewhere → choose the env file |
 | `w` / `b` / `c` | choose the active worktree / base / a runtime's test config |
 | `a` | Test configs section → create a test config (kind, runtime, name); env row / Env header → add KEY=VALUE |
-| `e` | env var → edit its value; test config → open its file |
+| `e` | property row → edit it in place (env values masked); env var → edit its value; test config → open its file |
+| `D` | **delete** the test config or env variable under cursor — asks first, naming the file, its tier and whether git tracks it |
+| `n` | new env file (worktree root, `.config/` or `.vscode/`) |
 | `S` | full worktree scan (bounded; `S` again cancels) |
 | `x` | stop running test jobs |
 | `?` | help overlay |
@@ -564,7 +566,9 @@ structured cap report when a bounded full scan aborts.
 ### debug
 
 Sections: **Entry Points** (store configs `kind=debug|run`, grouped by kind,
-provenance/tier annotated), **Env**, **Active Sessions** (live nvim-dap
+provenance/tier annotated), **Env**, **Profiles** (env profiles, listed and
+edited like entry points — choosing one is an entry point's `profile` row),
+**Active Sessions** (live nvim-dap
 sessions), and **Breakpoints** (the persisted per-repo store merged with live
 dap state, grouped by file — orphaned persisted entries render dimmed).
 
@@ -574,7 +578,9 @@ the Cargo identity — shown even when unset, and `e` on a row edits it in place
 (prefilled; lists as one shell-split line; an empty answer clears). **Env values
 stay masked**: the rows show keys and `${VAR}` / `cmd:` refs only, the prompt is
 prefilled with `KEY=` alone, and a malformed answer is refused without echoing
-it. `launch.json` is an import source (`I`), not a live section.
+it. A list edit lands exactly as typed — it replaces the inherited entries
+rather than adding to them. `launch.json` is an import source (`I`), not a
+live section.
 
 The debug panel has **no delete surface** — breakpoints are managed via
 nvim-dap directly (sign column / API); config files via the files panel.
@@ -586,8 +592,10 @@ nvim-dap directly (sign column / API); config files via the files panel.
 | `d` | entry point → **debug** (dap) |
 | `o` | entry point → fan out its properties; session state / breakpoint condition; collapse on headers |
 | `O` | toggle ALL sections open/closed |
-| `e` | property row → edit in place; entry point → open its config file; env var → edit its value |
-| `a` | add an entry point (kind, runtime, name — auto-run scaffolds it); env row / Env header → add KEY=VALUE |
+| `e` | property row → edit in place; entry point / profile → open its file; env var → edit its value |
+| `D` | **delete** the entry point, profile or env variable under cursor — asks first, naming each file, its tier and whether git tracks it; with a local layer over a tracked one you choose the local layer alone (the tracked one applies again) or both |
+| `n` | new env file (worktree root, `.config/` or `.vscode/`) |
+| `a` | add an entry point (kind, runtime, name — auto-run scaffolds it); Profiles → add a profile; env row / Env header → add KEY=VALUE |
 | `E` | export the entry point to `launch.json` (nearest reachable, else `<worktree>/.config/launch.json`) |
 | `I` | import `launch.json` configurations into the store (one, or all; conflicts skipped and reported) |
 | `s` | env file → select it; elsewhere → choose the env file |

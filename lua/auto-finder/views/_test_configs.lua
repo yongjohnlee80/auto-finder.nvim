@@ -57,7 +57,9 @@ local function candidate_runtimes(d)
 end
 
 ---Emit the section into the tests view's render buffers.
----@param opts { lines: string[], rows: table[], mark: fun(l0:integer,c0:integer,c1:integer,hl:string), collapsed: boolean, hl: { chevron: string, header: string, name: string, marker: string, note: string, empty: string } }
+---`opts.expanded["test-config:<name>"]` fans that config out into the shared
+---property rows (`views/_config_props`), highlighted with `opts.props_hl`.
+---@param opts { lines: string[], rows: table[], mark: fun(l0:integer,c0:integer,c1:integer,hl:string), collapsed: boolean, expanded: table?, props_hl: table?, hl: { chevron: string, header: string, name: string, marker: string, note: string, empty: string } }
 function M.emit(opts)
   local lines, rows, mark, hl = opts.lines, opts.rows, opts.mark, opts.hl
   local d = deps()
@@ -122,7 +124,15 @@ function M.emit(opts)
     if on then mark(l0, 2, 3, hl.marker) end
     mark(l0, #prefix, #prefix + #name, hl.name)
     mark(l0, #prefix + #name, #line, hl.note)
-    rows[#rows + 1] = { kind = "test-config", lnum = #lines, name = c.name, runtime = c.runtime }
+    local crow = { kind = "test-config", lnum = #lines, name = c.name, runtime = c.runtime }
+    rows[#rows + 1] = crow
+    -- `o` fans a test config out into the SAME property rows as an entry
+    -- point (views/_config_props — one editor, one masking boundary).
+    if opts.expanded and opts.expanded["test-config:" .. tostring(c.name)] and opts.props_hl then
+      require("auto-finder.views._config_props").emit({
+        lines = lines, rows = rows, mark = mark, parent = crow, row_kind = "prop", hl = opts.props_hl,
+      })
+    end
   end
 
   if shared then
