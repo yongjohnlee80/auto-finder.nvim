@@ -1,8 +1,7 @@
 ---Shared Config-section helper for the tests + debug views — the
 ---launch-config companion to `_env_section.lua`. Module-PRIVATE to
 ---auto-finder's views (leading underscore keeps it out of the view
----registry's `_available_section_types` scan, same as `_env_section`
----and `_neotree`).
+---registry's `_available_section_types` scan, same as `_env_section`).
 ---
 ---Surfaces the VSCode `launch.json` configs auto-run parses
 ---(`auto-run.import.configs_list`), lets the user **select** one as the

@@ -22,9 +22,6 @@ local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 local sib = vim.fn.fnamemodify(root, ":h:h")
 local branch_dir = vim.fn.fnamemodify(root, ":t")
-for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
-  if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
-end
 local REQUIRED = {
   ["worktree.nvim"]  = { "lua/worktree/watch.lua", "worktree.watch:changed" },
   ["auto-core.nvim"] = { "lua/auto-core/git/watch.lua", "core.git.state:changed" },
@@ -228,42 +225,46 @@ do
 end
 
 -- ─── [6] no DOUBLE working-tree watch when a watched worktree becomes cwd ────
---   (lector PR #42 finding 2)
+--   (lector PR #42 finding 2). The files slot used to hold its own recursive cwd
+--   watch, so a watched worktree that became cwd could be watched twice. The
+--   rebuilt files slot (ADR-0200) holds only non-recursive per-directory watches
+--   in `watchers._dirs`, so the repos-owned handle is the ONLY working-tree watch,
+--   whatever the cwd — and a re-arm must reuse it, never stack a second.
 
 print("\n[6] a watched worktree that becomes cwd keeps ONE working-tree watch")
 do
   local watchers = require("auto-finder.core.watchers")
-  -- fwt is watched (from [4]) and is NOT cwd. Its working-tree watch is
-  -- repos-owned.
-  ok("[6] precondition: fwt is watched and repos-owned, cwd does not cover it",
-    watchers._repo_fs[fwt] ~= nil and watchers._handles[fwt] == nil,
-    ("repo_fs=%s files=%s"):format(tostring(watchers._repo_fs[fwt] ~= nil),
-      tostring(watchers._handles[fwt] ~= nil)))
+  local h_before = watchers._repo_fs[fwt]
+  ok("[6] precondition: fwt is watched and has its repos-owned working-tree watch", h_before ~= nil)
 
-  -- Simulate cd INTO the watched worktree WITHOUT a full reload — a bare
-  -- ensure_started re-arm, which is what happens on several refresh triggers.
+  -- cd INTO the watched worktree WITHOUT a full reload — a bare ensure_started
+  -- re-arm, which is what happens on several refresh triggers.
   local prev = vim.fn.getcwd()
   vim.fn.chdir(fwt)
   require("auto-finder.core").ensure_started({})
-
-  ok("[6] *** the files panel now owns fwt's working-tree watch ***",
-    watchers._handles[fwt] ~= nil)
-  ok("[6] *** and the repos-owned duplicate is RETIRED (no double watcher) ***",
-    watchers._repo_fs[fwt] == nil,
-    ("repo_fs=%s files=%s"):format(tostring(watchers._repo_fs[fwt] ~= nil),
-      tostring(watchers._handles[fwt] ~= nil)))
-  ok("[6] fwt still has exactly one working-tree watch",
-    watchers.has_worktree_fs_watch(fwt) == true)
+  ok("[6] *** a re-arm with cwd == the watched worktree reuses the one handle ***",
+    watchers._repo_fs[fwt] ~= nil and rawequal(watchers._repo_fs[fwt], h_before))
+  ok("[6] *** and no files-slot watch was added for it (no panel is shown) ***",
+    watchers._dirs[fwt] == nil and watchers.dir_watch_count() == 0,
+    ("dirs=%d"):format(watchers.dir_watch_count()))
 
   -- cd AWAY via the realistic path (reload = stop + start, which cwd changes
-  -- take). The repos handle re-owns it, and there is still exactly one.
+  -- take). A fresh handle, still exactly one.
   vim.fn.chdir(prev)
   require("auto-finder.core").reload({})
   vim.wait(200, function() return watchers._repo_fs[fwt] ~= nil end)
-  ok("[6] *** after cd away, the repos handle re-owns fwt, still exactly one ***",
-    watchers._repo_fs[fwt] ~= nil and watchers._handles[fwt] == nil,
-    ("repo_fs=%s files=%s"):format(tostring(watchers._repo_fs[fwt] ~= nil),
-      tostring(watchers._handles[fwt] ~= nil)))
+  -- count auto-core's LIVE recursive handles rooted at fwt (the handle map is keyed by path, so it cannot
+  -- show a duplicate by itself)
+  local function live_recursive(root)
+    local n = 0
+    for _, st in ipairs(require("auto-core.fs.watch").list()) do
+      if st.root == root and st.opts and st.opts.recursive then n = n + 1 end
+    end
+    return n
+  end
+  ok("[6] *** after cd away and a reload, fwt has exactly one live recursive watch ***",
+    live_recursive(fwt) == 1 and watchers.has_worktree_fs_watch(fwt) == true,
+    ("live recursive handles on fwt: %d"):format(live_recursive(fwt)))
 end
 
 -- ─── [7] a pending file-refresh does NOT publish after core.stop ─────────────

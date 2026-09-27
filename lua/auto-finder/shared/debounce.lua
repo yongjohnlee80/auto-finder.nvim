@@ -1,10 +1,8 @@
 ---auto-finder.shared.debounce — reusable debounce helper.
 ---
----Two of the auto-finder modules grew their own copy of the
----"cancel + reschedule on each call" coalescer: `shared/neotree.lua`
----uses a 150 ms coalescer to collapse refresh storms before
----calling `manager.refresh`, and `core/init.lua`'s file-event
----translator uses a 100 ms coalescer to batch burst publishes.
+---Auto-finder modules grew their own copies of the "cancel +
+---reschedule on each call" coalescer (the core event translators
+---batch burst publishes with one).
 ---Phase 8 extracts that pattern into a single helper so future
 ---debounce-needing modules share the implementation.
 ---

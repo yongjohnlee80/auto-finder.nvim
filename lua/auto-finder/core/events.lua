@@ -31,13 +31,17 @@ local M = {}
 
 M.TOPICS = {
   ["auto-finder.core.files:changed"] = {
-    doc = "Files cache mutated by a translated core.file:* event " ..
-          "or by an internal directory-rescan. `kind='subtree_stale'` " ..
-          "is the catch-all for directory-scoped bursts where " ..
-          "file-event reassembly is unreliable.",
-    payload = "{ cwd = string, kind = 'upsert'|'delete'|'subtree_stale', " ..
-              "paths = string[], parents = string[]? }",
-    publishers = { "auto-finder.core.files" },
+    doc = "Something changed in a directory the files view asked core to watch " ..
+          "(core.watchers.watch_dir). `kind='dirty'` means libuv could not name " ..
+          "the child (core.fs.dir:dirty); re-read `dir`. ADR-0200 §4.4.",
+    payload = "{ kind = 'created'|'modified'|'deleted'|'dirty', path = string, dir = string }",
+    publishers = { "auto-finder.core" },
+  },
+  ["auto-finder.core.files:filters"] = {
+    doc = "An auto-core.files filter pref changed (translated from " ..
+          "state.core:files.<what>:changed). The files view re-filters.",
+    payload = "{ what = 'show_hidden'|'show_dotfiles' }",
+    publishers = { "auto-finder.core" },
   },
   ["auto-finder.core.git:changed"] = {
     doc = "Git status cache mutated by a translated " ..
@@ -56,23 +60,6 @@ M.TOPICS = {
     doc = "Repos registry mutated, or worktree:switched fired.",
     payload = "{ kind = string, repo_root = string }",
     publishers = { "auto-finder.core.repos" },
-  },
-  ["auto-finder.core.ready"] = {
-    doc = "A cache area transitioned cold/warming → ready, OR " ..
-          "transitioned to a partial-coverage state due to " ..
-          "max_handles exhaustion (per ADR §2.6 handle-cap " ..
-          "degradation). `areas` is keyed by area name with " ..
-          "value 'ready' | 'partial'.",
-    payload = "{ areas = table<string, 'ready'|'partial'> }",
-    publishers = { "auto-finder.core" },
-  },
-  ["auto-finder.core.metrics:paint"] = {
-    doc = "Instrumentation — view render swap complete. " ..
-          "Captured by smokes to assert A5 (branch-switch refresh " ..
-          "≤ 50% pre-refactor baseline).",
-    payload = "{ view = string, dur_ms = number, generation = integer, " ..
-              "paths_count = integer? }",
-    publishers = { "auto-finder.core", "auto-finder.view.*" },
   },
 }
 

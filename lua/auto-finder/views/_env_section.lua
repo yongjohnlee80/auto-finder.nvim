@@ -1,7 +1,7 @@
 ---Shared Env-section helper for the tests + debug views (ADR-0048
 ---§8.4, r5). Module-PRIVATE to auto-finder's views — not a public
 ---surface (leading underscore keeps it out of the view registry's
----`_available_section_types` scan, same as the `_neotree` precedent).
+---`_available_section_types` scan).
 ---
 ---Each host view still owns its section header, collapse
 ---persistence, event subscriptions, and keymap registration; this

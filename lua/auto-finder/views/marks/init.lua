@@ -1,6 +1,6 @@
 ---View — nvim marks (global A-Z + local a-z across loaded buffers).
 ---
----Flat scratch-buffer list, NOT neo-tree-backed. Renders all marks
+---Flat scratch-buffer list with its own renderer. Renders all marks
 ---reachable from `vim.fn.getmarklist()`:
 ---  - Global marks (A-Z) at the top, each with a file path + line.
 ---  - Local marks (a-z) grouped per loaded buffer (any buffer with
@@ -18,7 +18,7 @@
 ---  i     show full info for the mark under the cursor in a small
 ---        bordered floating window (full path, line/col, buffer
 ---        load state, file size + mtime, full preview). Same role
----        as neo-tree's `i` show-file-details popup. `q` / `<Esc>`
+---        as the files view's `i` file-details float. `q` / `<Esc>`
 ---        dismiss. `nowait` intercepts before nvim's insert-mode
 ---        trigger (the buffer is `nomodifiable` either way).
 ---  R     manual refresh (re-collect + re-render).
@@ -431,7 +431,7 @@ local function _jump(rec)
 end
 
 -- Open a small bordered float showing the mark's full details —
--- mirrors neo-tree's `show_file_details_popup` keymap (`i`). The
+-- mirrors the files view's file-details keymap (`i`). The
 -- popup is its own buffer + window so `q`/`<Esc>` close just the
 -- popup without affecting the marks panel underneath.
 local function _show_info(rec)

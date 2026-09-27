@@ -5,9 +5,6 @@ local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 local sib = vim.fn.fnamemodify(root, ":h:h")
 local branch_dir = vim.fn.fnamemodify(root, ":t")
-for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
-  if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
-end
 for _, plugin in ipairs({ "worktree.nvim", "auto-core.nvim" }) do
   -- A candidate must be able to SERVE the request, not merely exist (see the
   -- long note that used to live here: the LAST prepend wins, so a stale sibling

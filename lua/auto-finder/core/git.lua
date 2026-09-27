@@ -92,7 +92,7 @@ function M.snapshot_now(cwd)
   end
 
   -- auto-core.git.status resolves cwd → repo_root internally. On
-  -- cache miss it shells out to `git status --porcelain=v1` and
+  -- cache miss it shells out to `git status --porcelain=v2 -z` and
   -- caches the result; on hit it returns `(entries, cached_at_ms)`.
   local entries, cached_at_or_err = gs.get(cwd)
   if not entries then
@@ -152,9 +152,8 @@ function M.snapshot_async(cwd, cb)
     return
   end
   -- Wait for the next auto-finder.core.git:changed event, then
-  -- fire. (Phase 4's `auto-finder.core.ready` topic is for files;
-  -- git readiness has no equivalent "global ready" signal — it's
-  -- per-repo and populates on first query.)
+  -- fire. (Git readiness has no "global ready" signal — it's per-repo
+  -- and populates on first query.)
   local events_mod = require("auto-finder.core.events")
   local handle
   handle = events_mod.subscribe("auto-finder.core.git:changed", function()

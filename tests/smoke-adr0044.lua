@@ -32,15 +32,15 @@ local plugins_root = vim.fn.fnamemodify(plugin_root, ":h:h")
 for _, p in ipairs({
   plugin_root,
   LAZY .. "/auto-core.nvim",
-  LAZY .. "/nui.nvim",
-  LAZY .. "/plenary.nvim",
   plugins_root .. "/auto-core.nvim/main",
+  -- Same-branch sibling after `main`, so it wins (prepend reverses order): the files slot needs
+  -- auto-core.fs.scan, and a cross-repo change lives in two same-named worktrees until it merges.
+  plugins_root .. "/auto-core.nvim/" .. vim.fn.fnamemodify(plugin_root, ":t"),
 }) do
   if vim.fn.isdirectory(p) == 1 then
     vim.opt.runtimepath:prepend(p)
   end
 end
--- Auto-finder ships its own forked neo-tree at lua/auto-finder/neotree.
 
 vim.o.columns = 200
 vim.o.lines = 60
@@ -65,11 +65,6 @@ local function ok(name, cond, detail)
   end
 end
 
-require("auto-finder.neotree").setup({
-  window = { auto_expand_width = true },
-  filesystem = { hijack_netrw_behavior = "disabled" },
-})
-
 -- ═══════════════════════════════════════════════════════════════════
 -- Section [45] below is VERBATIM from tests/smoke.lua (which now
 -- points here). Keep in sync.
@@ -79,7 +74,7 @@ print("\n[45] ADR-0044 — worktree:switched does not displace a non-panel edito
 ;(function()
   local _af   = require("auto-finder")
   local _core = require("auto-core")
-  local _mgr  = require("auto-finder.neotree.sources.manager")
+  local _fview = require("auto-finder.views.files")
 
   -- Fresh setup → clean panel carrying the default sections. setup()
   -- configures; open(true) actually mounts + focuses the panel window.
@@ -90,27 +85,23 @@ print("\n[45] ADR-0044 — worktree:switched does not displace a non-panel edito
     panel ~= nil and vim.api.nvim_win_is_valid(panel)
       and vim.w[panel].auto_finder_panel == 1)
 
-  -- Focus files (filesystem). on_focus arms the worktree:switched →
-  -- reanchor_to_cwd subscription (files is built live_refresh=true) and
-  -- mounts synchronously, so section._bufnr is valid → the reanchor guard
-  -- passes.
+  -- Focus files. on_focus resumes the view, which subscribes to the
+  -- translated worktree switch (auto-finder.core.repos:changed) and DirChanged.
   local _files_idx = require("auto-finder.sections")._by_name["files"]
   _af.focus(_files_idx)
 
-  -- The panel-bound filesystem state (winid == panel) is what reanchor
-  -- retargets; reanchor only touches filesystem states that carry a winid.
+  -- The files view's model root is what a re-root retargets; its window is the panel.
   local function _fs_state()
-    for _, s in ipairs(_mgr._get_all_states()) do
-      if s.name == "filesystem" and s.winid == panel then return s end
-    end
-    return nil
+    local st = _fview._state
+    if not (st.shown and st.model) then return nil end
+    return { path = st.model.root, winid = st.winid }
   end
   local _old_cwd = vim.fn.getcwd()
   vim.wait(500, function()
     local s = _fs_state(); return s ~= nil and s.path == _old_cwd
   end, 20)
   local _fs = _fs_state()
-  ok("p45: filesystem state bound to panel, anchored at cwd (pre-switch)",
+  ok("p45: files view bound to the panel, rooted at cwd (pre-switch)",
     _fs ~= nil and _fs.winid == panel and _fs.path == _old_cwd,
     string.format("fs=%s winid=%s path=%s cwd=%s",
       tostring(_fs ~= nil), tostring(_fs and _fs.winid),
@@ -147,7 +138,7 @@ print("\n[45] ADR-0044 — worktree:switched does not displace a non-panel edito
       vim.api.nvim_buf_get_name(_editor_buf)))
 
   -- Simulate the worktree switch faithfully: worktree.switch_to :cd's to the
-  -- new root, THEN fires `worktree:switched`. reanchor_to_cwd reads
+  -- new root, THEN fires `worktree:switched`. The re-root reads
   -- vim.fn.getcwd(), so we cd first. Use a fresh real tempdir as the new
   -- root (re-read getcwd() for the canonical form — handles macOS /private).
   local _new_cwd = vim.fn.tempname()
@@ -156,17 +147,17 @@ print("\n[45] ADR-0044 — worktree:switched does not displace a non-panel edito
   _new_cwd = vim.fn.getcwd()
   _core.events.publish("worktree:switched", { from = _old_cwd, to = _new_cwd })
 
-  -- reanchor is vim.schedule'd off the subscription; wait until the fs
-  -- state.path re-anchors to the new cwd (the observable EFFECT).
+  -- The re-root is vim.schedule'd; wait until the model root moves to the
+  -- new cwd (the observable EFFECT).
   vim.wait(500, function()
     local s = _fs_state(); return s ~= nil and s.path == _new_cwd
   end, 20)
   local _fs_after = _fs_state()
 
-  -- A — EFFECT: reanchor actually ran (state.path moved to the new cwd).
+  -- A — EFFECT: the re-root actually ran (the model root moved to the new cwd).
   -- Proves the worktree:switched handler fired; guards against a vacuous
   -- "nothing happened, so nothing was displaced" pass.
-  ok("p45: filesystem state re-anchored to new cwd after worktree:switched",
+  ok("p45: files view re-rooted to new cwd after worktree:switched",
     _fs_after ~= nil and _fs_after.path == _new_cwd,
     string.format("path=%s new_cwd=%s",
       tostring(_fs_after and _fs_after.path), _new_cwd))

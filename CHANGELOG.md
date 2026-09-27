@@ -2,6 +2,71 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.0] — 2026-09-27 — the files and buffers slots without the neo-tree fork (ADR-0200)
+
+**Minor, breaking.** Move your caret to `^0.5.0`. Needs auto-core **v0.2.30**
+(`fs.scan`, `git.status.get_async`, `core.fs.dir:dirty`); md-harpoon **v0.2.4**
+keeps its open slots refreshing now that the cwd is no longer watched as a
+whole. Reviewed by Lector (M1–M5).
+
+The files pane was slow on large workspaces and kept working while hidden: it
+rendered through the 21k-line vendored neo-tree fork over a recursive watch of
+the whole cwd, and `<leader>e` toggles could start a storm of full rescans. The
+fork is deleted. The files and buffers slots are rebuilt in-house and keep
+today's look.
+
+**What you get**
+
+- A **lazy tree**: a directory is read only when expanded, through
+  `auto-core.fs.scan` (single-flight per path, rate-limited, batched with
+  yields). An event re-reads only the directory it names; there is no
+  full-root refresh.
+- **Watches follow expansion**: one non-recursive watch per expanded directory,
+  owned by `core/watchers.lua`. **Hiding the panel does nothing further**: reads
+  are cancelled, every watch is released, subscriptions and timers are disposed.
+  Showing it re-reads each expanded directory once.
+- **A toggle storm is bounded** by the expanded set and the scanner's interval.
+  It can no longer reach a directory you have not expanded.
+- **Git colours on names** again, from one shared `git status --porcelain=v2 -z`
+  per repo per settled change (nested repos answered by their own read). A
+  commit or `git add` from a terminal recolours too: the view holds one narrow
+  `git.watch` per shown repo, released on hide. A clean file next to a new one
+  is no longer coloured untracked (the fork's rule was).
+- **Same look**: icons, indent markers, dotfile dimming, diagnostics signs,
+  cut/copy marks, the root row, and the panel window's options, byte-for-byte
+  against goldens captured from the fork (`tests/parity/`). Every highlight is an
+  `AutoFinder*` group that links to the `NeoTree*` name themes already style, so
+  catppuccin / tokyonight / everforest / transparency tweaks keep applying.
+- **`i`** shows file details (name, path, type, size, created, modified, git code).
+
+**What changed for you**
+
+| Before | Now |
+| --- | --- |
+| `neo_tree = { … }` in `opts` | removed (warned once, ignored); use `files = { follow, never_show, mappings, auto_expand_width }` |
+| `files` / `buffers` = `{ window = { mappings } }` | `files.mappings = { [lhs] = action \| fn \| false }`; the buffers slot has no options |
+| `nui.nvim`, `plenary.nvim` dependencies | no longer needed |
+| upstream `neo-tree.nvim` had to be disabled | no longer collides |
+| repos view fell back to a bundled neo-tree source on old worktree.nvim | `worktree.nvim` `^0.5.0` required for the repos view; its absence is reported once, loudly |
+| `repos follow` (admin REPL), `cfg.repos.follow` | removed (they did nothing) |
+| `e` toggled auto-expand | `files.auto_expand_width` (default on) |
+
+Kept keys: `<CR>` / `S` / `s` / `t`, `a` / `A` / `d` / `r` / `m`, `y` / `x` / `p`,
+`/` / `<C-x>`, `H`, `C` / `z`, `R`, `i`, `?`. Dropped: `P` preview, `w` window
+picker, `O` expand-all, `o*` sort orders, `D`, `#`, `f`, `.`, `<BS>`, `<`, `>`,
+`b`, `c`, `<C-r>`, `e`. See the README's "Files view".
+
+**Tests** — `tests/adr0200-files.lua` counts the work (directory reads, git
+subprocesses, watch handles) for the hidden pane, in-flight hide / re-root, the
+toggle storm, watch-set = expanded-set, live updates, git colours and keymaps;
+`tests/adr0200-files-mutants.sh` requires each guarantee to be load-bearing;
+`tests/severance.lua` keeps the fork out, with the `NeoTree*` alias bridge as its
+one named exemption; `tests/parity/compare.lua` is the look gate (`run-all.sh`
+fails without `AF_PARITY_DEPS` unless `AF_SKIP_PARITY=1`, which it prints).
+Fork-internal suites (`adr0059-e2e`, `adr0060-r1-view-lifecycle`,
+`adr0060-gitignore-probe`, `adr0069-git-reads`, `v0267-loop-guard`,
+`bench-files-panel`) are removed with the mechanisms they tested.
+
 ## [v0.4.31] — 2026-09-23 — `d` archives a review instead of deleting it, and `D` deletes
 
 Patch. Completes ADR-0195 across auto-core, worktree.nvim and auto-finder.

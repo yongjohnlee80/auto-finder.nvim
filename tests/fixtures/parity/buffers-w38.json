@@ -1,0 +1,27 @@
+{"filetype":"auto-finder","lines":[
+  "  OPEN BUFFERS in /tmp/af-parity-fixture",
+  "    docs",
+  "   └ 󰍔 readme.md #1",
+  "    src/util",
+  "   └ 󰢱 helper.lua #2                    E",
+  "   󱁤 Makefile #3"
+],"spans":[
+  {"col":1,"end_col":5,"end_row":0,"hl":"NeoTreeDirectoryIcon","hl_resolved":{"fg":"#89b4fa"},"priority":4096,"row":0},
+  {"col":5,"end_col":43,"end_row":0,"hl":"NeoTreeRootName","hl_resolved":{"bold":true,"italic":true},"priority":4096,"row":0},
+  {"col":3,"end_col":7,"end_row":1,"hl":"NeoTreeDirectoryIcon","hl_resolved":{"fg":"#89b4fa"},"priority":4096,"row":1},
+  {"col":7,"end_col":11,"end_row":1,"hl":"NeoTreeDirectoryName","hl_resolved":{"fg":"#89b4fa"},"priority":4096,"row":1},
+  {"col":3,"end_col":7,"end_row":2,"hl":"NeoTreeIndentMarker","hl_resolved":{"fg":"#525569"},"priority":4096,"row":2},
+  {"col":7,"end_col":12,"end_row":2,"hl":"MiniIconsGrey","hl_resolved":[],"priority":4096,"row":2},
+  {"col":12,"end_col":21,"end_row":2,"hl":"NeoTreeFileName","hl_resolved":[],"priority":4096,"row":2},
+  {"col":21,"end_col":24,"end_row":2,"hl":"NeoTreeBufferNumber","hl_resolved":{"fg":"#f5c2e7"},"priority":4096,"row":2},
+  {"col":3,"end_col":7,"end_row":3,"hl":"NeoTreeDirectoryIcon","hl_resolved":{"fg":"#89b4fa"},"priority":4096,"row":3},
+  {"col":7,"end_col":15,"end_row":3,"hl":"NeoTreeDirectoryName","hl_resolved":{"fg":"#89b4fa"},"priority":4096,"row":3},
+  {"col":3,"end_col":7,"end_row":4,"hl":"NeoTreeIndentMarker","hl_resolved":{"fg":"#525569"},"priority":4096,"row":4},
+  {"col":7,"end_col":12,"end_row":4,"hl":"MiniIconsAzure","hl_resolved":{"fg":"#89b4fa"},"priority":4096,"row":4},
+  {"col":12,"end_col":22,"end_row":4,"hl":"NeoTreeFileName","hl_resolved":[],"priority":4096,"row":4},
+  {"col":22,"end_col":25,"end_row":4,"hl":"NeoTreeBufferNumber","hl_resolved":{"fg":"#f5c2e7"},"priority":4096,"row":4},
+  {"col":45,"end_col":46,"end_row":4,"hl":"DiagnosticError","hl_resolved":{"fg":"#f38ba8","italic":true},"priority":4096,"row":4},
+  {"col":3,"end_col":8,"end_row":5,"hl":"MiniIconsGrey","hl_resolved":[],"priority":4096,"row":5},
+  {"col":8,"end_col":16,"end_row":5,"hl":"NeoTreeFileName","hl_resolved":[],"priority":4096,"row":5},
+  {"col":16,"end_col":19,"end_row":5,"hl":"NeoTreeBufferNumber","hl_resolved":{"fg":"#f5c2e7"},"priority":4096,"row":5}
+],"width":41,"win":{"cursorline":true,"cursorlineopt":"line","foldcolumn":"0","list":false,"number":false,"relativenumber":false,"signcolumn":"auto","spell":false,"winhighlight":"Normal:NeoTreeNormal,NormalNC:NeoTreeNormalNC,SignColumn:NeoTreeSignColumn,CursorLine:NeoTreeCursorLine,FloatBorder:NeoTreeFloatBorder,StatusLine:NeoTreeStatusLine,StatusLineNC:NeoTreeStatusLineNC,VertSplit:NeoTreeVertSplit,EndOfBuffer:NeoTreeEndOfBuffer,WinSeparator:NeoTreeWinSeparator","wrap":false}}

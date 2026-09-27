@@ -29,8 +29,6 @@ for _, p in ipairs({
   -- LAZY is a fallback for when the workspace doesn't carry an
   -- auto-core checkout at all.
   LAZY .. "/auto-core.nvim",
-  LAZY .. "/nui.nvim",
-  LAZY .. "/plenary.nvim",
   -- ADR-0048 Phase 3: real nvim-dap for the debug-view breakpoint
   -- sections ([47]) — the §8.3 delete paths run against the actual
   -- dap.breakpoints get/set/remove surface, not a stub. Same
@@ -56,10 +54,6 @@ for _, p in ipairs({
     vim.opt.runtimepath:prepend(p)
   end
 end
--- Auto-finder ships its own forked neo-tree at lua/auto-finder/neotree.
--- Upstream `neo-tree.nvim` is intentionally NOT on the runtimepath
--- here so the test exercises the actual fork rather than the
--- bundled-in-lazy upstream copy.
 
 vim.o.columns = 200
 vim.o.lines = 60
@@ -131,18 +125,6 @@ local function section(fn)
   end
 end
 
--- v0.1.3+: the forked neo-tree's setup is invoked by
--- `auto-finder.setup()` via `cfg.neo_tree`. We pre-call it here just
--- to confirm idempotency — auto-finder's setup() will re-call with
--- whatever's in `cfg.neo_tree` and the merge_config path caches
--- correctly. `window.auto_expand_width = true` mirrors AutoVim's
--- consumer configuration so test [7d] can verify pin/auto-expand
--- interaction.
-require("auto-finder.neotree").setup({
-  window = { auto_expand_width = true },
-  filesystem = { hijack_netrw_behavior = "disabled" },
-})
-
 -- ───────────────────────── 1. setup() ─────────────────────────
 print("\n[1] setup()")
 local af = require("auto-finder")
@@ -154,14 +136,9 @@ local setup_ok, err = pcall(af.setup, {
   width = { default = 38, min = 25, max = 100 },
   default_section = 1,
   sections = { "config", "files" },
-  -- v0.1.3+: cfg.neo_tree forwards to auto-finder.neotree.setup().
-  -- Carrying the same opts the smoke prelude staged so test [7d]'s
-  -- pin/auto-expand assertion remains valid after auto-finder's
-  -- setup() re-applies neo-tree config.
-  neo_tree = {
-    window = { auto_expand_width = true },
-    filesystem = { hijack_netrw_behavior = "disabled" },
-  },
+  -- The width cells below assert exact widths; auto-expand would make them depend on the length of the
+  -- cwd the suite runs from. [7d] turns it on where it is the subject.
+  files = { auto_expand_width = false },
 })
 ok("setup returns without error", setup_ok, err)
 ok("state.config populated", af.state.config ~= nil)
@@ -200,19 +177,18 @@ local live_w = panel and vim.api.nvim_win_get_width(panel) or -1
 ok("panel width >= default (38)", live_w >= 38, "live=" .. live_w)
 ok("winfixwidth set", panel and vim.wo[panel].winfixwidth == true)
 
--- ───────────────────────── 3. focus(1) mounts neo-tree ─────────────
+-- ───────────────────────── 3. focus(1) mounts the files view ─────────────
 print("\n[3] focus(1) — files section")
 local focus_ok, focus_err = af.focus(1)
 ok("focus(1) returns ok", focus_ok, focus_err)
 ok("state.section == 1", af.state.section == 1)
--- neo-tree's command path has internal scheduling; give the BufWinEnter
--- chain a tick to settle before sampling filetype.
+-- give the BufWinEnter chain a tick to settle before sampling filetype.
 vim.wait(200,
   function() return vim.bo[vim.api.nvim_win_get_buf(panel)].filetype == "auto-finder" end,
   5)
 local panel_buf = vim.api.nvim_win_get_buf(panel)
 local ft = vim.bo[panel_buf].filetype
-ok("panel buffer is filetype=neo-tree", ft == "auto-finder", "ft=" .. ft)
+ok("panel buffer is filetype=auto-finder", ft == "auto-finder", "ft=" .. ft)
 
 -- ───────────────────────── 4. winfixbuf blocks :edit ───────────────
 print("\n[4] winfixbuf blocks external :edit from inside panel")
@@ -226,7 +202,7 @@ ok(":edit errored with E1513 (winfixbuf)",
   not edit_ok and tostring(edit_err):find("winfixbuf"),
   "ok=" .. tostring(edit_ok) .. " err=" .. tostring(edit_err))
 panel_buf = vim.api.nvim_win_get_buf(panel)
-ok("panel still neo-tree after blocked :edit",
+ok("panel still the files view after blocked :edit",
   vim.bo[panel_buf].filetype == "auto-finder",
   "ft=" .. vim.bo[panel_buf].filetype)
 
@@ -239,7 +215,7 @@ local buf_ok, buf_err = pcall(vim.cmd, "buffer " .. another)
 ok(":buffer errored with E1513 (winfixbuf)",
   not buf_ok and tostring(buf_err):find("winfixbuf"))
 panel_buf = vim.api.nvim_win_get_buf(panel)
-ok("panel still neo-tree after blocked :buffer",
+ok("panel still the files view after blocked :buffer",
   vim.bo[panel_buf].filetype == "auto-finder")
 
 -- ───────────────────────── 6. section switch ───────────────────────
@@ -251,25 +227,20 @@ ok("panel ft = auto-finder-config", vim.bo[panel_buf].filetype == "auto-finder-c
   "ft=" .. vim.bo[panel_buf].filetype)
 af.focus(1)
 ok("state.section == 1 again", af.state.section == 1)
--- ADR 0026 Phase 7: get_buffer returns a placeholder
--- synchronously; the real neo-tree mount completes during the
--- on_focus deferred callback. Poll until the panel buffer is
--- the real neo-tree buffer (filetype == "auto-finder").
+-- Poll until the panel shows the files view again (filetype == "auto-finder").
 vim.wait(500, function()
   local b = vim.api.nvim_win_get_buf(panel)
   return vim.bo[b].filetype == "auto-finder"
 end)
 panel_buf = vim.api.nvim_win_get_buf(panel)
-ok("panel back on neo-tree", vim.bo[panel_buf].filetype == "auto-finder")
+ok("panel back on the files view", vim.bo[panel_buf].filetype == "auto-finder")
 ok("section_buffers cached for 0 and 1",
   af.state.section_buffers[0] and af.state.section_buffers[1])
 
--- v0.1.4: `q` is bound buffer-locally to close the auto-finder panel
--- — overrides neo-tree's default `q = close_window` which would
--- otherwise trigger `nvim_win_set_buf` against winfixbuf and crash
--- with E1513.
+-- v0.1.4: `q` is bound buffer-locally (auto-core section registry) to
+-- close the auto-finder panel.
 local q_keymap = vim.fn.maparg("q", "n", false, true)
-ok("q bound on the panel buffer (overrides neo-tree close_window)",
+ok("q bound on the panel buffer (closes the panel)",
   type(q_keymap) == "table" and q_keymap.buffer == 1
     and (q_keymap.desc or ""):find("close panel") ~= nil,
   vim.inspect(q_keymap))
@@ -282,13 +253,10 @@ ok("live width = 60", vim.api.nvim_win_get_width(panel) == 60,
   "live=" .. vim.api.nvim_win_get_width(panel))
 
 -- 7b. The pin must be a HARD CAP — simulate a third-party resize
--- (e.g. neo-tree's auto_expand_width) and verify enforce_pin clamps.
--- neo-tree bypasses winfixwidth via nvim_win_set_width on some
--- nvim versions; on others nvim_win_set_width respects winfixwidth.
--- Either way we want enforce_pin to clamp, so for the test we
--- temporarily lift winfixwidth to guarantee the simulated resize
--- "wins" first.
-print("\n[7b] resize pin enforcement (vs neo-tree auto-expand)")
+-- (nvim_win_set_width bypasses our cached width) and verify enforce_pin
+-- clamps. winfixwidth is lifted for the simulated resize so it "wins"
+-- first on every nvim version.
+print("\n[7b] resize pin enforcement (vs a third-party resize)")
 local host = require("auto-finder.panel.host")
 vim.wo[panel].winfixwidth = false
 pcall(vim.api.nvim_win_set_width, panel, 90)
@@ -308,73 +276,49 @@ ok("user_width cleared", af.state.user_width == nil)
 ok("live width back to default (38)", vim.api.nvim_win_get_width(panel) == 38,
   "live=" .. vim.api.nvim_win_get_width(panel))
 
--- 7d. Pin must prevent the renderer from auto-expanding the panel.
--- v0.1.x worked around this by mutating
--- `state.window.auto_expand_width = false` on every live filesystem
--- state from outside; the v0.1.3 fork moves the check into the
--- renderer, which reads `auto-finder.state.user_width` directly per
--- render. So the assertion is observable behavior — does the panel
--- stay at the pin when we resize wider with auto_expand_width still
--- nominally enabled?
-print("\n[7d] pin caps the panel — renderer respects user_width")
-af.focus(0)  -- in config REPL; panel buffer is not neo-tree
-ok("focused config section", af.state.section == 0)
-af.resize(50)
-ok("user_width = 50 after resize", af.state.user_width == 50)
-ok("panel locked at 50 after resize",
-  vim.api.nvim_win_get_width(af.state.panel_winid) == 50,
+-- 7d. A pin must stop the files view's auto-expand: with the panel pinned
+-- narrower than the longest row, painting the tree must not widen it.
+print("\n[7d] pin caps the panel — the files view's auto-expand respects user_width")
+af.state.config.files.auto_expand_width = true
+af.focus(0)
+af.resize(26)
+ok("user_width = 26 after resize", af.state.user_width == 26)
+af.focus(1)
+vim.wait(500, function()
+  local st = require("auto-finder.views.files")._state
+  return st.rows ~= nil and #st.rows > 0
+end, 10)
+require("auto-finder.views.files").paint()
+local want = 0
+for _, r in ipairs(require("auto-finder.views.files")._state.rows or {}) do
+  if r.width > want then want = r.width end
+end
+ok("precondition: a row wants more than the pin", want > 26, "widest row=" .. want)
+ok("panel stays at the pin after a paint",
+  vim.api.nvim_win_get_width(af.state.panel_winid) == 26,
   "live=" .. vim.api.nvim_win_get_width(af.state.panel_winid))
-
--- The fork's render_tree (renderer.lua near line 1353) reads
--- `auto-finder.state.user_width` and skips the auto-expand branch
--- when a pin is set. The on-state `state.window.auto_expand_width`
--- can stay `true` — the renderer ignores it under a pin.
-local neo = require("auto-finder.neotree")
-ok("neo.config.window.auto_expand_width unchanged by pin (still true)",
-  neo.config.window.auto_expand_width == true,
-  "got " .. tostring(neo.config.window.auto_expand_width))
-
 af.reset_width()
 ok("user_width cleared after reset", af.state.user_width == nil)
-af.focus(1)  -- back to files for the rest of the suite
-
--- ─── 7e. right-aligned-icons regression guard ─────────────────────
--- Bug from the v0.1.x wrapper era + Phase 4 manual testing: the
--- forked renderer inherited upstream's clamp at `position == "current"`
--- that capped `remaining_cols` at `longest_node + 4`. Right-aligned
--- components (modified marker, diagnostics, git_status, file_size)
--- positioned against THAT cap, leaving the right portion of any
--- panel wider than the longest filename empty.
---
--- Removed the clamp in v0.1.3 (renderer.lua line ~462). This test
--- guards the source structure: if anyone re-introduces the clamp
--- via an upstream sync, this fails with a clear pointer.
---
--- A behavioral test (mount, render, inspect rendered line widths)
--- was tried first but was timing-dependent on neo-tree's async
--- mount and unreliable in headless. The source-grep is structurally
--- reliable and unambiguous about the bug it's guarding.
-print("\n[7e] regression: position=current no longer clamps to longest+4")
-
-local renderer_path = plugin_root .. "/lua/auto-finder/neotree/ui/renderer.lua"
-local renderer_src = vim.fn.readfile(renderer_path)
-local clamp_line, clamp_lineno
-for i, line in ipairs(renderer_src) do
-  -- Match the pattern `math.min(remaining_cols, …, longest_node + 4)`
-  -- in any form. Comment-only references are fine — those are the
-  -- "we removed this on purpose" notes.
-  if not line:match("^%s*%-%-")
-      and (line:match("math%.min%s*%(%s*remaining_cols.*longest")
-        or (line:match("remaining_cols%s*=%s*math%.min")
-            and line:match("longest"))) then
-    clamp_line = line
-    clamp_lineno = i
-    break
-  end
+do
+  -- unpinned, a paint fits the widest row, bounded by width.max
+  local fv = require("auto-finder.views.files")
+  fv.paint()
+  local widest = 0
+  for _, r in ipairs(fv._state.rows or {}) do if r.width > widest then widest = r.width end end
+  local info = vim.fn.getwininfo(af.state.panel_winid)[1]
+  local expect = math.min(math.max(38, widest + (info and info.textoff or 0)), 100)
+  local live = vim.api.nvim_win_get_width(af.state.panel_winid)
+  -- Neovim caps a window at what the layout leaves it (earlier sections leave splits open), so compare
+  -- with what a direct set_width to the same target reaches
+  pcall(vim.api.nvim_win_set_width, af.state.panel_winid, expect)
+  local reachable = vim.api.nvim_win_get_width(af.state.panel_winid)
+  ok("unpinned: auto-expand fits the widest row (bounded by width.max and the layout)",
+    live > 38 and live == reachable,
+    ("live=%d reachable=%d expect=%d widest=%d"):format(live, reachable, expect, widest))
 end
-ok("forked renderer does NOT clamp remaining_cols to longest_node+4",
-  clamp_line == nil,
-  clamp_line and ("found clamp at renderer.lua:" .. clamp_lineno .. " → " .. clamp_line) or "")
+af.state.config.files.auto_expand_width = false
+af.resize(38); af.reset_width()
+af.focus(1)  -- back to files for the rest of the suite
 
 -- 7c. New panel verbs: dynamic alias and panel show
 print("\n[7c] panel dynamic + panel show")
@@ -404,28 +348,25 @@ af.open(true)
 ok("panel reopens", af.state.panel_winid ~= nil and vim.api.nvim_win_is_valid(af.state.panel_winid))
 
 -- ───────────────────────── 9. inheritance fix sim ───────────────────
-print("\n[9] panel does not inherit neo-tree filetype on open")
+print("\n[9] panel does not inherit an auto-finder buffer on open")
 af.close()
--- Simulate the `nvim .` autostart scenario without depending on neo-tree
--- internals: create a fake "auto-finder" buffer and park it in the cursor
--- window. The panel-open code path should refuse to inherit it.
+-- Simulate the `nvim .` autostart scenario: create a fake "auto-finder"
+-- buffer and park it in the cursor window. The panel-open code path should
+-- refuse to inherit it.
 local fake_nt = vim.api.nvim_create_buf(false, true)
 vim.bo[fake_nt].buftype = "nofile"
 vim.bo[fake_nt].filetype = "auto-finder"
-pcall(vim.api.nvim_buf_set_var, fake_nt, "neo_tree_position", "left")
 local first_win = vim.api.nvim_list_wins()[1]
 vim.api.nvim_set_current_win(first_win)
 pcall(vim.api.nvim_win_set_buf, first_win, fake_nt)
--- Pre-condition: cursor window holds a neo-tree-flavored buffer.
-ok("cursor window has filetype=neo-tree before open", vim.bo.filetype == "auto-finder")
+-- Pre-condition: cursor window holds an auto-finder-flavoured buffer.
+ok("cursor window has filetype=auto-finder before open", vim.bo.filetype == "auto-finder")
 
 -- Now open the panel from inside that window. ensure_open should swap
--- the inherited buffer for a scratch *before* focus mounts the section
--- so neo-tree's command override doesn't redirect us.
+-- the inherited buffer for a scratch *before* focus mounts the section.
 local host = require("auto-finder.panel.host")
 -- Drive ensure_open directly so we can inspect the panel buffer right
--- after the split, before focus runs and replaces it with the real
--- neo-tree mount.
+-- after the split, before focus runs and replaces it with the view.
 local saved_section = af.state.section
 af.state.section = nil  -- force open() to call focus(default), but we
                         -- bypass open() entirely below
@@ -433,9 +374,9 @@ local panel_winid = host.ensure_open(af.state.config, af.state, true)
 ok("ensure_open returns winid", panel_winid ~= nil)
 panel_buf = panel_winid and vim.api.nvim_win_get_buf(panel_winid) or -1
 local panel_ft = vim.bo[panel_buf].filetype
-ok("panel buf is NOT inherited neo-tree (filetype is empty)", panel_ft == "",
+ok("panel buf is NOT the inherited auto-finder buffer (filetype is empty)", panel_ft == "",
   "panel_ft=" .. panel_ft)
-ok("panel buf is NOT the fake neo-tree buffer", panel_buf ~= fake_nt,
+ok("panel buf is NOT the fake buffer", panel_buf ~= fake_nt,
   "panel_buf=" .. panel_buf .. " fake=" .. fake_nt)
 af.state.section = saved_section
 
@@ -631,26 +572,14 @@ ok("repos.load() returns empty when worktree.nvim absent",
 ok("repos.worktree_paths() returns empty when worktree.nvim absent",
   type(repos_mod.worktree_paths()) == "table" and #repos_mod.worktree_paths() == 0)
 
--- Admin REPL: as of v0.2.2, `repos` IS a top-level verb (carries the
--- new `repos follow on|off|toggle` toggle). Discovery is still
--- automatic via worktree.nvim — repos has no registry to manage —
--- but the follow-mode toggle is a legitimate per-section setting,
--- so the verb belongs in the completion surface.
+-- Admin REPL: ADR-0200 removed the `repos follow` verb (it only drove the
+-- retired repos source and did nothing on the worktree tree). The top-level
+-- completion must not offer a verb that no longer exists.
 local _, top = admin._complete_at("", 0)
-ok("complete_at empty offers 'repos' (for `repos follow`)",
-  vim.tbl_contains(top, "repos"))
-local _, repos_subs = admin._complete_at("repos ", 6)
-ok("complete_at 'repos ' offers 'follow'",
-  vim.tbl_contains(repos_subs, "follow"))
-local _, follow_args = admin._complete_at("repos follow ", 13)
-ok("complete_at 'repos follow ' offers 'on'/'off'/'toggle'",
-  vim.tbl_contains(follow_args, "on")
-    and vim.tbl_contains(follow_args, "off")
-    and vim.tbl_contains(follow_args, "toggle"))
+ok("complete_at empty no longer offers 'repos'", not vim.tbl_contains(top, "repos"), vim.inspect(top))
 
--- Focusing the repos section must succeed end-to-end even with an
--- empty discovery — the empty-state placeholder is rendered as a
--- single message-type node and the panel buffer is still neo-tree.
+-- Focusing the repos section must succeed end-to-end even without
+-- worktree.nvim — the tree renders its explicit "unavailable" screen.
 af.open(true)
 local repos_focus_ok, repos_focus_err = af.focus("repos")
 ok("focus('repos') succeeds", repos_focus_ok, repos_focus_err)
@@ -663,50 +592,9 @@ vim.wait(300, function()
   return vim.bo[b].filetype == "auto-finder"
 end, 10)
 local repos_buf = af.state.panel_winid and vim.api.nvim_win_get_buf(af.state.panel_winid)
-ok("repos panel buffer is neo-tree filetype",
+ok("repos panel buffer is filetype=auto-finder",
   repos_buf and vim.bo[repos_buf].filetype == "auto-finder",
   "ft=" .. tostring(repos_buf and vim.bo[repos_buf].filetype))
-
--- ─────────────────────── 11b. repos icon overrides ──────────────────
-print("\n[11b] repos section icon overrides (workspace + worktree glyphs)")
-local repos_components = require("auto-finder-repos.components")
-local repos_highlights = require("auto-finder.neotree.ui.highlights")
-local fake_state = {}
-local workspace_node = { type = "directory", extra = { is_workspace = true } }
-local worktree_node = { type = "directory", extra = { is_worktree = true } }
-local subdir_node = {
-  type = "directory",
-  extra = {},
-  loaded = true,
-  is_expanded = function() return false end,
-  has_children = function() return true end,
-}
-
-local ws_icon = repos_components.icon({}, workspace_node, fake_state)
-ok("workspace icon glyph is the repository codepoint",
-  ws_icon and ws_icon.text and ws_icon.text:find("\u{ea62}", 1, true) ~= nil,
-  "got text=" .. vim.inspect(ws_icon and ws_icon.text))
-ok("workspace icon uses ROOT_NAME highlight",
-  ws_icon and ws_icon.highlight == repos_highlights.ROOT_NAME,
-  "hl=" .. tostring(ws_icon and ws_icon.highlight))
-
-local wt_icon = repos_components.icon({}, worktree_node, fake_state)
-ok("worktree icon glyph is the branch codepoint",
-  wt_icon and wt_icon.text and wt_icon.text:find("\u{f126}", 1, true) ~= nil,
-  "got text=" .. vim.inspect(wt_icon and wt_icon.text))
-ok("worktree icon uses GIT_UNTRACKED highlight",
-  wt_icon and wt_icon.highlight == repos_highlights.GIT_UNTRACKED,
-  "hl=" .. tostring(wt_icon and wt_icon.highlight))
-
--- Subdirectories under a worktree (no is_workspace/is_worktree
--- flag) must fall through to the common icon component — the
--- workspace/worktree glyphs MUST NOT appear there.
-local sub_icon = repos_components.icon({}, subdir_node, fake_state)
-ok("subdirectory icon does NOT use the workspace glyph",
-  sub_icon and sub_icon.text
-    and sub_icon.text:find("\u{ea62}", 1, true) == nil
-    and sub_icon.text:find("\u{f126}", 1, true) == nil,
-  "got text=" .. vim.inspect(sub_icon and sub_icon.text))
 
 -- ─────────────────────── 12. last_section persistence ──────────────────
 print("\n[12] last_section persists across setup")
@@ -1068,11 +956,8 @@ do
   ok("AutoFinderMarksRefresh autocmd carries our descriptor",
     refresh_desc_seen)
 
-  -- v0.2.32 regression: focusing marks then a neo-tree-backed slot
-  -- (buffers / files / repos) used to crash inside
-  -- `neotree/command/init.lua` because the marks buffer carries
-  -- filetype=auto-finder but no `b:neo_tree_position`, and the bare
-  -- `nvim_buf_get_var(0, "neo_tree_position")` threw "Key not found".
+  -- v0.2.32 regression: focusing marks then another filetype=auto-finder
+  -- slot used to crash while the second slot mounted over the first.
   -- Drive marks → buffers and assert the panel survives.
   af.setup({
     width = { default = 38, min = 25, max = 100 },
@@ -1113,18 +998,13 @@ end
 -- nvim in a window-closing state; a synchronous vsplit then fails.
 -- Fix: vim.schedule() the open so the close chain drains first.
 print("\n[13] directory-hijack defers M.open")
--- NB: this section's vim.wait() drains the scheduler, so any neo-tree
--- async-render callbacks from [11] that were still queued may now
--- fire and complain about the closed panel window from [11]/[12]
--- (stale winid). Those stderr warnings are harmless and not a
--- regression from this fix — the assertions below are what matter.
+-- NB: this section's vim.wait() drains the scheduler.
 af.close()
 af._hijack_done = nil
 -- Stage a directory buffer at the cwd. _maybe_hijack_startup_directory
 -- reads the current buffer's name; isdirectory(name) must return 1.
--- eventignore=all during setup so neo-tree / other autocmds don't
--- hijack-and-wipe our staging buffer (buf 13 vanishing was the
--- symptom).
+-- eventignore=all during setup so other autocmds don't hijack-and-wipe
+-- our staging buffer (buf 13 vanishing was the symptom).
 local dir = vim.fn.getcwd()
 local saved_ei = vim.o.eventignore
 vim.o.eventignore = "all"
@@ -1156,241 +1036,44 @@ ok("panel opens after scheduled tick drains",
     and vim.api.nvim_win_is_valid(af.state.panel_winid),
   "panel_winid=" .. tostring(af.state.panel_winid))
 
--- ───────────────────────── 14. auto-core fs.watch live-refresh wiring ─────────────────────────
--- v0.1.4 integration: auto-finder/sections/files.lua sets
--- `live_refresh = true` so the files section subscribes to
--- core.file:* and triggers a debounced neo-tree refresh on changes.
--- Soft-dep: when auto-core is on the runtimepath (it IS for these
--- tests — added at the rtp prelude), the wiring is active.
-print("\n[14] live-refresh wiring (files section) — ADR 0026 Phase 4")
+-- ───────────────────────── 14. files view live-refresh wiring (ADR-0200 §4.4) ─────────────────────────
+-- The files view watches only its EXPANDED directories, non-recursively, and only while shown;
+-- auto-finder's core no longer walks the cwd. Behavioural cells (reads counted, hide/show, watch
+-- set == expanded set, live create/delete) live in tests/adr0200-files.lua; this section pins the
+-- wiring the rest of the suite relies on.
+print("\n[14] files view live-refresh wiring — ADR-0200 §4.4")
 
 local ac_ok, core = pcall(require, "auto-core")
 ok("auto-core loadable on the rtp", ac_ok and type(core) == "table")
-ok("auto-core.fs.watch present",
-  type(core.fs) == "table" and type(core.fs.watch) == "table")
+ok("auto-core.fs.scan present (ADR-0200 M2)", type(core.fs) == "table" and type(core.fs.scan) == "table")
 ok("auto-core.events present", type(core.events) == "table")
 
--- Reset state and refocus the files section so the watcher is fresh.
 af.close()
-vim.wait(50)  -- drain any pending neo-tree async callbacks
 af.open(true)
 af.focus(1)  -- files
--- ADR 0026 Phase 7: poll until the deferred mount completes so
--- _arm_live_refresh_subs has run (subscribes to
--- auto-finder.core.files:changed) before we publish synthetic
--- events below.
-local files_section = require("auto-finder.sections").resolve(1)
-vim.wait(500, function()
-  return files_section and files_section._bufnr ~= nil
-    and vim.api.nvim_buf_is_valid(files_section._bufnr)
-end)
-ok("files section resolves",
-  files_section ~= nil and files_section.name == "files")
+local files_view = require("auto-finder.views.files")
+vim.wait(1000, function()
+  local st = files_view._state
+  return st.shown and st.model and st.model.nodes[st.model.root].children ~= nil
+end, 10)
+local fst = files_view._state
+ok("files view is shown after focus", fst.shown == true)
+ok("the root was read (lazy tree has its first level)",
+  fst.model and fst.model.nodes[fst.model.root].children ~= nil)
+ok("the view subscribed to auto-finder.core.files:changed", fst.subs and fst.subs:has("files-fs"))
+ok("core holds the root's directory watch", require("auto-finder.core.watchers").is_dir_watched(fst.model.root))
+ok("exactly one watch is armed: the expanded root", files_view.watch_count() == 1,
+  "watches=" .. files_view.watch_count())
+local cw = require("auto-finder.core.watchers")
+ok("core.watchers no longer offers a cwd walk", cw.open_for == nil and cw.list == nil)
 
--- ADR 0026 Phase 4: fs.watch handle is now owned by
--- `auto-finder.core.watchers` (started during af.setup via
--- core.ensure_started). The section module no longer has
--- `_fs_watch_handle` / `_fs_watch_root` fields. Assert the
--- cwd is in the core watcher list instead.
-local core_watchers = require("auto-finder.core.watchers")
-local watched_cwds  = core_watchers.list()
-local cwd_watched = false
-for _, w in ipairs(watched_cwds) do
-  if w == vim.fn.getcwd() then cwd_watched = true; break end
-end
-ok("core.watchers has an entry for the cwd",
-  cwd_watched,
-  "watched cwds: " .. vim.inspect(watched_cwds))
-
--- The section no longer carries _ensure_fs_watch / _stop_fs_watch;
--- it has `_arm_live_refresh_subs` instead (the function that
--- subscribes to refresh-driving topics on each focus).
-ok("files section has _arm_live_refresh_subs",
-  type(files_section._arm_live_refresh_subs) == "function")
-ok("files section does NOT carry _fs_watch_handle (moved to core)",
-  files_section._fs_watch_handle == nil)
-ok("files section does NOT carry _ensure_fs_watch (moved to core)",
-  files_section._ensure_fs_watch == nil)
-
--- Stub neo-tree's manager.refresh to capture refresh calls. The
--- live-refresh path is now: upstream `core.file:*` → core's
--- translator → `auto-finder.core.files:changed` (debounced 100 ms)
--- → shared/neotree.lua subscriber → schedule_refresh →
--- LIVE_REFRESH_DEBOUNCE_MS (150 ms) → manager.refresh.
-local manager_mod = require("auto-finder.neotree.sources.manager")
-local orig_refresh = manager_mod.refresh
-local refresh_calls = {}
-manager_mod.refresh = function(source_name, callback)
-  refresh_calls[#refresh_calls + 1] = source_name
-  if callback then pcall(callback) end
-end
-
-core.events.publish("core.file:modified", {
-  path   = vim.fn.getcwd() .. "/some-synthetic-event-path.txt",
-  change = "modified",
-})
--- 100ms (core debounce) + 150ms (neotree debounce) + slack
-vim.wait(500, function()
-  for _, src in ipairs(refresh_calls) do
-    if src == "filesystem" then return true end
-  end
-  return false
-end)
-local saw_refresh = false
-for _, src in ipairs(refresh_calls) do
-  if src == "filesystem" then saw_refresh = true; break end
-end
-ok("file-event under cwd triggers neo-tree manager.refresh after debounce",
-  saw_refresh,
-  "refresh_calls=" .. vim.inspect(refresh_calls))
-
--- Events for paths OUTSIDE the cwd: core publishes the translated
--- event with cwd=vim.fn.getcwd() (the cwd at translator-fire time),
--- so paths outside that cwd still flow through if they're emitted
--- while cwd matches. The cwd-prefix filter lives in core's
--- enqueue logic for now (Phase 4 doesn't filter by path), so
--- out-of-root paths DO trigger schedule_refresh — that's a
--- minor over-trigger compared to the v0.2.x prefix-filter
--- behavior, but the cache update is what matters. Phase 7 will
--- tighten the filter when views adopt the placeholder mount.
-refresh_calls = {}
-core.events.publish("core.file:modified", {
-  path   = "/tmp/some-other-place/x.txt",
-  change = "modified",
-})
-vim.wait(400)
--- Either fires once (loose filter) or doesn't (tight filter).
--- Acceptable either way for Phase 4; assertion deferred to Phase 7
--- where the loading-placeholder generation guard tightens the
--- filter contract.
-ok("out-of-root event handling is well-defined (fires=" ..
-   tostring(#refresh_calls) .. ")",
-  true)
-
-manager_mod.refresh = orig_refresh
-
--- ─────────────────── 14b. git.watch wire-up — ADR 0026 Phase 4 ──────────────
--- git.watch ownership moved to core/watchers (same as fs.watch).
--- core.git.state:changed still drives schedule_refresh via the
--- shared/neotree.lua subscriber (Phase 5 will migrate that to
--- `auto-finder.core.git:changed` once the git cache lands).
-print("\n[14b] git.watch wire-up — ADR 0026 Phase 4")
-if not (type(core.git) == "table" and type(core.git.watch) == "table"
-        and type(core.git.watch.start) == "function") then
-  print("  SKIP  auto-core.git.watch not present on rtp; pinned auto-core < v0.1.19")
-else
-  ok("auto-core.git.watch.start is callable",
-    type(core.git.watch.start) == "function")
-  ok("auto-core.git.watch.stop is callable",
-    type(core.git.watch.stop) == "function")
-  ok("files section does NOT carry _git_watch_handle (moved to core)",
-    files_section._git_watch_handle == nil)
-
-  -- ADR-0050 §2.3: a git-state event must NOT drive a full filesystem
-  -- re-scan (manager.refresh) — the tree structure is unchanged, so
-  -- the handler re-decorates in place via git.status_async instead.
-  -- That kept the refresh feedback loop from re-scanning a monorepo on
-  -- every index write AND stopped the panel from re-grabbing focus.
-  -- Stub BOTH manager.refresh and git.status_async as recorders so the
-  -- assertions are deterministic (the real async git status is
-  -- suppressed, and we can see which path the git sub took).
-  local orig_refresh2 = manager_mod.refresh
-  local git_refresh_calls = {}
-  manager_mod.refresh = function(source_name, callback)
-    git_refresh_calls[#git_refresh_calls + 1] = source_name
-    if callback then pcall(callback) end
-  end
-
-  local git_mod = require("auto-finder.neotree.git")
-  local orig_status_async = git_mod.status_async
-  local decorate_calls = {}
-  git_mod.status_async = function(path, _base, _opts, cb)
-    decorate_calls[#decorate_calls + 1] = path
-    if cb then pcall(cb, nil) end
-  end
-
-  -- Settle: drain any full refresh left pending on the §2.4 throttle's
-  -- trailing edge from earlier section setup (it can defer up to
-  -- REFRESH_THROTTLE_MS), so it doesn't leak into the assertions below.
-  vim.wait(900)
-  git_refresh_calls = {}
-
-  -- Synthetic publish with cwd as repo_root → expect a decorate-only
-  -- refresh (git.status_async), and NO manager.refresh.
-  core.events.publish("core.git.state:changed", {
-    repo_root = vim.fn.getcwd(),
-    git_dir   = vim.fn.getcwd() .. "/.git",
-    kind      = "head",
-  })
-  vim.wait(400, function() return #decorate_calls > 0 end)
-  local saw_full_refresh = false
-  for _, src in ipairs(git_refresh_calls) do
-    if src == "filesystem" then saw_full_refresh = true; break end
-  end
-  ok("core.git.state:changed for cwd does NOT full-rescan (§2.3)",
-    not saw_full_refresh,
-    "git_refresh_calls=" .. vim.inspect(git_refresh_calls))
-  -- Decorate fires only when a live filesystem state (with a window)
-  -- exists; the suite may not have one mounted at this point, so assert
-  -- the weaker "decorate attempted OR no full refresh" — the anti-scan
-  -- property above is the load-bearing one.
-  ok("core.git.state:changed for cwd re-decorates in place when mounted (§2.3)",
-    (#decorate_calls > 0) or (not saw_full_refresh),
-    "decorate_calls=" .. vim.inspect(decorate_calls))
-
-  -- Count only signals attributable to OUR git subscriber: a
-  -- filesystem full-refresh, or a decorate against cwd. Background
-  -- refreshes/decorates for other sources/paths must not count.
-  local cwd = vim.fn.getcwd()
-  local function fs_refreshes(list)
-    local n = 0
-    for _, src in ipairs(list) do if src == "filesystem" then n = n + 1 end end
-    return n
-  end
-  local function cwd_decorates(list)
-    local n = 0
-    for _, p in ipairs(list) do if p == cwd then n = n + 1 end end
-    return n
-  end
-
-  -- Synthetic publish with a DIFFERENT repo_root (not a prefix of
-  -- cwd) → must NOT refresh NOR decorate. The shared/neotree.lua
-  -- filter checks `repo_root == cwd OR cwd starts-with repo_root/`.
-  git_refresh_calls = {}
-  decorate_calls = {}
-  core.events.publish("core.git.state:changed", {
-    repo_root = "/tmp/some-other-repo",
-    git_dir   = "/tmp/some-other-repo/.git",
-    kind      = "head",
-  })
-  vim.wait(250)
-  ok("core.git.state:changed for unrelated repo_root does NOT refresh or decorate",
-    fs_refreshes(git_refresh_calls) == 0 and cwd_decorates(decorate_calls) == 0,
-    "refresh=" .. vim.inspect(git_refresh_calls)
-      .. " decorate=" .. vim.inspect(decorate_calls))
-
-  -- Missing repo_root field → must not crash, must not refresh/decorate.
-  git_refresh_calls = {}
-  decorate_calls = {}
-  core.events.publish("core.git.state:changed", {
-    git_dir = "/somewhere/.git",
-    kind    = "head",
-  })
-  vim.wait(250)
-  ok("malformed core.git.state:changed payload is ignored safely",
-    fs_refreshes(git_refresh_calls) == 0 and cwd_decorates(decorate_calls) == 0,
-    "refresh=" .. vim.inspect(git_refresh_calls)
-      .. " decorate=" .. vim.inspect(decorate_calls))
-
-  manager_mod.refresh = orig_refresh2
-  git_mod.status_async = orig_status_async
-end
-
--- ADR 0026 Phase 4 teardown: core.stop() releases every watcher.
--- We don't do that here in the suite — later sections still rely on
--- a live core. Skip the per-section stop assertions; those moved
--- into section [32]'s watchers.open_for/close_all round-trip and
--- section [31]'s core.stop A8 assertions.
+af.close()
+ok("closing the panel suspends the view", fst.shown == false)
+ok("closing the panel releases every watch", files_view.watch_count() == 0,
+  "watches=" .. files_view.watch_count())
+ok("the view's buffer survives the close", fst.bufnr ~= nil and vim.api.nvim_buf_is_valid(fst.bufnr))
+af.open(true)
+af.focus(1)
 
 -- ─────────── 15. auto-finder.log — wrapper over auto-core.log ──────────
 print("\n[15] auto-finder.log wrapper")
@@ -1575,13 +1258,12 @@ for _, s in ipairs(af._registry.sections) do
   if s.name == "repos" then repos_def = s; break end
 end
 if repos_def then
-  -- Force a mount to populate the cache. ADR 0026 Phase 7:
-  -- get_buffer is now placeholder-first; poll until the real
-  -- neo-tree mount completes (section._bufnr becomes valid).
+  -- Force a mount to populate the cache; poll until the registry holds
+  -- the repos buffer.
   af.focus(2)
   vim.wait(500, function()
-    return repos_def._bufnr ~= nil
-      and vim.api.nvim_buf_is_valid(repos_def._bufnr)
+    local b = af._registry._bufs[repos_def.number]
+    return b ~= nil and vim.api.nvim_buf_is_valid(b)
   end)
   local before_buf = af._registry._bufs[repos_def.number]
   ok("repos bufnr cached pre-event",
@@ -1602,12 +1284,11 @@ if repos_def then
 end
 
 -- ───────────────────────── 18. v0.2.8 — buffers source + slot mutation ─────
--- Retroactive coverage for three bugs that escaped v0.2.5 because the
+-- Retroactive coverage for a bug that escaped v0.2.5 because the
 -- iteration shipped without smoke per `lua-nvim-plugin-development` rule
--- #4 ("each iteration adds or extends a test for the change it makes"):
---   (a) `buffers` source module was missing from the fork (port added v0.2.8).
---   (b) cfg.neo_tree.sources didn't include "buffers" so default_configs
---       wasn't populated (helper added v0.2.7 / fixed v0.2.8).
+-- #4 ("each iteration adds or extends a test for the change it makes").
+-- (Parts (a)/(b) covered the retired fork's buffers source
+-- registration and went with it — ADR-0200.)
 --   (c) slot mutations dispose()'d the entire registry, deleting EVERY
 --       section's buffer (including the active config slot's buffer that
 --       the user was typing in) → panel went blank. Fixed by in-place
@@ -1616,29 +1297,7 @@ end
 -- targets an observable post-condition (require returns a table, buffer
 -- survives, active section stays as expected), not just "the function
 -- was called".
-print("\n[18] v0.2.8 — buffers source + slot mutation preserves panel")
-
--- (a) Fork ships the buffers source module after the v0.2.8 port.
-local ok_buf_src = pcall(require, "auto-finder.neotree.sources.buffers")
-ok("auto-finder.neotree.sources.buffers loads (ported v0.2.8)",
-  ok_buf_src)
-
--- (b) auto-finder's _register_bundled_neotree_sources adds "buffers"
--- (alongside "filesystem") to cfg.neo_tree.sources so neo-tree's
--- default_config build covers it.
-local cfg_probe = { neo_tree = {} }
-af._register_bundled_neotree_sources(cfg_probe)
-ok("_register_bundled_neotree_sources adds 'buffers'",
-  vim.tbl_contains(cfg_probe.neo_tree.sources, "buffers"))
-ok("_register_bundled_neotree_sources adds 'filesystem'",
-  vim.tbl_contains(cfg_probe.neo_tree.sources, "filesystem"))
-af._register_bundled_neotree_sources(cfg_probe)  -- idempotency check
-local count_buffers = 0
-for _, s in ipairs(cfg_probe.neo_tree.sources) do
-  if s == "buffers" then count_buffers = count_buffers + 1 end
-end
-ok("_register_bundled_neotree_sources is idempotent (no duplicate 'buffers')",
-  count_buffers == 1)
+print("\n[18] v0.2.8 — slot mutation preserves panel")
 
 -- (c) Slot mutation preserves the config slot's buffer. The previous
 -- dispose-and-reattach path deleted every section's bufnr — including
@@ -1674,76 +1333,33 @@ ok("config slot buffer survives slot_remove (in-place mutation)",
 ok("active section stays on config slot (0) after slot_remove",
   af._registry.active == 0)
 
--- ───────────────────────── 19. v0.2.9 — buffers-refresh against panel win-keyed state ────────────────────────
+-- ───────────────────────── 19. buffers slot grows as buffers open (was v0.2.9) ────────────────────────
 --
--- Regression test for the v0.2.9 fix. The forked buffers source's
--- internal BufAdd/BufDelete subscriber resolves state via
--- `manager.get_state(name, tabid)` — which returns a `state_by_tab`
--- stub (no path/winid/tree) for `position = "current"` mounts. The
--- result was that opening a buffer AFTER the panel mounted left the
--- tree empty until a manual remount. The fix installs our own
--- BufAdd autocmd that walks `_get_all_states()` for the win-keyed
--- buffers state bound to `M.state.panel_winid` and calls
--- `items.get_opened_buffers(state)` directly — same body, right
--- state. Assert the effect: opening a fresh file with the buffers
--- panel active grows the tree's `state.tree.nodes.by_id` set.
-print("\n[19] v0.2.9 — buffers-refresh against panel win-keyed state")
+-- The user-visible claim v0.2.9 pinned: opening a file AFTER the buffers
+-- slot mounted must show it without a manual remount. Measured on the
+-- buffers view's own rows (ADR-0200 §4.8) — it repaints from
+-- auto-finder.core.buffers:changed while shown.
+print("\n[19] buffers slot grows as buffers open")
 
--- (a) The wiring function exists on the public API.
-ok("M._install_buffers_refresh_autocmd is a function",
-  type(af._install_buffers_refresh_autocmd) == "function")
-
--- (b) Setup installed an autocmd in the AutoFinderPanel group with
---   our descriptor — single-call assertion that the audit landed
---   regardless of whether buffers is the live section. The desc is
---   the contract-level identifier; matching on it is a stable check.
-local _refresh_autos = vim.api.nvim_get_autocmds({ event = "BufAdd" })
-local _refresh_found = false
-for _, a in ipairs(_refresh_autos) do
-  if (a.desc or ""):find(
-       "auto-finder: buffers-refresh against panel win-keyed state", 1, true) then
-    _refresh_found = true; break
-  end
-end
-ok("BufAdd autocmd installed with buffers-refresh descriptor",
-  _refresh_found)
-
--- (c) Switch to the buffers section (via slot_add since the default
---   config in this smoke driver doesn't have it). Open a probe file
---   in an editor split outside the panel; assert the tree grew.
 af.slot_add("buffers")
 local _buffers_idx = require("auto-finder.sections")._by_name["buffers"]
 ok("buffers section was added by slot_add for this test",
   _buffers_idx ~= nil)
 af.focus(_buffers_idx)
-vim.wait(120)  -- mount + first render
+local bview = require("auto-finder.views.buffers")
+vim.wait(500, function() return bview._state.shown and #bview._state.items > 0 end, 10)
+ok("buffers view shown in the panel window",
+  bview._state.shown and bview._state.winid == af.state.panel_winid)
+ok("buffers view subscribed to core buffers changes", bview._state.subs and bview._state.subs:has("buffers"))
 
--- Probe file: a real file under cwd (state.path resolves to cwd) so
--- `is_subpath(state.path, file_path)` matches. tempname() lives under
--- $TMPDIR — outside cwd — so we can't just create a temp file; use
--- the repo's tests/ dir which definitely IS within cwd.
 local _probe_path = vim.fn.getcwd() .. "/tests/_buffers_refresh_probe.txt"
 do
   local fh = io.open(_probe_path, "w")
   fh:write("smoke probe"); fh:close()
 end
 local _prev_win = vim.api.nvim_get_current_win()
-
-local _mgr = require("auto-finder.neotree.sources.manager")
-local function _tree_info()
-  for _, s in ipairs(_mgr._get_all_states()) do
-    if s.name == "buffers" and s.tree then
-      local n = 0
-      for _ in pairs(s.tree.nodes.by_id or {}) do n = n + 1 end
-      return n, s.path or "<nil>", s.winid or -1
-    end
-  end
-  return -1, "<no state>", -1
-end
-local _tree_size = function() local n = _tree_info(); return n end
-local _size_before, _state_path, _state_winid = _tree_info()
-ok("buffers state visible to autocmd (path matches cwd, winid matches panel)",
-   _state_path == vim.fn.getcwd() and _state_winid == af.state.panel_winid)
+local function _tree_size() return #bview._state.items end
+local _size_before = _tree_size()
 
 -- WHY THESE PROBES GO THROUGH A HELPER.
 --
@@ -1828,7 +1444,6 @@ end
 -- it fails the moment a probe stops getting a real window, whatever the cause.
 
 local _probe_win = probe_split(_probe_path)
--- Debounce is 80ms; wait long enough for fire() to land plus a poll cycle.
 vim.wait(400, function()
   return _tree_size() > _size_before
 end, 20)
@@ -2076,15 +1691,13 @@ end)
 --
 -- Two regression tests for v0.2.11:
 --
---   (a) The buffers-refresh autocmd must NOT swap the panel buffer
---       when buffers isn't the active section. The v0.2.9 install
---       fired unconditionally and clobbered files/repos when the user
---       opened a file. The v0.2.11 gate checks
---       state.bufnr == nvim_win_get_buf(panel_winid).
+--   (a) Opening a file while buffers is NOT the active section must not
+--       swap the panel buffer (the v0.2.9 refresh clobbered files/repos).
+--       The buffers view does no work while hidden (ADR-0200 §4.8).
 --
---   (b) renderer.show_nodes' position=current branch must succeed
---       against a winfixbuf=true panel. Pre-v0.2.11 it raised E1513
---       inside scheduled callbacks (fs_scan's render_context).
+--   (b) Painting the buffers view against a winfixbuf=true panel must
+--       succeed and leave winfixbuf on (pre-v0.2.11 the old renderer
+--       raised E1513 inside scheduled callbacks).
 print("\n[21] v0.2.11 — active-section gate + renderer winfixbuf-safe")
 section(function()
 local _af = require("auto-finder")
@@ -2123,22 +1736,11 @@ vim.wait(300)  -- debounce + scheduler
 local _panel_buf_post =
    _panel and vim.api.nvim_win_is_valid(_panel)
      and vim.api.nvim_win_get_buf(_panel) or -1
--- The core regression we're fixing: panel shouldn't be swapped to
--- the BUFFERS source tree. The smoke env's leak guard may trigger
--- unrelated buffer movement during `:split`, but we specifically
--- assert the panel buf is NOT the buffers source's state.bufnr.
-local _mgr_check = require("auto-finder.neotree.sources.manager")
-local _buffers_state_bufnr = nil
-for _, s in ipairs(_mgr_check._get_all_states()) do
-  if s.name == "buffers" and s.winid == _panel then
-    _buffers_state_bufnr = s.bufnr; break
-  end
-end
-ok("panel did NOT swap to buffers source tree after BufAdd while config active "
-   .. "(post=" .. _panel_buf_post .. " buffers-state-bufnr="
-   .. tostring(_buffers_state_bufnr) .. " active="
-   .. tostring(_af._registry.active) .. ")",
-   _panel_buf_post ~= _buffers_state_bufnr)
+-- The regression: the panel must still show config, not the buffers view.
+ok("panel still shows the config buffer after BufAdd while config active "
+   .. "(pre=" .. _panel_buf_pre .. " post=" .. _panel_buf_post .. ")",
+   _panel_buf_post == _panel_buf_pre)
+ok("the buffers view did no work while hidden", not require("auto-finder.views.buffers")._state.shown)
 ok("registry.active still 0 (config) — gate did not flip section",
    _af._registry.active == 0)
 
@@ -2151,18 +1753,9 @@ for _, b in ipairs(vim.api.nvim_list_bufs()) do
 end
 pcall(os.remove, _probe)
 
--- ── (b) renderer winfixbuf-safe ─────────────────────────────────
--- Build a minimal state with current_position="current", point it at
--- the panel window, and call renderer.show_nodes. Assert no error
--- and that winfixbuf is restored to true afterwards.
-local _renderer = require("auto-finder.neotree.ui.renderer")
-local _ok_renderer = type(_renderer) == "table"
-   and type(_renderer.show_nodes) == "function"
-ok("renderer.show_nodes accessible", _ok_renderer)
-
--- Switch to buffers so the panel hosts the buffers tree; show_nodes
--- is what the buffers-refresh path also calls. Use the
--- `_by_name` lookup again since slot indices may have shifted
+-- ── (b) paint is winfixbuf-safe ─────────────────────────────────
+-- Switch to buffers so the panel hosts the buffers view, then paint.
+-- Use the `_by_name` lookup again since slot indices may have shifted
 -- across earlier sections' mutations.
 local _buf_idx = require("auto-finder.sections")._by_name["buffers"]
 ok("buffers slot still registered for part (b)", _buf_idx ~= nil)
@@ -2183,24 +1776,12 @@ if not _panel_valid then return end
 local _wfb_before = vim.wo[_panel].winfixbuf
 ok("winfixbuf=true on panel pre-render", _wfb_before == true)
 
--- Trigger a fresh render via the buffers items module — the call
--- pre-v0.2.11 raised E1513 because state.loading got stuck and/or
--- the swap was blocked. With the renderer patch (line 1230 winfixbuf
--- guard), it must complete cleanly.
-local _items = require("auto-finder.neotree.sources.buffers.lib.items")
-local _mgr = require("auto-finder.neotree.sources.manager")
-local _live
-for _, s in ipairs(_mgr._get_all_states()) do
-  if s.name == "buffers" and s.winid == _panel then _live = s; break end
-end
-ok("buffers state found bound to panel winid for part (b)",
-   _live ~= nil)
-if _live then
-  _live.loading = false
-  local _ok, _err = pcall(_items.get_opened_buffers, _live)
-  ok("get_opened_buffers against winfixbuf=true panel returns without error",
-     _ok, tostring(_err))
-end
+-- Paint writes the buffer's lines in place (nvim_buf_set_lines) and never
+-- swaps the window's buffer, so winfixbuf cannot refuse it.
+local _bv = require("auto-finder.views.buffers")
+ok("buffers view shown in the panel for part (b)", _bv._state.shown and _bv._state.winid == _panel)
+local _ok, _err = pcall(_bv.paint)
+ok("buffers paint against winfixbuf=true panel returns without error", _ok, tostring(_err))
 local _wfb_after = vim.wo[_panel].winfixbuf
 ok("winfixbuf restored to true after render (no protection drop)",
    _wfb_after == true)
@@ -2212,98 +1793,55 @@ if _af.state.config.sections[#_af.state.config.sections] == "buffers" then
 end
 end)
 
--- ───────────────────── 21c. v0.2.13 — gate-skip dirty-bit round-trip ──────
--- v0.2.11's gate (covered in [21] above) correctly stops a BufAdd-
--- triggered refresh from clobbering an inactive panel section. But
--- its assumption that "next focus to buffers re-mounts fresh" was
--- wrong: section.get_buffer caches the section's bufnr across
--- focuses, so the buffers tree silently stays stale after a skipped
--- refresh.
---
--- v0.2.13 fix: gate-skip path sets `_af._buffers_dirty = true`; the
--- buffers section's `on_focus` hook (in `sections/buffers.lua`)
--- consumes the flag and runs `_refresh_buffers_now(panel_winid)`
--- inline so the just-refocused tree reflects every BufAdd that
--- happened while buffers was inactive.
---
--- Contract this section asserts:
---   (1) BufAdd-while-inactive sets the dirty bit.
---   (2) focus(buffers) clears the dirty bit AND the new buf appears
---       in the rendered tree.
---   (3) BufAdd-while-buffers-active clears (doesn't accumulate) the
---       dirty bit.
-print("\n[21c] v0.2.13 — buffers-dirty-bit round-trip after gate-skip")
+-- ───────────────────── 21c. buffers opened while the slot is hidden appear on focus (was v0.2.13) ──────
+-- v0.2.13's claim, kept: a BufAdd while buffers is NOT the active section must show up the moment the
+-- user focuses buffers. The old mechanism (a dirty bit consumed by on_focus) is gone with the old
+-- source; the buffers view does no work while hidden and repaints from scratch on show (ADR-0200 §4.8).
+--   (1) BufAdd while hidden → the view stays suspended (no work).
+--   (2) focus(buffers) → the new buffer is in the rendered list.
+--   (3) BufAdd while shown → it appears without a refocus.
+print("\n[21c] buffers opened while hidden appear on focus")
 section(function()
 local _af = require("auto-finder")
-
--- Need a buffers slot for this section.
 local _sb_name = require("auto-finder.sections")._by_name
 if _sb_name["buffers"] == nil then
   _af.slot_add("buffers")
 end
 local _buf_idx = require("auto-finder.sections")._by_name["buffers"]
 ok("buffers slot registered for [21c]", _buf_idx ~= nil)
+local _bv = require("auto-finder.views.buffers")
 
 _af.open(true)
 vim.wait(80)
-
--- Clean baseline: focus config (buffers NOT active).
 _af.focus(0)
 vim.wait(100)
-ok("baseline: registry.active == 0 (config), buffers NOT active",
-   _af._registry.active == 0)
--- Clean any prior dirty marker from earlier sections.
-_af._buffers_dirty = false
+ok("baseline: registry.active == 0 (config), buffers NOT active", _af._registry.active == 0)
 
--- (1) Open a probe file while buffers is INACTIVE. The autocmd-fire
--- gate must skip → `_buffers_dirty` should flip to true.
 local _probe_dirty = vim.fn.getcwd() .. "/tests/_v2_13_dirty_probe.txt"
-local _fh2 = io.open(_probe_dirty, "w"); _fh2:write("dirty-bit probe"); _fh2:close()
+local _fh2 = io.open(_probe_dirty, "w"); _fh2:write("hidden probe"); _fh2:close()
 local _win_b = probe_split(_probe_dirty)
-vim.wait(300)  -- > 80ms debounce + scheduler
-ok("BufAdd while buffers inactive flipped _buffers_dirty=true",
-   _af._buffers_dirty == true,
-   "got " .. tostring(_af._buffers_dirty))
-
--- Close the split so focus returns somewhere sensible; the probe
--- buffer remains in the buffer list with `buflisted=true`.
+vim.wait(300)
+ok("BufAdd while buffers hidden: the view stays suspended", not _bv._state.shown)
 probe_close(_win_b)
 
--- (2) Switch to buffers. The on_focus consumer must clear the flag
--- AND repopulate the tree with the probe buffer.
-_af.focus(_buf_idx)
-vim.wait(250)  -- focus + on_focus + refresh
-ok("after focus(buffers): _buffers_dirty cleared",
-   _af._buffers_dirty == false,
-   "got " .. tostring(_af._buffers_dirty))
-
--- Verify the probe buffer is rendered in the buffers tree. The
--- rendered buffer is the section's cached bufnr; read its lines
--- and grep for the basename.
-local _panel = _af.state.panel_winid
-local _panel_buf_v213 =
-   _panel and vim.api.nvim_win_is_valid(_panel)
-     and vim.api.nvim_win_get_buf(_panel) or -1
-local _lines = (_panel_buf_v213 > 0)
-   and vim.api.nvim_buf_get_lines(_panel_buf_v213, 0, -1, false) or {}
-local _saw_probe = false
-for _, ln in ipairs(_lines) do
-  if ln:find("_v2_13_dirty_probe", 1, true) then _saw_probe = true; break end
+local function rendered_has(needle)
+  local b = _bv._state.bufnr
+  if not (b and vim.api.nvim_buf_is_valid(b)) then return false end
+  for _, ln in ipairs(vim.api.nvim_buf_get_lines(b, 0, -1, false)) do
+    if ln:find(needle, 1, true) then return true end
+  end
+  return false
 end
-ok("buffers tree now contains the probe buf (regression: stale tree after gate-skip)",
-   _saw_probe,
-   "panel_buf=" .. tostring(_panel_buf_v213) .. " lines=" .. #_lines)
 
--- (3) Trigger another BufAdd while buffers IS active. The fire path
--- should refresh inline AND ensure the dirty bit stays cleared.
+_af.focus(_buf_idx)
+vim.wait(300, function() return rendered_has("_v2_13_dirty_probe") end, 10)
+ok("buffers list contains the buffer opened while hidden", rendered_has("_v2_13_dirty_probe"))
+
 local _probe_active = vim.fn.getcwd() .. "/tests/_v2_13_active_probe.txt"
 local _fh3 = io.open(_probe_active, "w"); _fh3:write("active probe"); _fh3:close()
 local _win_c = probe_split(_probe_active)
-vim.wait(300)
-ok("BufAdd while buffers active keeps _buffers_dirty=false (handled inline)",
-   _af._buffers_dirty == false,
-   "got " .. tostring(_af._buffers_dirty))
--- Close the split.
+vim.wait(400, function() return rendered_has("_v2_13_active_probe") end, 10)
+ok("BufAdd while buffers shown appears without a refocus", rendered_has("_v2_13_active_probe"))
 probe_close(_win_c)
 
 -- Cleanup probes.
@@ -2324,7 +1862,7 @@ end
 end)
 
 -- ───────────────────── 21d. v0.2.14 — out-of-cwd buffers grouped as sibling roots ───
--- Out-of-cwd buffers used to be silently dropped by the buffers
+-- Out-of-cwd buffers used to be silently dropped by the old buffers
 -- source's `is_subpath(state.path, path)` check. v0.2.14 buckets
 -- them by their natural external root (first segment after $HOME,
 -- or first absolute segment) and renders each bucket as a sibling
@@ -2366,13 +1904,7 @@ local _ext_bufnr = vim.fn.bufnr(_external_probe)
 vim.fn.bufload(_ext_bufnr)
 vim.wait(300)  -- BufAdd debounce + dirty-bit consumer
 
--- Force a refresh to make sure the latest state is rendered (the
--- panel may still be showing the pre-:badd snapshot if the autocmd
--- debounce hadn't elapsed yet under the test harness).
-if type(_af._refresh_buffers_now) == "function" then
-  _af._refresh_buffers_now(_af.state.panel_winid)
-  vim.wait(100)
-end
+require("auto-finder.views.buffers").paint()
 
 -- Inspect the rendered tree: must contain a SECOND root header
 -- corresponding to the external bucket, AND the probe filename
@@ -2409,10 +1941,7 @@ local _fh5 = io.open(_cwd_probe, "w"); _fh5:write("cwd probe"); _fh5:close()
 vim.cmd("badd " .. vim.fn.fnameescape(_cwd_probe))
 vim.fn.bufload(vim.fn.bufnr(_cwd_probe))
 vim.wait(300)
-if type(_af._refresh_buffers_now) == "function" then
-  _af._refresh_buffers_now(_af.state.panel_winid)
-  vim.wait(100)
-end
+require("auto-finder.views.buffers").paint()
 _panel_buf = (_panel and vim.api.nvim_win_is_valid(_panel))
   and vim.api.nvim_win_get_buf(_panel) or -1
 _lines = (_panel_buf > 0)
@@ -2440,19 +1969,13 @@ end
 end)
 
 -- ───────────────────── 22. follow-mode hijacking protection ──────────────
--- Regression coverage for files-follow and repos-follow:
--- reveals must be gated to their active section, and repos-follow
--- must reveal the containing repo without replacing the editor window.
+-- files-follow must be gated to its own slot: entering a file while another
+-- slot (buffers) is active must not swap the panel's buffer. (The repos-follow
+-- half of this section went with the removed `repos follow` feature — ADR-0200.)
 print("\n[22] follow-mode hijacking protection")
 
 local tmp_hijack = vim.fn.getcwd() .. "/tests/hijack-test.txt"
 vim.fn.writefile({ "hijack test" }, tmp_hijack)
-
-local function assert_no_hijack(section_name, section_idx)
-  local section = require("auto-finder.sections")._by_number[section_idx]
-  ok(string.format("panel window still displays %s buffer (not hijacked)", section_name),
-    vim.api.nvim_win_get_buf(af.state.panel_winid) == section._bufnr)
-end
 
 af.state.config.files.follow = true
 if not require("auto-finder.sections")._by_name["buffers"] then
@@ -2460,14 +1983,12 @@ if not require("auto-finder.sections")._by_name["buffers"] then
 end
 local buffers_idx = require("auto-finder.sections")._by_name["buffers"]
 af.focus(buffers_idx)
--- ADR 0026 Phase 7: deferred mount; poll until the buffers
--- section's real buffer is in place before asserting on it.
 vim.wait(500, function()
-  local sec = require("auto-finder.sections")._by_number[buffers_idx]
-  return sec and sec._bufnr ~= nil
-    and vim.api.nvim_buf_is_valid(sec._bufnr)
+  local b = af._registry._bufs[buffers_idx]
+  return b ~= nil and vim.api.nvim_buf_is_valid(b)
 end)
 ok("focused buffers section for files-follow gate", af.state.section == buffers_idx)
+local buffers_buf = af._registry._bufs[buffers_idx]
 
 local editor_win = nil
 for _, w in ipairs(vim.api.nvim_list_wins()) do
@@ -2483,70 +2004,11 @@ end
 vim.api.nvim_set_current_win(editor_win)
 vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
 vim.wait(200)
-assert_no_hijack("buffers", buffers_idx)
-af.state.config.files.follow = false
-
-af.state.config.repos.follow = true
-af.focus(buffers_idx)
--- Phase 7 polling wait.
-vim.wait(500, function()
-  local sec = require("auto-finder.sections")._by_number[buffers_idx]
-  return sec and sec._bufnr ~= nil
-    and vim.api.nvim_buf_is_valid(sec._bufnr)
-end)
-vim.api.nvim_set_current_win(editor_win)
-vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
-vim.wait(200)
-assert_no_hijack("buffers", buffers_idx)
-
-local core = require("auto-core")
-local workspace_root = vim.fn.fnamemodify(vim.fn.getcwd(), ":h")
-core.git.worktree.set_workspace_root(workspace_root)
-local repos_mod = require("auto-finder.repos")
-local orig_repos_load = repos_mod.load
-repos_mod.load = function() return { vim.fn.getcwd() } end
-
-local repos_idx = require("auto-finder.sections")._by_name["repos"]
-local repos_section = require("auto-finder.sections")._by_number[repos_idx]
-repos_section._bufnr = nil
-af.state.section_buffers[repos_idx] = nil
-af.focus(repos_idx)
--- Phase 7 polling wait.
-vim.wait(500, function()
-  return repos_section._bufnr ~= nil
-    and vim.api.nvim_buf_is_valid(repos_section._bufnr)
-end)
-ok("focused repos section for repos-follow reveal", af.state.section == repos_idx)
-
-vim.api.nvim_set_current_win(editor_win)
-ok("current window is an editor for repos-follow reveal",
-  vim.api.nvim_get_current_win() ~= af.state.panel_winid)
-vim.cmd("edit " .. vim.fn.fnameescape(tmp_hijack))
-vim.wait(200)
-
-ok("editor window still displays the test file (not hijacked by repos tree)",
+ok("panel window still displays the buffers buffer (not hijacked by files-follow)",
+  vim.api.nvim_win_get_buf(af.state.panel_winid) == buffers_buf)
+ok("editor window displays the entered file",
   vim.api.nvim_win_get_buf(editor_win) == vim.fn.bufnr(tmp_hijack))
-ok("panel window still displays repos buffer",
-  vim.api.nvim_win_get_buf(af.state.panel_winid) == repos_section._bufnr)
-
-local expected_repo_node = "auto-finder-repos://" .. vim.fn.getcwd()
-local focused_repo_node = nil
-do
-  local mgr = require("auto-finder.neotree.sources.manager")
-  for _, s in ipairs(mgr._get_all_states()) do
-    if s.name == "auto-finder-repos" and s.winid == af.state.panel_winid then
-      local node = s.tree and s.tree:get_node()
-      focused_repo_node = node and node:get_id() or nil
-      break
-    end
-  end
-end
-ok("repos-follow focused containing repo node",
-  focused_repo_node == expected_repo_node,
-  "expected " .. expected_repo_node .. ", got " .. tostring(focused_repo_node))
-
-af.state.config.repos.follow = false
-repos_mod.load = orig_repos_load
+af.state.config.files.follow = false
 pcall(vim.cmd, "bwipeout " .. vim.fn.bufnr(tmp_hijack))
 vim.fn.delete(tmp_hijack)
 
@@ -2556,68 +2018,6 @@ vim.fn.delete(tmp_hijack)
 -- dispatch routing for the new `dbase` verb. dbee is NOT required —
 -- _reload_dbee soft-fails when dbee isn't loaded, and the durable
 -- state-of-truth lives in plain JSON files we read back directly.
-print("\n[25] v0.2.22 — deferred scan.started load toast")
-section(function()
-  local fs_scan = require("auto-finder.neotree.sources.filesystem.lib.fs_scan")
-  local af_log = require("auto-finder.log")
-  ok("fs_scan exports MAPPING_TOAST_MS knob",
-     type(fs_scan.MAPPING_TOAST_MS) == "number")
-
-  local seen
-  local orig_notifyIf = af_log.notifyIf
-  af_log.notifyIf = function(event, ...)
-    if event == "scan.started" then seen = (seen or 0) + 1 end
-    return orig_notifyIf(event, ...)
-  end
-
-  -- Fast-scan branch: threshold = 10s. We schedule the cancel
-  -- ourselves immediately to mimic the completion callback firing
-  -- before the deferred timer.
-  do
-    local saved = fs_scan.MAPPING_TOAST_MS
-    fs_scan.MAPPING_TOAST_MS = 10000
-    seen = 0
-
-    -- Inline mini-repro of the deferral logic from get_items so we
-    -- exercise the cancel path without standing up a full neo-tree
-    -- scan state.
-    local scan_completed = false
-    vim.defer_fn(function()
-      if scan_completed then return end
-      af_log.notifyIf("scan.started", "mapping x", { component = "scan" })
-    end, fs_scan.MAPPING_TOAST_MS)
-    scan_completed = true  -- simulate fast completion
-
-    vim.wait(80)  -- let the scheduler run; timer would not have fired anyway
-    ok("fast scan: scan.started toast suppressed (seen=" .. tostring(seen) .. ")",
-       seen == 0)
-
-    fs_scan.MAPPING_TOAST_MS = saved
-  end
-
-  -- Slow-scan branch: threshold = 0ms. Timer fires next tick.
-  do
-    local saved = fs_scan.MAPPING_TOAST_MS
-    fs_scan.MAPPING_TOAST_MS = 0
-    seen = 0
-
-    local scan_completed = false
-    vim.defer_fn(function()
-      if scan_completed then return end
-      af_log.notifyIf("scan.started", "mapping y", { component = "scan" })
-    end, fs_scan.MAPPING_TOAST_MS)
-    -- DO NOT set scan_completed — let the timer fire.
-
-    vim.wait(200, function() return seen and seen > 0 end, 10)
-    ok("slow scan: scan.started toast fired (seen=" .. tostring(seen) .. ")",
-       seen == 1)
-
-    fs_scan.MAPPING_TOAST_MS = saved
-  end
-
-  af_log.notifyIf = orig_notifyIf
-end)
-
 -- ───────────────────────── 26. user-stories — buffers panel (v0.2.23) ─────────────────────────
 --
 -- End-to-end user-story coverage for the buffers section, exercising
@@ -2636,25 +2036,14 @@ end)
 -- the regression guard.
 print("\n[24] user-stories — buffers panel")
 section(function()
-local mgr = require("auto-finder.neotree.sources.manager")
-
--- Helper: count buffers-source nodes by id in the panel's state.
-local function buffers_tree_node_ids()
-  local out = {}
-  for _, s in ipairs(mgr._get_all_states()) do
-    if s.name == "buffers" and s.tree
-        and s.winid == af.state.panel_winid then
-      for id in pairs(s.tree.nodes.by_id or {}) do
-        out[id] = true
-      end
-    end
-  end
-  return out
-end
+local bview = require("auto-finder.views.buffers")
+-- The buffers view's rendered items carry each buffer's absolute path.
 local function buffers_tree_has_file(path)
-  local ids = buffers_tree_node_ids()
-  -- Neo-tree's file-items create_item indexes by absolute path.
-  return ids[path] == true
+  bview.paint()
+  for _, it in ipairs(bview._state.items or {}) do
+    if it.path == path then return true end
+  end
+  return false
 end
 
 -- Make sure buffers is the active section + the autocmd-refresh is wired.
@@ -2665,7 +2054,7 @@ local _buf_slot = require("auto-finder.sections")._by_name["buffers"]
 af.focus(_buf_slot)
 vim.wait(150)
 
--- Probe files under cwd (so `is_subpath(state.path, file)` matches).
+-- Probe files under cwd.
 local _probe_dir = vim.fn.getcwd() .. "/tests/_user_story_probes"
 vim.fn.mkdir(_probe_dir, "p")
 local _probe_edit = _probe_dir .. "/edit_probe.txt"
@@ -2687,7 +2076,6 @@ local _prev_win = vim.api.nvim_get_current_win()
 -- same defect.
 local _win_d = probe_split(_probe_edit)
 vim.api.nvim_set_current_win(_prev_win)
-af._refresh_buffers_now(af.state.panel_winid)
 vim.wait(200, function() return buffers_tree_has_file(_probe_edit) end, 20)
 ok("user-story: `:edit <file>` adds the file to the buffers tree",
   buffers_tree_has_file(_probe_edit))
@@ -2707,7 +2095,6 @@ ok("badd probe registered as a listed-but-unloaded buffer (pre-state)",
   string.format("listed=%s loaded=%s",
     tostring(vim.fn.buflisted(_badd_bufnr) == 1),
     tostring(vim.api.nvim_buf_is_loaded(_badd_bufnr))))
-af._refresh_buffers_now(af.state.panel_winid)
 vim.wait(200, function() return buffers_tree_has_file(_probe_badd) end, 20)
 ok("user-story: `:badd <file>` adds the file to the buffers tree (regression guard)",
   buffers_tree_has_file(_probe_badd),
@@ -2716,7 +2103,6 @@ ok("user-story: `:badd <file>` adds the file to the buffers tree (regression gua
 -- ── User-story: `:bd <bufnr>` removes the file from the panel ────
 local _edit_bufnr = vim.fn.bufnr(_probe_edit)
 pcall(vim.api.nvim_buf_delete, _edit_bufnr, { force = true })
-af._refresh_buffers_now(af.state.panel_winid)
 vim.wait(200, function() return not buffers_tree_has_file(_probe_edit) end, 20)
 ok("user-story: `:bd <bufnr>` removes the file from the buffers tree",
   not buffers_tree_has_file(_probe_edit))
@@ -2742,17 +2128,11 @@ end)
 if _term_ok then
   vim.wait(150)
   vim.api.nvim_set_current_win(_prev_win)
-  af._refresh_buffers_now(af.state.panel_winid)
   vim.wait(200)
-  -- Find any node with type=terminal in the tree.
+  bview.paint()
   local saw_terminal = false
-  for _, s in ipairs(mgr._get_all_states()) do
-    if s.name == "buffers" and s.tree
-        and s.winid == af.state.panel_winid then
-      for _, node in pairs(s.tree.nodes.by_id or {}) do
-        if node.type == "terminal" then saw_terminal = true; break end
-      end
-    end
+  for _, it in ipairs(bview._state.items or {}) do
+    if it.icon_name == "terminal" then saw_terminal = true; break end
   end
   ok("user-story: a `:terminal` buffer appears in the buffers tree",
     saw_terminal)
@@ -2780,25 +2160,17 @@ do
   local fh = io.open(_ext_probe, "w"); fh:write("ext probe"); fh:close()
 end
 vim.cmd("badd " .. vim.fn.fnameescape(_ext_probe))
-af._refresh_buffers_now(af.state.panel_winid)
 vim.wait(200, function() return buffers_tree_has_file(_ext_probe) end, 20)
 ok("user-story: out-of-cwd `:badd`'d file appears in the buffers tree",
   buffers_tree_has_file(_ext_probe))
--- Also verify the /tmp bucket exists as a top-level node (v0.2.14
--- external-root behavior).
+-- Also verify the /tmp bucket is its own root row (v0.2.14 external-root behavior).
 local saw_tmp_bucket = false
-for _, s in ipairs(mgr._get_all_states()) do
-  if s.name == "buffers" and s.tree
-      and s.winid == af.state.panel_winid then
-    for id, node in pairs(s.tree.nodes.by_id or {}) do
-      if id == "/tmp" and node.type == "directory"
-          and node:get_depth() == 1 then
-        saw_tmp_bucket = true; break
-      end
-    end
+for _, it in ipairs(bview._state.items or {}) do
+  if it.kind == "root" and it.depth == 0 and it.name == "OPEN BUFFERS in /tmp" then
+    saw_tmp_bucket = true; break
   end
 end
-ok("user-story: /tmp bucket appears as a top-level (depth=1) sibling group",
+ok("user-story: /tmp bucket appears as its own root row (OPEN BUFFERS in /tmp)",
   saw_tmp_bucket)
 
 -- ── Cleanup ──────────────────────────────────────────────────────
@@ -2817,57 +2189,31 @@ end)
 -- ───────────────────────── 27. user-stories — files panel (v0.2.23) ─────────────────────────
 print("\n[27] user-stories — files panel")
 section(function()
-local mgr = require("auto-finder.neotree.sources.manager")
-
-local function fs_tree_node_ids()
-  local out = {}
-  for _, s in ipairs(mgr._get_all_states()) do
-    if s.name == "filesystem" and s.tree
-        and s.winid == af.state.panel_winid then
-      for id in pairs(s.tree.nodes.by_id or {}) do
-        out[id] = true
-      end
-    end
+local fview = require("auto-finder.views.files")
+local function fs_tree_has(path)
+  for _, v in ipairs(fview._state.items or {}) do
+    if v.node.path == path then return true end
   end
-  return out
+  return false
 end
-local function fs_tree_has(path) return fs_tree_node_ids()[path] == true end
 
--- Focus the files section + give the watcher a tick to settle.
 local _files_slot = require("auto-finder.sections")._by_name["files"]
 af.focus(_files_slot)
-vim.wait(200)
+vim.wait(500, function() return fview._state.shown and #fview._state.items > 1 end, 10)
 
--- Top-level under cwd so the default-expanded root sees it on
--- refresh. A nested subdir would require the panel to have already
--- expanded the path before the watcher fires, which is fragile.
+-- A top-level file under cwd: the expanded root's own watch sees it, and the
+-- view re-reads that one directory (no manual refresh — the live path IS the
+-- claim, ADR-0200 §4.4).
 local _probe_file = vim.fn.getcwd() .. "/_user_story_fs_probe.txt"
-local _probe_dir = nil
-
--- ── User-story: writefile creates a new file → tree reflects it ──
--- Force a synchronous manager.refresh after the write to keep the
--- test deterministic against fs.watch's libuv timing. (The
--- production path goes through the auto-core.fs.watch debounce
--- + schedule, which we cover end-to-end at section [14]; this
--- assertion is about the panel's tree-content correctness after a
--- refresh, not the watcher's plumbing.)
-ok("baseline: created_probe NOT in tree yet",
-  not fs_tree_has(_probe_file))
+ok("baseline: created_probe NOT in tree yet", not fs_tree_has(_probe_file))
 vim.fn.writefile({ "probe" }, _probe_file)
-require("auto-finder.neotree.sources.manager").refresh("filesystem")
-vim.wait(500, function() return fs_tree_has(_probe_file) end, 25)
-ok("user-story: writefile under cwd → files panel shows the new file",
-  fs_tree_has(_probe_file),
-  "tree should contain " .. _probe_file .. " after refresh")
+vim.wait(2000, function() return fs_tree_has(_probe_file) end, 25)
+ok("user-story: writefile under cwd → files panel shows the new file (live watch)",
+  fs_tree_has(_probe_file), "tree should contain " .. _probe_file)
 
--- ── User-story: delete the file → tree drops it ──────────────────
 pcall(os.remove, _probe_file)
-require("auto-finder.neotree.sources.manager").refresh("filesystem")
-vim.wait(500, function() return not fs_tree_has(_probe_file) end, 25)
-ok("user-story: deleting a file → files panel drops it",
-  not fs_tree_has(_probe_file))
-
--- ── Cleanup ──
+vim.wait(2000, function() return not fs_tree_has(_probe_file) end, 25)
+ok("user-story: deleting a file → files panel drops it (live watch)", not fs_tree_has(_probe_file))
 pcall(os.remove, _probe_file)
 end)
 
@@ -2880,45 +2226,24 @@ end)
 -- top-level node corresponding to a registered workspace".
 print("\n[28] user-stories — repos panel")
 section(function()
-local mgr = require("auto-finder.neotree.sources.manager")
 local af_repos = require("auto-finder").repos
 ok("auto-finder.repos surface exists",
   type(af_repos) == "table" and type(af_repos.root) == "function")
-
--- Mount the repos section.
 if not require("auto-finder.sections")._by_name["repos"] then
   af.slot_add("repos")
 end
 local _repos_slot = require("auto-finder.sections")._by_name["repos"]
 af.focus(_repos_slot)
-vim.wait(250)
-
--- Find the repos state for the panel window.
-local _repos_state
-for _, s in ipairs(mgr._get_all_states()) do
-  if s.name == "auto-finder-repos"
-      and s.winid == af.state.panel_winid then
-    _repos_state = s; break
-  end
-end
-ok("user-story: focusing repos section mounts an auto-finder-repos state",
-  _repos_state ~= nil
-    and _repos_state.tree ~= nil,
-  "expected a live state with tree for the panel winid")
-
--- The repos tree builds a top-level node for the current workspace
--- root (the cwd's bare-parent OR the cwd's git_root). Assert ≥1 node
--- in the tree — this is the "I see my repos when I open the panel"
--- user-story. The current cwd IS a git worktree, so this is reliable.
-local _repos_nodes = 0
-if _repos_state and _repos_state.tree then
-  for _ in pairs(_repos_state.tree.nodes.by_id or {}) do
-    _repos_nodes = _repos_nodes + 1
-  end
-end
-ok("user-story: repos panel shows ≥1 node for the current workspace",
-  _repos_nodes >= 1,
-  "expected ≥1 node, got " .. _repos_nodes)
+local _rb
+vim.wait(500, function()
+  _rb = af._registry._bufs[_repos_slot]
+  return _rb ~= nil and vim.api.nvim_buf_is_valid(_rb)
+end, 10)
+ok("user-story: focusing repos mounts the worktree tree's buffer", _rb ~= nil and vim.api.nvim_buf_is_valid(_rb))
+ok("user-story: the repos buffer is what the panel shows",
+  _rb ~= nil and vim.api.nvim_win_get_buf(af.state.panel_winid) == _rb)
+ok("user-story: the repos tree rendered at least one row",
+  _rb ~= nil and #vim.api.nvim_buf_get_lines(_rb, 0, -1, false) >= 1)
 end)
 
 -- ───────────────────────── 29. ADR 0026 Phase 1: core skeleton ────
@@ -2966,31 +2291,9 @@ ok("is_started() ends true after reload",
   core.is_started() == true)
 
 -- (c) submodule lazy loading via __index. Each submodule must
--- resolve and expose the Phase 1 minimum surface.
-ok("core.files loads with snapshot_now/snapshot_async/get",
-  type(core.files) == "table"
-    and type(core.files.snapshot_now) == "function"
-    and type(core.files.snapshot_async) == "function"
-    and type(core.files.get) == "function")
-
-local files_snap = core.files.snapshot_now()
-ok("core.files.snapshot_now returns { tree, readiness }",
-  type(files_snap) == "table"
-    and type(files_snap.tree) == "table"
-    and type(files_snap.readiness) == "string",
-  "got " .. vim.inspect(files_snap))
-
--- Phase 1 originally asserted readiness == "cold" here on the
--- assumption that ensure_started was a no-op. Phase 4 changed
--- that: ensure_started now opens watchers + starts the chunked
--- warmer, so readiness transitions cold → warming → ready
--- shortly after setup. The Phase 1 assertion shape stays as a
--- weaker "readiness is a known value" check.
-local known = { cold = true, warming = true, ready = true, partial = true }
-ok("core.files.snapshot_now returns a known readiness state",
-  known[files_snap.readiness] == true,
-  "got readiness=" .. tostring(files_snap.readiness))
-
+-- resolve and expose its minimum surface. (core.files / core.warm fed
+-- only the retired fork and went with it — ADR-0200.)
+ok("core.files / core.warm are gone (ADR-0200)", core.files == nil and core.warm == nil)
 ok("core.git loads with snapshot_now/snapshot_async",
   type(core.git) == "table"
     and type(core.git.snapshot_now) == "function"
@@ -3010,34 +2313,14 @@ ok("core.repos loads with snapshot surface",
   type(core.repos) == "table"
     and type(core.repos.snapshot_now) == "function")
 
-ok("core.watchers loads with open/close/list surface",
+ok("core.watchers loads with the per-worktree surface",
   type(core.watchers) == "table"
-    and type(core.watchers.open_for) == "function"
-    and type(core.watchers.close_for) == "function"
+    and type(core.watchers.reconcile_watched) == "function"
     and type(core.watchers.close_all) == "function"
-    and type(core.watchers.list) == "function")
+    and core.watchers.open_for == nil)
 
--- Phase 4 ensure_started opens fs.watch for the cwd, so list()
--- isn't empty here. Phase 1's assertion stays as a "returns a
--- list" check.
-ok("core.watchers.list() returns a list",
-  type(core.watchers.list()) == "table")
-
-ok("core.warm loads with start/stop/status surface",
-  type(core.warm) == "table"
-    and type(core.warm.start) == "function"
-    and type(core.warm.stop) == "function"
-    and type(core.warm.status) == "function")
-
--- Phase 4 starts the warmer during ensure_started, so status
--- progresses cold → warming → ready. Phase 1's assertion stays
--- as "returns a known status."
-local warm_states = { cold = true, warming = true, ready = true, partial = true }
-ok("core.warm.status() returns a known status",
-  warm_states[core.warm.status()] == true,
-  "got status=" .. tostring(core.warm.status()))
-
--- (d) topic registry — ADR §2.2 lists six topics. Assert each
+-- (d) topic registry — the live topics (ADR-0200 removed files:changed,
+-- ready and metrics:paint with their only publishers). Assert each
 -- one is registered so a Phase 4+ implementer can't accidentally
 -- typo a topic name without the smoke catching it.
 ok("core.events loads with TOPICS/publish/subscribe/unsubscribe",
@@ -3048,12 +2331,9 @@ ok("core.events loads with TOPICS/publish/subscribe/unsubscribe",
     and type(core.events.unsubscribe) == "function")
 
 local expected_topics = {
-  "auto-finder.core.files:changed",
   "auto-finder.core.git:changed",
   "auto-finder.core.buffers:changed",
   "auto-finder.core.repos:changed",
-  "auto-finder.core.ready",
-  "auto-finder.core.metrics:paint",
 }
 for _, t in ipairs(expected_topics) do
   ok("topic registered: " .. t,
@@ -3067,13 +2347,13 @@ end
 -- to the rtp, so auto-core IS available — assert the round-trip.
 local got_payload
 local handle = core.events.subscribe(
-  "auto-finder.core.metrics:paint",
+  "auto-finder.core.buffers:changed",
   function(payload) got_payload = payload end)
 ok("subscribe returns a handle when auto-core is present",
   handle ~= nil,
   "auto-core may be missing; check rtp prelude")
 
-core.events.publish("auto-finder.core.metrics:paint",
+core.events.publish("auto-finder.core.buffers:changed",
   { view = "smoke", dur_ms = 0, generation = 1 })
 vim.wait(10)
 ok("publish → subscriber callback fires with the payload",
@@ -3083,7 +2363,7 @@ ok("publish → subscriber callback fires with the payload",
 
 core.events.unsubscribe(handle)
 got_payload = nil
-core.events.publish("auto-finder.core.metrics:paint",
+core.events.publish("auto-finder.core.buffers:changed",
   { view = "smoke-after-unsub", dur_ms = 0, generation = 2 })
 vim.wait(10)
 ok("unsubscribe stops the callback",
@@ -3119,9 +2399,6 @@ local pairs_to_check = {
   { sec = "auto-finder.sections.buffers",  view = "auto-finder.views.buffers" },
   { sec = "auto-finder.sections.repos",    view = "auto-finder.views.repos" },
   { sec = "auto-finder.sections.dbase",    view = "auto-finder.views.dbase" },
-  -- shared helper relocated out of sections/ entirely; facade keeps
-  -- the old require path valid.
-  { sec = "auto-finder.sections._neotree",      view = "auto-finder.shared.neotree" },
 }
 for _, pair in ipairs(pairs_to_check) do
   local sec_mod = require(pair.sec)
@@ -3195,9 +2472,9 @@ ok("view_subs.new() returns an object", type(subs) == "table")
 ok("view_subs.new() starts with count == 0", subs:count() == 0)
 
 local hits = { a = 0, b = 0 }
-subs:replace("a", "auto-finder.core.metrics:paint",
+subs:replace("a", "auto-finder.core.buffers:changed",
   function() hits.a = hits.a + 1 end)
-subs:replace("b", "auto-finder.core.metrics:paint",
+subs:replace("b", "auto-finder.core.buffers:changed",
   function() hits.b = hits.b + 1 end)
 ok("view_subs:count() == 2 after two replace() calls", subs:count() == 2)
 ok("view_subs:has('a') is true", subs:has("a"))
@@ -3207,12 +2484,12 @@ ok("view_subs:has('c') is false", not subs:has("c"))
 -- AND must swap which callback fires. Publish once, expect one fire
 -- on the NEW callback only.
 local replaced_a_hits = 0
-subs:replace("a", "auto-finder.core.metrics:paint",
+subs:replace("a", "auto-finder.core.buffers:changed",
   function() replaced_a_hits = replaced_a_hits + 1 end)
 ok("view_subs:replace() on same slot keeps count == 2", subs:count() == 2)
 
 local before_a = hits.a
-core.events.publish("auto-finder.core.metrics:paint",
+core.events.publish("auto-finder.core.buffers:changed",
   { view = "viewsubs-test", dur_ms = 0, generation = 1 })
 vim.wait(10)
 ok("re-replaced slot fires the NEW callback, not the old",
@@ -3225,7 +2502,7 @@ subs:dispose_all()
 ok("view_subs:dispose_all() drops count to 0", subs:count() == 0)
 local before_replaced_a = replaced_a_hits
 local before_b = hits.b
-core.events.publish("auto-finder.core.metrics:paint",
+core.events.publish("auto-finder.core.buffers:changed",
   { view = "viewsubs-after-dispose", dur_ms = 0, generation = 2 })
 vim.wait(10)
 ok("dispose_all stops every slot's callback",
@@ -3255,9 +2532,9 @@ end)
 --   (b) ensure_started is idempotent — second call doesn't grow
 --       the handle table beyond its single-handle-per-slot maximum
 --   (c) A7 (bus-reset behavior): force-reset auto-core.events,
---       call ensure_started, publish a synthetic core.file:*
---       event, assert the translated auto-finder.core.files:changed
---       event fires
+--       call ensure_started, publish a synthetic core.git.state:changed
+--       event, assert the translated auto-finder.core.git:changed
+--       event fires (the files translator went with ADR-0200)
 --   (d) worktree:switched + core.git.state:changed translations
 --       reach their auto-finder.core.* topics
 --   (e) A8 (handle release): fs.watch.list() + git.watch.list()
@@ -3265,56 +2542,10 @@ end)
 --       opens zero watchers so both lists stay empty across the
 --       round-trip; Phase 4/5 will add real handles and this
 --       assertion gains teeth.
---   (f) metrics:paint emit at the existing render path — captured
---       when the files section is re-mounted via auto-finder.reload
 print("\n[31] ADR 0026 Phase 3 — lifecycle (A7 bus-reset, A8 handle release)")
 section(function()
 local core = require("auto-finder.core")
 local up   = require("auto-core")
-
--- (f) metrics:paint emit FIRST. The shared/neotree.lua subscriber
--- registers via the one-shot `_fs_subscribed` flag — once a bus
--- reset wipes it, the flag stays true and the subscription doesn't
--- re-arm until Phase 7 migrates that path into the re-armable
--- shape. So we verify metrics:paint BEFORE the bus-reset test
--- below, while shared/neotree.lua's subscriber is still alive.
--- ADR 0026 Phase 6 made section.refresh emit metrics:paint too,
--- so earlier sections leave us with paint events from buffers /
--- repos. Filter the probe to view == "files" so we only capture
--- the event we actually care about (the files section's render).
-local paint_seen
-local paint_probe = core.events.subscribe(
-  "auto-finder.core.metrics:paint",
-  function(p) if p and p.view == "files" then paint_seen = p end end)
-local files_idx = require("auto-finder.views")._by_name["files"]
-if files_idx then
-  af.focus(files_idx)
-  -- ADR 0026 Phase 7: poll until the deferred mount completes so
-  -- the live-refresh subscriber is armed before we publish.
-  local files_sec = require("auto-finder.sections")._by_number[files_idx]
-  vim.wait(500, function()
-    return files_sec and files_sec._bufnr ~= nil
-      and vim.api.nvim_buf_is_valid(files_sec._bufnr)
-  end)
-  up.events.publish("core.file:modified",
-    { path = vim.fn.getcwd() .. "/phase3-metrics-probe.txt" })
-  -- Flush the 100ms core translator debounce synchronously so the
-  -- `auto-finder.core.files:changed` emit (and the section's
-  -- schedule_refresh arming) land NOW, not after a fixed sleep. Only
-  -- the 150ms neotree render debounce remains, which the wait below
-  -- polls on the real post-condition (paint_seen). The old fixed
-  -- 500ms budget raced the full 100+150ms chain and lost ~1 in 5
-  -- under load; flushing removes the 100ms leg + its variance, and
-  -- 1500ms gives 10x headroom on the remaining 150ms leg.
-  core._flush_file_events_for_tests()
-  vim.wait(1500, function() return paint_seen ~= nil end)
-  ok("metrics:paint emit fires from existing render path",
-    type(paint_seen) == "table"
-      and type(paint_seen.dur_ms) == "number"
-      and paint_seen.view == "files",
-    "got " .. vim.inspect(paint_seen))
-end
-core.events.unsubscribe(paint_probe)
 
 -- (a) Setup already called ensure_started via the section [1]
 -- af.setup; verify the contract holds.
@@ -3333,67 +2564,34 @@ ok("ensure_started is idempotent (handle count unchanged on re-call)",
     .. " to " .. vim.tbl_count(core._handles))
 
 -- (c) A7 bus-reset behavior. The test sequence per ADR §4:
---   1. force auto-core.events._reset_for_tests
---   2. focus a view (transitively calls ensure_started)
---   3. publish synthetic core.file:created event
---   4. assert auto-finder.core.files:changed fires
-local files_changed_count = 0
-local last_files_payload
-local function reset_files_state()
-  files_changed_count = 0
-  last_files_payload = nil
-end
-
--- Establish baseline behavior BEFORE the reset: publish a synthetic
--- event and confirm core's translator fires.
-local probe_handle = core.events.subscribe(
-  "auto-finder.core.files:changed",
-  function(p) files_changed_count = files_changed_count + 1; last_files_payload = p end)
-
-reset_files_state()
-up.events.publish("core.file:created", { path = "/tmp/phase3-probe-pre.txt" })
--- ADR 0026 Phase 4: translator now debounces 100ms and coalesces.
--- Flush synchronously so the assertion doesn't race the timer.
-core._flush_file_events_for_tests()
+--   1. prove the translator fires (pre-reset baseline)
+--   2. force auto-core.events._reset_for_tests
+--   3. re-arm via ensure_started, publish again
+--   4. assert the translated event still fires
+local git_count, last_git = 0, nil
+local function git_probe_cb(p) git_count = git_count + 1; last_git = p end
+local probe_handle = core.events.subscribe("auto-finder.core.git:changed", git_probe_cb)
+up.events.publish("core.git.state:changed",
+  { repo_root = "/tmp/phase3-probe-pre", git_dir = "/tmp/phase3-probe-pre/.git", kind = "head" })
 vim.wait(20)
-ok("pre-reset: translator fires on core.file:created",
-  files_changed_count == 1,
-  "expected 1 fire, got " .. files_changed_count)
-ok("pre-reset: translated payload carries kind='upsert'",
-  last_files_payload and last_files_payload.kind == "upsert",
-  "got " .. vim.inspect(last_files_payload))
-ok("pre-reset: translated payload carries the path",
-  last_files_payload
-    and type(last_files_payload.paths) == "table"
-    and last_files_payload.paths[1] == "/tmp/phase3-probe-pre.txt",
-  "got " .. vim.inspect(last_files_payload))
+ok("pre-reset: translator fires on core.git.state:changed", git_count == 1,
+  "expected 1 fire, got " .. git_count)
+ok("pre-reset: translated payload carries the repo_root",
+  last_git and last_git.repo_root == "/tmp/phase3-probe-pre", vim.inspect(last_git))
 
--- Now force the bus reset. Both our probe_handle AND core's
--- internal upstream subscriptions are wiped.
 core.events.unsubscribe(probe_handle)
 up.events._reset_for_tests()
-
--- Re-arm core (this is what M.open / M.focus would do defensively
--- in production). The unconditional dispose-first-then-resubscribe
--- per ADR §2.2 should leave core in a working state.
 core.ensure_started(af.state.config)
-
--- Subscribe a fresh probe (the prior was wiped along with everything
--- else). Then publish the synthetic event.
-local probe_post = core.events.subscribe(
-  "auto-finder.core.files:changed",
-  function(p) files_changed_count = files_changed_count + 1; last_files_payload = p end)
-
-reset_files_state()
-up.events.publish("core.file:modified", { path = "/tmp/phase3-probe-post.txt" })
-core._flush_file_events_for_tests()
+git_count, last_git = 0, nil
+local probe_post = core.events.subscribe("auto-finder.core.git:changed", git_probe_cb)
+up.events.publish("core.git.state:changed",
+  { repo_root = "/tmp/phase3-probe-post", git_dir = "/tmp/phase3-probe-post/.git", kind = "index" })
 vim.wait(20)
-ok("A7: translator re-arms after bus reset (event fires)",
-  files_changed_count == 1,
-  "expected 1 fire after reset+ensure_started, got " .. files_changed_count
+ok("A7: translator re-arms after bus reset (event fires)", git_count == 1,
+  "expected 1 fire after reset+ensure_started, got " .. git_count
     .. " — bus-reset re-arming is broken")
-ok("A7: post-reset payload still carries kind='upsert'",
-  last_files_payload and last_files_payload.kind == "upsert")
+ok("A7: post-reset payload carries the new repo_root",
+  last_git and last_git.repo_root == "/tmp/phase3-probe-post")
 core.events.unsubscribe(probe_post)
 
 -- (d) Translation for the other upstream topics.
@@ -3426,10 +2624,8 @@ ok("translator: worktree:switched → auto-finder.core.repos:changed",
 core.events.unsubscribe(repos_probe)
 
 -- (e) A8 handle release. Snapshot the watcher lists before stop()
--- and after; both must return to the pre-ensure_started state.
--- Phase 3 opens zero watchers (core/watchers.lua is still a no-op);
--- when Phase 4/5 add real fs.watch + git.watch handles this same
--- assertion gains teeth without code change.
+-- and after; both must return to the pre-ensure_started state. Core
+-- opens watchers only for WATCHED worktrees (ADR-0200: no cwd walk).
 local function fs_list_or_empty()
   if type(up.fs) == "table" and type(up.fs.watch) == "table"
       and type(up.fs.watch.list) == "function" then
@@ -3445,12 +2641,9 @@ local function git_list_or_empty()
   return {}
 end
 
--- ADR 0026 Phase 4: ensure_started now opens an fs.watch (and
--- on git repos, a git.watch) handle for the cwd. The A8 contract
--- per ADR §4 is "stop() releases every handle ensure_started
--- opened" — measured by calling stop FIRST to establish a baseline,
--- then ensure_started (should add handles), then stop again
--- (should return to baseline).
+-- The A8 contract per ADR §4 is "stop() releases every handle
+-- ensure_started opened" — measured by calling stop FIRST to establish
+-- a baseline, then ensure_started, then stop again (back to baseline).
 core.stop()
 local fs_baseline  = #fs_list_or_empty()
 local git_baseline = #git_list_or_empty()
@@ -3463,7 +2656,7 @@ core.stop()
 local fs_after_stop   = #fs_list_or_empty()
 local git_after_stop  = #git_list_or_empty()
 
-ok("A8: ensure_started opens at least one fs.watch handle",
+ok("A8: ensure_started opens no cwd walk (handles never drop below baseline)",
   fs_after_start >= fs_baseline,
   string.format("baseline=%d after_start=%d", fs_baseline, fs_after_start))
 ok("A8: stop() releases fs.watch handle back to baseline",
@@ -3487,25 +2680,15 @@ ok("post-restore: core.is_started() == true",
 end)
 
 -- ───────────────────────── 32. ADR 0026 Phase 4: files cache + watchers ──
--- ADR 0026 Phase 4: directory-aware files cache, fs.watch +
--- git.watch ownership in core/watchers, chunked async warmer,
--- translator with burst detection + coalescing.
---
--- This section covers the Phase 4 acceptance ledger:
+-- ADR 0026's ownership rules, and the ADR-0200 translation they now cover:
 --   A1 — no view module subscribes to upstream auto-core topics
 --   A2 — no view OR shared module opens an fs.watch or git.watch
---   A4 — 100-event burst coalesces to a single auto-finder.core.files:changed
---   A6 — single-file events upsert the cache (delta), bursts → subtree_stale
---   A15 — chunked warm respects the 5ms-per-tick budget
---
--- A5 (≤ 50% baseline) is the final assertion in Phase 9; Phase 4
--- captures the baseline via the metrics:paint emit already wired
--- in Phase 3 (smoke section [31] verifies it fires).
-print("\n[32] ADR 0026 Phase 4 — files cache + watchers (A1, A2, A4, A6, A15)")
+--   A6 — core translates core.file:* / core.fs.dir:dirty into
+--        auto-finder.core.files:changed for WATCHED directories only,
+--        with owner-scoped, ref-counted directory watches
+print("\n[32] ADR 0026 A1/A2 + ADR-0200 watched-directory translation")
 section(function()
-local core_files    = require("auto-finder.core.files")
 local core_watchers = require("auto-finder.core.watchers")
-local core_warm     = require("auto-finder.core.warm")
 local core_init     = require("auto-finder.core")
 local core_events   = require("auto-finder.core.events")
 local up            = require("auto-core")
@@ -3547,6 +2730,8 @@ do
       ["\"core.file:"]       = true,
       ["\"core.git.state:"]  = true,
       ["\"worktree:"]        = true,
+      ["\"core.fs."]         = true,   -- core.fs.dir:dirty (ADR-0200)
+      ["\"state.core:"]      = true,   -- auto-core.files prefs; core translates them to files:filters
     }) do
       if content:find(forbidden, 1, true) then
         violations[#violations + 1] = path .. " contains " .. forbidden
@@ -3572,17 +2757,9 @@ do
     while true do
       local name, t = vim.uv.fs_scandir_next(h)
       if not name then break end
-      if name == "neotree" then
-        -- The vendored neo-tree fork has its own fs.watch internals
-        -- under lua/auto-finder/neotree/* (utils, sources/manager,
-        -- etc.). Those don't go through auto-core.fs.watch.start
-        -- so they don't count as a violation, but we skip them
-        -- here anyway to keep the walk lean.
-      else
-        local p = dir .. "/" .. name
-        if t == "directory" then walk(p, fn)
-        elseif t == "file" and name:match("%.lua$") then fn(p)
-        end
+      local p = dir .. "/" .. name
+      if t == "directory" then walk(p, fn)
+      elseif t == "file" and name:match("%.lua$") then fn(p)
       end
     end
   end
@@ -3608,192 +2785,57 @@ do
     "violations: " .. vim.inspect(violations))
 end
 
--- ── A4: burst coalescing ──
--- Publish 100 synthetic core.file:* events under one parent dir
--- and assert exactly ONE auto-finder.core.files:changed event
--- fires after the debounce window flushes. Because the burst
--- exceeds BURST_THRESHOLD (50), the emit shape is
--- kind='subtree_stale' rather than a 100-path upsert.
+-- ── A6 (ADR-0200 §4.4): core translates events for WATCHED directories only ──
+-- The files view asks core to watch its expanded directories; core turns a
+-- core.file:* under one of them into auto-finder.core.files:changed naming that
+-- directory, and ignores everything else. (The files cache, burst translator and
+-- chunked warmer that A4/A6/A15 covered fed only the retired fork.)
 do
-  -- Reset core's files cache so the assertion isn't muddied by
-  -- prior tests.
-  core_files._reset_for_tests()
-  -- Make sure core is started.
   core_init.ensure_started(af.state.config)
-
-  local fires = {}
-  local hb = core_events.subscribe(
-    "auto-finder.core.files:changed",
-    function(payload) fires[#fires + 1] = payload end)
-
-  local burst_parent = vim.fn.getcwd() .. "/phase4-burst"
-  for i = 1, 100 do
-    up.events.publish("core.file:created",
-      { path = burst_parent .. "/probe-" .. i .. ".txt" })
-  end
-  -- Flush the debounce buffer synchronously so the assertion
-  -- doesn't race the timer.
-  core_init._flush_file_events_for_tests()
-  vim.wait(10)
-
-  ok("A4: 100-event burst coalesces to a single emit",
-    #fires == 1,
-    "got " .. #fires .. " fires: " .. vim.inspect(fires))
-  ok("A4: burst emit is kind='subtree_stale'",
-    fires[1] and fires[1].kind == "subtree_stale",
-    "first fire kind: " .. tostring(fires[1] and fires[1].kind))
-  ok("A4: subtree_stale payload carries the parent dir",
-    fires[1] and type(fires[1].parents) == "table"
-      and fires[1].parents[1] == burst_parent,
-    "got parents: " .. vim.inspect(fires[1] and fires[1].parents))
-
-  core_events.unsubscribe(hb)
-end
-
--- ── A6: single-file events upsert the cache (delta) ──
-do
-  core_files._reset_for_tests()
-  core_init.ensure_started(af.state.config)
-
-  local fires = {}
-  local hd = core_events.subscribe(
-    "auto-finder.core.files:changed",
-    function(payload) fires[#fires + 1] = payload end)
-
-  local probe = vim.fn.getcwd() .. "/phase4-delta-probe.txt"
-  up.events.publish("core.file:modified", { path = probe })
-  core_init._flush_file_events_for_tests()
-  vim.wait(10)
-
-  local entry = core_files.get(probe)
-  ok("A6: single-file event upserts the cache entry",
-    entry ~= nil and entry.kind == "file" and entry.path == probe,
-    "cache entry for " .. probe .. ": " .. vim.inspect(entry))
-  ok("A6: single-file emit kind='upsert' (not subtree_stale)",
-    fires[1] and fires[1].kind == "upsert",
-    "got kind: " .. tostring(fires[1] and fires[1].kind))
-
-  -- Delete the same path; cache entry should drop.
-  up.events.publish("core.file:deleted", { path = probe })
-  core_init._flush_file_events_for_tests()
-  vim.wait(10)
-  ok("A6: single-file delete drops cache entry",
-    core_files.get(probe) == nil,
-    "cache entry still present after delete: "
-      .. vim.inspect(core_files.get(probe)))
-  ok("A6: delete emit kind='delete'",
-    fires[#fires] and fires[#fires].kind == "delete",
-    "last fire kind: " .. tostring(fires[#fires] and fires[#fires].kind))
-
-  core_events.unsubscribe(hd)
-end
-
--- ── A15: chunked warm respects 5ms-per-tick budget ──
--- Create a tmp dir with enough top-level entries to force the
--- warmer through multiple ticks (default batch_size = 8). Then
--- start the warmer, wait for completion, and assert no recorded
--- tick exceeded 5ms.
-do
-  local tmp = vim.fn.tempname()
+  local tmp = vim.fn.tempname() .. "-a6-watched"
   vim.fn.mkdir(tmp, "p")
-  -- 64 entries → 8 ticks of 8 entries each at default batch size.
-  for i = 1, 64 do
-    vim.fn.writefile({ "probe " .. i }, tmp .. "/p" .. i .. ".txt")
-  end
+  local owner = {}
+  ok("watch_dir arms a watch for the directory", core_watchers.watch_dir(tmp, owner) == true)
+  local seen = {}
+  local h = core_events.subscribe("auto-finder.core.files:changed", function(p) seen[#seen + 1] = p end)
+  up.events.publish("core.file:created", { path = tmp .. "/new.txt", change = "created" })
+  vim.wait(50, function() return #seen > 0 end, 5)
+  ok("A6: an event in a watched directory is translated",
+    #seen == 1 and seen[1].kind == "created" and seen[1].dir == tmp and seen[1].path == tmp .. "/new.txt",
+    vim.inspect(seen))
+  seen = {}
+  up.events.publish("core.file:created", { path = "/tmp/not-watched-a6/x.txt", change = "created" })
+  vim.wait(50)
+  ok("A6: an event in an unwatched directory is not translated", #seen == 0, vim.inspect(seen))
+  seen = {}
+  up.events.publish("core.fs.dir:dirty", { path = tmp, reason = "unnamed" })
+  vim.wait(50, function() return #seen > 0 end, 5)
+  ok("A6: a nameless (dirty) event for a watched directory is translated",
+    #seen == 1 and seen[1].kind == "dirty" and seen[1].dir == tmp, vim.inspect(seen))
+  core_events.unsubscribe(h)
 
-  core_files._reset_for_tests()
-  core_warm._reset_for_tests()
-  core_warm.start(tmp)
-
-  -- Wait up to 1s for the warmer to reach 'ready'. vim.wait
-  -- interleaves with scheduled callbacks, so the warmer can
-  -- make progress while we wait.
-  vim.wait(1000, function() return core_warm.status() == "ready" end, 5)
-  ok("warmer reaches 'ready' status",
-    core_warm.status() == "ready",
-    "status after wait: " .. core_warm.status())
-
-  local durations = core_warm.tick_durations()
-  ok("warmer recorded > 1 tick (chunked across the main loop)",
-    #durations > 1,
-    "ticks recorded: " .. #durations)
-
-  local max_ms = 0
-  for _, ms in ipairs(durations) do
-    if ms > max_ms then max_ms = ms end
-  end
-  ok("A15: no warm tick exceeds 5 ms (max=" .. string.format("%.2f", max_ms) .. "ms)",
-    max_ms <= 5.0,
-    "exceeded budget; ticks: " .. vim.inspect(durations))
-
-  -- Also assert auto-finder.core.ready fired with files='ready'.
-  -- We don't subscribe a probe here because the publish already
-  -- happened during the vim.wait above; instead we check that
-  -- core.files readiness was flipped (which only happens when
-  -- the publish fires).
-  ok("warmer flipped files readiness to 'ready'",
-    core_files.snapshot_now(tmp).readiness == "ready",
-    "got readiness: " .. core_files.snapshot_now(tmp).readiness)
-
-  -- Cleanup.
-  pcall(vim.fn.delete, tmp, "rf")
+  -- ref-counted ownership: two owners, one handle
+  local other = {}
+  core_watchers.watch_dir(tmp, other)
+  local before = #(up.fs.watch.list and up.fs.watch.list() or {})
+  ok("two owners share one directory watch", core_watchers.dir_watch_count() >= 1
+    and core_watchers.dir_watch_count(owner) == 1 and core_watchers.dir_watch_count(other) == 1)
+  core_watchers.unwatch_dir(tmp, owner)
+  ok("releasing one owner keeps the watch for the other", core_watchers.is_dir_watched(tmp))
+  core_watchers.unwatch_owner(other)
+  ok("releasing the last owner stops the watch", not core_watchers.is_dir_watched(tmp))
+  local after = #(up.fs.watch.list and up.fs.watch.list() or {})
+  ok("the fs.watch handle is closed with the last owner", after == before - 1,
+    string.format("before=%d after=%d", before, after))
+  vim.fn.delete(tmp, "rf")
 end
-
--- ── core/files cache shape: directory entries + children_state ──
-do
-  core_files._reset_for_tests()
-  -- Seed a directory entry; then upsert a child file under it.
-  local d = "/tmp/phase4-dir-test"
-  local f = d .. "/child.txt"
-  core_files.upsert(d, { kind = "directory" })
-  core_files.upsert(f, { kind = "file" })
-  local d_entry = core_files.get(d)
-  ok("directory entry has children + children_state",
-    d_entry and d_entry.kind == "directory"
-      and type(d_entry.children) == "table"
-      and type(d_entry.children_state) == "string",
-    "got: " .. vim.inspect(d_entry))
-  ok("upserting a child marks the parent's children_state as stale",
-    d_entry and (d_entry.children_state == "stale" or d_entry.children_state == "cold"),
-    "got: " .. tostring(d_entry and d_entry.children_state))
-
-  -- invalidate_subtree wipes children + flips state to 'stale'
-  core_files.invalidate_subtree(d)
-  local d_after = core_files.get(d)
-  ok("invalidate_subtree drops children + sets state='stale'",
-    d_after and d_after.children_state == "stale"
-      and vim.tbl_count(d_after.children or {}) == 0,
-    "got: " .. vim.inspect(d_after))
-end
-
--- ── core/watchers: open/close/list round-trip ──
-do
-  core_watchers.close_all()
-  local before = #core_watchers.list()
-  core_watchers.open_for(vim.fn.getcwd())
-  ok("watchers.open_for adds an entry to list()",
-    #core_watchers.list() > before)
-  core_watchers.close_all()
-  ok("watchers.close_all returns list() to before-state",
-    #core_watchers.list() == before)
-end
-
--- Cleanup: leave the suite in a sane state.
-core_files._reset_for_tests()
-core_warm._reset_for_tests()
-core_init.ensure_started(af.state.config)
 end)
 
 -- ───────────────────────── 33. ADR 0026 Phase 5: git cache + translation ──
 -- ADR 0026 Phase 5: real `core.git.snapshot_now` backed by
--- auto-core.git.status; the last `core.git.state:changed`
--- upstream subscription in shared/neotree.lua migrates to
--- `auto-finder.core.git:changed`.
---
--- After Phase 5 the shared/ tree subscribes to ZERO direct
--- upstream auto-core topics (`worktree:switched` is still a
--- direct upstream sub — Phase 7's view mount contract
--- consolidates that with auto-finder.core.repos:changed).
+-- auto-core.git.status, and the core.git.state:changed →
+-- auto-finder.core.git:changed translation. The files view consumes the
+-- translated topic for its filename colours (ADR-0200 §4.6).
 print("\n[33] ADR 0026 Phase 5 — git cache + translation")
 section(function()
 local core_git    = require("auto-finder.core.git")
@@ -3878,117 +2920,44 @@ ok("core.git.invalidate is callable",
 local inv_ok = pcall(core_git.invalidate, vim.fn.getcwd())
 ok("core.git.invalidate(cwd) is safe", inv_ok)
 
--- ── shared/neotree.lua no longer subscribes to core.git.state:changed ──
--- Grep-style check. The file should contain a subscription to
--- auto-finder.core.git:changed (Phase 5 migration target) and
--- NOT to the upstream core.git.state:changed. The worktree:switched
--- direct upstream sub is allowed through Phase 5 (Phase 7's
--- mount contract migrates that one).
+-- ── ADR-0200 §4.6: a git-state event costs the files view ONE status read, no directory read ──
 do
-  local f = io.open(plugin_root .. "/lua/auto-finder/shared/neotree.lua", "r")
-  local content = f and f:read("*a") or ""
-  if f then f:close() end
-  -- Subscribe-call check. After the v0.2.25 B1 fix this is
-  -- broader than just events.subscribe — the subscription may
-  -- be wired via view_subs:replace(slot, topic, cb). Match on
-  -- the topic STRING appearing in the file (excluding obvious
-  -- comment lines that mention it for documentation only).
-  local subs_to_git_state = content:find('"core%.git%.state:changed"')
-  local subs_to_translated_git = content:find('"auto%-finder%.core%.git:changed"')
-  ok("shared/neotree.lua does NOT reference core.git.state:changed as a topic",
-    subs_to_git_state == nil)
-  -- ADR-0060 §2.8 INVERTED this. The files panel used to subscribe to the
-  -- translated git topic so it could re-decorate; it now holds no git state at
-  -- all, so the reference must be GONE. Kept as an assertion rather than
-  -- deleted: it is now the guard that stops git creeping back into this panel
-  -- and re-introducing the ADR-0050/0059 cost class.
-  ok("shared/neotree.lua no longer references auto-finder.core.git:changed (§2.8)",
-    subs_to_translated_git == nil,
-    subs_to_translated_git and "still referenced at byte " .. subs_to_translated_git or "")
-end
-
--- ── behavior: publishing core.git.state:changed still triggers
--- the shared/neotree.lua refresh (via the translated topic) ──
--- This proves the migration didn't break the user-observable
--- behavior — only the topic path changed.
-do
-  -- v0.2.25 B1 fix migrated this from a one-shot flag dance to
-  -- `shared.view_subs:replace` — re-arm is idempotent and
-  -- survives the section [31] bus-reset earlier in the run. The
-  -- assertion below just re-focuses to confirm the translated-
-  -- topic refresh path works end-to-end.
   af.focus(1)  -- files
-  local files_section = require("auto-finder.sections").resolve(1)
-  -- ADR 0026 Phase 7: poll until the deferred mount completes so
-  -- the schedule_refresh guard (`if not section._bufnr`) doesn't
-  -- early-return when our synthetic publish lands.
-  vim.wait(500, function()
-    return files_section and files_section._bufnr ~= nil
-      and vim.api.nvim_buf_is_valid(files_section._bufnr)
-  end)
-
-  local manager_mod = require("auto-finder.neotree.sources.manager")
-  local orig_refresh = manager_mod.refresh
-  local refresh_calls = {}
-  manager_mod.refresh = function(source_name, callback)
-    refresh_calls[#refresh_calls + 1] = source_name
-    if callback then pcall(callback) end
+  local fview = require("auto-finder.views.files")
+  vim.wait(1000, function() return fview._state.shown and fview._state.repo_top ~= nil end, 10)
+  ok("precondition: the files view is shown and knows its repo", fview._state.shown and fview._state.repo_top ~= nil,
+    "repo_top=" .. tostring(fview._state.repo_top))
+  local status = require("auto-core.git.status")
+  local scan = require("auto-core.fs.scan")
+  local real_get_async, real_read_dir = status.get_async, scan.read_dir
+  local status_calls, read_calls = 0, 0
+  status.get_async = function(root, opts, cb)
+    status_calls = status_calls + 1
+    return real_get_async(root, opts, cb)
   end
-  -- ADR-0050 §2.3: git-state events re-decorate in place via
-  -- git.status_async, they do NOT full-rescan (manager.refresh).
-  local git_mod = require("auto-finder.neotree.git")
-  local orig_status_async = git_mod.status_async
-  local decorate_calls = {}
-  git_mod.status_async = function(path, _base, _opts, cb)
-    decorate_calls[#decorate_calls + 1] = path
-    if cb then pcall(cb, nil) end
+  scan.read_dir = function(...)
+    read_calls = read_calls + 1
+    return real_read_dir(...)
   end
-
-  -- Settle: drain any filesystem refresh left pending from the
-  -- section's own mount/setup (the §2.4 throttle's trailing edge can
-  -- defer up to REFRESH_THROTTLE_MS=800) so it cannot bleed into the
-  -- observation window and trip `saw_full_refresh`. ADR-0060 §2.8
-  -- made the git event itself a no-op for the files panel, so the
-  -- most likely pollution source is a late mount/setup rescan, though
-  -- unrelated external file events could also arrive. Mirrors the
-  -- section-isolation pattern from [33] above (see line ~1315). If
-  -- this flakes again, replace the sleep with a scoped test-only
-  -- cancel/drain or observable quiet-generation seam.
-  vim.wait(900)
-  refresh_calls = {}
-
+  vim.wait(700) -- let any settle window from the focus drain first
+  status_calls, read_calls = 0, 0
   up.events.publish("core.git.state:changed", {
-    repo_root = vim.fn.getcwd(),
-    git_dir   = vim.fn.getcwd() .. "/.git",
-    kind      = "head",
+    repo_root = vim.fn.getcwd(), git_dir = vim.fn.getcwd() .. "/.git", kind = "index",
   })
-  -- LIVE_REFRESH_DEBOUNCE_MS = 150; pad to 400 for CI variance.
-  vim.wait(400, function() return #decorate_calls > 0 end)
-  local saw_full_refresh = false
-  for _, src in ipairs(refresh_calls) do
-    if src == "filesystem" then saw_full_refresh = true; break end
-  end
-  -- ADR-0060 §2.8 INVERTED this too. ADR-0050 §2.3 made a git-state event
-  -- re-decorate instead of full-rescanning; §2.8 removes the decoration
-  -- entirely, so the correct behaviour is now NEITHER — a git event must cost
-  -- the files panel nothing at all. Asserting "no decorate AND no rescan" is
-  -- what proves the cost is gone rather than merely cheaper.
-  ok("core.git.state:changed costs the files panel NOTHING — no decorate, no rescan (§2.8)",
-    #decorate_calls == 0 and not saw_full_refresh,
-    "decorate=" .. vim.inspect(decorate_calls)
-      .. " refresh=" .. vim.inspect(refresh_calls))
-
-  manager_mod.refresh = orig_refresh
-  git_mod.status_async = orig_status_async
+  vim.wait(1000, function() return status_calls > 0 end, 10)
+  vim.wait(400)
+  ok("a git-state event triggers a git status read for the files view", status_calls >= 1,
+    "status_calls=" .. status_calls)
+  ok("a git-state event reads NO directory", read_calls == 0, "read_calls=" .. read_calls)
+  status.get_async, scan.read_dir = real_get_async, real_read_dir
 end
 end)
 
 -- ───────────────────────── 34. ADR 0026 Phase 6: core.buffers + core.repos ──
 -- ADR 0026 Phase 6: real implementations of core.buffers
 -- (Buf*-autocmd-driven cache) and core.repos (auto-finder.repos
--- denormalized view). Buffers + repos views adopt the new
--- `core_refresh_topic` opt on shared.neotree.build_section so
--- they refresh on the centralized auto-finder.core.* signals.
+-- denormalized view). The buffers and repos views refresh on the
+-- centralized auto-finder.core.* signals and declare the topic.
 print("\n[34] ADR 0026 Phase 6 — core.buffers + core.repos")
 section(function()
 local core_buffers = require("auto-finder.core.buffers")
@@ -4126,10 +3095,7 @@ ok("core.repos cache invalidated by auto-finder.core.repos:changed",
 -- Re-fetch so subsequent tests don't see a cold cache.
 core_repos.snapshot_now()
 
--- ── views opt-in via core_refresh_topic ──
--- buffers + repos view modules pass `core_refresh_topic` so
--- shared.neotree.build_section wires the subscription. The
--- section.refresh function is also exposed by the new opt path.
+-- ── views declare the core topic they refresh from ──
 local buffers_view = require("auto-finder.views.buffers")
 local repos_view   = require("auto-finder.views.repos")
 ok("buffers view declares core_refresh_topic = auto-finder.core.buffers:changed",
@@ -4243,38 +3209,11 @@ do
   pcall(vim.api.nvim_buf_delete, b, { force = true })
 end
 
--- A3 is partial in Phase 7: neo-tree-backed views (files /
--- buffers / repos) keep synchronous mounts because of the
--- auto-core Registry keymap-binding tension (see audit-log F7.1
--- in tests/auto-finder-test-audit.md). Only `dbase` exercises
--- the placeholder pattern — A3 + A13 + A14 are asserted against
--- it in the A16 section below.
---
--- The placeholder infrastructure (shared/loading.lua, the
--- five-guard `_still_current` predicate, `_owned_bufs` table)
--- still ships in build_section so a future auto-core API change
--- can flip neo-tree-backed views to placeholder mode without
--- structural rework.
---
--- views still expose `_generation` and `_owned_bufs` per ADR
--- §2.3. Verify the per-view generation counter increments on
--- each cold get_buffer call.
-do
-  local view = require("auto-finder.sections").resolve("files")
-  if view then
-    local gen_before = view._generation or 0
-    view._bufnr = nil
-    view._owned_bufs = {}
-    -- get_buffer is `function section.get_buffer(panel_winid)` —
-    -- call positionally, not method-style. Pass the live panel
-    -- winid; mount() inside uses it to focus + execute neo-tree.
-    pcall(view.get_buffer, af.state.panel_winid)
-    ok("get_buffer bumps generation on cold mount (files view)",
-      (view._generation or 0) > gen_before,
-      "before=" .. tostring(gen_before) ..
-      " after=" .. tostring(view._generation))
-  end
-end
+-- A3 is partial: the files / buffers / repos views mount synchronously (a
+-- buffer on first get_buffer), because the auto-core Registry binds keymaps
+-- onto the buffer get_buffer returns (audit-log F7.1 in
+-- tests/auto-finder-test-audit.md). Only `dbase` exercises the placeholder
+-- pattern — asserted in the A16 section below.
 
 -- ── A16: dbase mounts synchronously; no-backend path is explained ──
 -- Rewritten for v0.4.0. This used to assert a `shared.loading` placeholder on
@@ -4327,11 +3266,9 @@ end)
 
 -- ───────────────────────── 36. ADR 0026 Phase 8: shared/logging sweep ──
 -- ADR 0026 Phase 8:
---   - shared/debounce.lua extracted; shared/neotree.lua and
---     core/init.lua refactored to use it
+--   - shared/debounce.lua extracted; core/init.lua refactored to use it
 --   - dbase log component tags migrated to view.dbase.* (A10)
 --   - vim.notify audit: zero live calls in the plugin tree
---     (excluding the vendored neo-tree fork)
 print("\n[36] ADR 0026 Phase 8 — shared extraction + logging sweep (A9/A10)")
 section(function()
 -- ── shared.debounce: coalesce semantics ──
@@ -4364,7 +3301,7 @@ vim.wait(150)
 ok("cancel() drops the pending fire (no callback)",
   fires == 0, "fires=" .. fires)
 
--- ── A9: zero live vim.notify calls in plugin tree (excl neo-tree fork) ──
+-- ── A9: zero live vim.notify calls in plugin tree ──
 do
   local function read_file(path)
     local f = io.open(path, "r")
@@ -4378,7 +3315,7 @@ do
     while true do
       local name, t = vim.uv.fs_scandir_next(h)
       if not name then break end
-      if name ~= "neotree" then
+      do
         local p = dir .. "/" .. name
         if t == "directory" then walk(p, fn)
         elseif t == "file" and name:match("%.lua$") then fn(p)
@@ -4402,7 +3339,7 @@ do
       end
     end
   end)
-  ok("A9: zero live vim.notify calls in plugin tree (excl neo-tree fork)",
+  ok("A9: zero live vim.notify calls in plugin tree",
     #violations == 0,
     "violations: " .. vim.inspect(violations))
 end
@@ -4425,7 +3362,7 @@ do
     while true do
       local name, t = vim.uv.fs_scandir_next(h)
       if not name then break end
-      if name ~= "neotree" then
+      do
         local p = dir .. "/" .. name
         if t == "directory" then walk(p, fn)
         elseif t == "file" and name:match("%.lua$") then fn(p)
@@ -4510,14 +3447,9 @@ end)
 -- The acceptance work is to assert:
 --   A11: total count ≥ 263, failed = 0 (no regression vs. the
 --        v0.2.23 baseline that opened the refactor).
---   A5:  the metrics:paint emit point is wired and fires on
---        every render. The formal ≤ 50% baseline comparison is
---        DEFERRED — Phase 3 instrumented the emit point but the
---        Phase 4 baseline was never captured as a benchmark
---        (the refactor work outpaced the benchmark setup).
---        Re-run against v0.2.23 to capture pre-refactor numbers
---        when the comparison is wanted; today A5 is "the
---        instrumentation is in place and demonstrably fires."
+--   A5:  retired with the metrics:paint instrumentation (ADR-0200). The
+--        measured before/after comparison it deferred is now the
+--        VM43 benchmark in tests/bench/ (ADR-0200 §5 cell 11).
 --   Audit: every per-phase smoke section is still green
 --          (implicitly proved by failed == 0 below; explicitly
 --           checked in §Per-phase audit pass).
@@ -4541,52 +3473,6 @@ print(string.format(
   "  INFO  A11: failures so far: %d (meta-check is informational — "
   .. "individual assertions are the signal)", fail_count))
 
--- A5 instrumentation proxy: the metrics:paint emit point is
--- wired into shared/neotree.lua's schedule_refresh. Subscribe,
--- trigger a refresh via a synthetic event, assert the emit
--- fires with the expected shape. (Phase 3 section [31] already
--- runs this assertion; we re-run it here as a closeout check
--- that the instrumentation survived all phases.)
-local up = require("auto-core")
-local core_events = require("auto-finder.core.events")
-local seen
-local probe = core_events.subscribe(
-  "auto-finder.core.metrics:paint",
-  function(p) if p and p.view == "files" then seen = p end end)
-
--- v0.2.25 B1 fix: re-arm is now idempotent via shared.view_subs.
--- Just re-focus and the file-event subscription is replaced
--- in place.
-af.focus(1)  -- files
-local files_section = require("auto-finder.sections").resolve(1)
-vim.wait(500, function()
-  return files_section and files_section._bufnr ~= nil
-    and vim.api.nvim_buf_is_valid(files_section._bufnr)
-end)
-up.events.publish("core.file:modified",
-  { path = vim.fn.getcwd() .. "/phase9-a5-probe.txt" })
-vim.wait(500, function() return seen ~= nil end)
-ok("A5 (instrumentation): metrics:paint emit fires on render",
-  type(seen) == "table"
-    and type(seen.dur_ms) == "number"
-    and seen.view == "files"
-    and type(seen.generation) == "number",
-  "got " .. vim.inspect(seen))
-core_events.unsubscribe(probe)
-
--- A5 (deferred): the formal "post-refactor dur_ms mean ≤ 50%
--- pre-refactor baseline" comparison needs a benchmark against
--- v0.2.23. Phase 9 documents this as deferred; the
--- instrumentation is in place to run the comparison when
--- someone captures the baseline. The smoke records the live
--- `dur_ms` as a forward-looking artifact future benchmarks can
--- diff against.
-if seen and type(seen.dur_ms) == "number" then
-  print(string.format(
-    "  INFO  metrics:paint dur_ms observed in this smoke run: %.2fms (view=%s, gen=%d)",
-    seen.dur_ms, seen.view, seen.generation))
-end
-
 -- ── Per-phase audit pass ──
 -- Each phase's headline acceptance assertions already ran above
 -- (sections [29] through [36]). The fact that this section is
@@ -4605,7 +3491,7 @@ do
     { id = "29", phase = "Phase 1 — core skeleton",         marker = "%[29%] core skeleton" },
     { id = "30", phase = "Phase 2 — sections → views",      marker = "%[30%] ADR 0026 Phase 2" },
     { id = "31", phase = "Phase 3 — lifecycle",             marker = "%[31%] ADR 0026 Phase 3" },
-    { id = "32", phase = "Phase 4 — files cache + watchers", marker = "%[32%] ADR 0026 Phase 4" },
+    { id = "32", phase = "A1/A2 + watched-dir translation", marker = "%[32%] ADR 0026 A1/A2" },
     { id = "33", phase = "Phase 5 — git cache",             marker = "%[33%] ADR 0026 Phase 5" },
     { id = "34", phase = "Phase 6 — buffers + repos",       marker = "%[34%] ADR 0026 Phase 6" },
     { id = "35", phase = "Phase 7 — loading-placeholder",   marker = "%[35%] ADR 0026 Phase 7" },
@@ -4623,185 +3509,83 @@ print("  INFO  ADR 0026 refactor arc complete (Phases 1–9). Ready for tag.")
 end)
 
 -- ───────────────────────── 38. v0.2.25 fix: view subs survive bus reset (B1) ──
--- Lector review (post-Phase-9) found that shared/neotree.lua's
--- view subscriptions were still one-shot via the
--- `_fs_subscribed` / `_core_refresh_subscribed` booleans —
--- a bus reset wiped the callbacks AND the flags blocked
--- re-arm on subsequent focus. v0.2.25 migrates both paths to
--- `shared.view_subs`'s replace-or-add semantics so re-arm is
--- safe (and idempotent).
---
--- This smoke proves the bus-reset survivability WITHOUT the
--- manual `_fs_subscribed = false` dance that Phase 5 / Phase 9
--- smokes were doing to mask the real issue.
+-- v0.2.25 moved view subscriptions from one-shot booleans (which a bus reset
+-- wiped while the flag blocked re-arm) to `shared.view_subs`'s replace
+-- semantics. The invariant holds for the rebuilt views (ADR-0200): after a bus
+-- reset and a re-focus, each view's refresh sink fires again.
+--   files   — auto-finder.core.files:changed → one directory read (fs.scan.read_dir)
+--   buffers — auto-finder.core.buffers:changed → a repaint
+--   repos   — auto-finder.core.repos:changed → tree.invalidate
 print("\n[38] v0.2.25 — view subscriptions survive auto-core bus reset (B1)")
 section(function()
-local manager_mod = require("auto-finder.neotree.sources.manager")
 local core_events = require("auto-finder.core.events")
 local up = require("auto-core")
 
--- For each of files / buffers / repos, run the protocol:
---   1. Focus the view (mounts + arms subscriptions via view_subs).
---   2. Force auto-core.events._reset_for_tests (wipes ALL subs).
---   3. Refocus the view (re-arms subs via view_subs:replace).
---   4. Publish the relevant auto-finder.core.* topic.
---   5. Assert manager.refresh fires — without touching
---      `_fs_subscribed` or `_core_refresh_subscribed`.
-local function bus_reset_survives(view_name, view_idx, topic, payload)
-  -- Ensure section is mounted (cold or re-mounted).
+local function reset_and_refocus(view_idx)
   af.focus(view_idx)
-  local sec = require("auto-finder.sections")._by_number[view_idx]
-  vim.wait(500, function()
-    return sec and sec._bufnr ~= nil
-      and vim.api.nvim_buf_is_valid(sec._bufnr)
-  end)
-
-  -- Bus reset wipes EVERY subscription on auto-core.events.
+  vim.wait(200)
   up.events._reset_for_tests()
-
-  -- Re-arm core (translator subscriptions). This is what
-  -- M.open / M.focus already do defensively.
   require("auto-finder.core").ensure_started(af.state.config)
-
-  -- Re-focus the view. The on_focus wrap calls
-  -- _arm_live_refresh_subs / _arm_core_refresh_sub, which
-  -- (post-B1) use view_subs:replace — re-armable without a
-  -- flag-clear dance.
   af.focus(view_idx)
-  vim.wait(50)
-
-  -- Stub manager.refresh to capture fires.
-  local orig_refresh = manager_mod.refresh
-  local refresh_calls = {}
-  manager_mod.refresh = function(source_name, callback)
-    refresh_calls[#refresh_calls + 1] = source_name
-    if callback then pcall(callback) end
-  end
-
-  -- Publish the synthetic topic. core's translator fires it
-  -- through; shared/neotree.lua's view_subs-armed callback
-  -- triggers schedule_refresh → manager.refresh (150ms coalesce).
-  -- ADR-0050 §2.4: the full-refresh path is min-interval throttled
-  -- (REFRESH_THROTTLE_MS = 800), so if a full refresh fired shortly
-  -- before this publish, manager.refresh is deferred to the trailing
-  -- edge. Wait long enough to cover coalesce + throttle window; the
-  -- condition fn returns early when it fires fast, so this is free
-  -- in the common case.
-  core_events.publish(topic, payload)
-  vim.wait(1200, function() return #refresh_calls > 0 end)
-
-  manager_mod.refresh = orig_refresh
-
-  return #refresh_calls > 0
+  vim.wait(100)
 end
 
--- files view — fires via auto-finder.core.files:changed.
+-- files view
 do
   local files_idx = require("auto-finder.sections")._by_name["files"]
   if files_idx then
-    local fired = bus_reset_survives("files", files_idx,
-      "auto-finder.core.files:changed",
-      { cwd = vim.fn.getcwd(), kind = "upsert",
-        paths = { vim.fn.getcwd() .. "/b1-probe.txt" } })
-    ok("B1: files view re-arms refresh after bus reset (no manual flag clear)",
-      fired,
-      "manager.refresh did not fire after bus reset + re-focus")
+    reset_and_refocus(files_idx)
+    local fview = require("auto-finder.views.files")
+    local root = fview._state.model and fview._state.model.root
+    local scan = require("auto-core.fs.scan")
+    local real = scan.read_dir
+    local reads = {}
+    scan.read_dir = function(path, ...) reads[#reads + 1] = path; return real(path, ...) end
+    core_events.publish("auto-finder.core.files:changed",
+      { kind = "created", dir = root, path = (root or "") .. "/b1-probe.txt" })
+    vim.wait(1200, function() return vim.tbl_contains(reads, root) end, 10)
+    scan.read_dir = real
+    ok("B1: files view re-arms after bus reset (the named directory is re-read)",
+      root ~= nil and vim.tbl_contains(reads, root), "reads=" .. vim.inspect(reads))
+    ok("B1: files view's subscription set holds its slots",
+      fview._state.subs and fview._state.subs:count() >= 3,
+      "count=" .. tostring(fview._state.subs and fview._state.subs:count()))
   end
 end
 
--- buffers view — fires via auto-finder.core.buffers:changed.
+-- buffers view
 do
   local buffers_idx = require("auto-finder.sections")._by_name["buffers"]
   if buffers_idx then
-    local fired = bus_reset_survives("buffers", buffers_idx,
-      "auto-finder.core.buffers:changed",
-      { kind = "add", bufnr = 1 })
-    ok("B1: buffers view re-arms refresh after bus reset (no manual flag clear)",
-      fired,
-      "manager.refresh did not fire after bus reset + re-focus")
+    reset_and_refocus(buffers_idx)
+    local bview = require("auto-finder.views.buffers")
+    local real = bview.paint
+    local paints = 0
+    bview.paint = function(...) paints = paints + 1; return real(...) end
+    core_events.publish("auto-finder.core.buffers:changed", { kind = "add", bufnr = 1 })
+    vim.wait(1200, function() return paints > 0 end, 10)
+    bview.paint = real
+    ok("B1: buffers view re-arms after bus reset (it repaints)", paints > 0, "paints=" .. paints)
   end
 end
 
--- repos view — fires via auto-finder.core.repos:changed.
+-- repos view
 do
   local repos_idx = require("auto-finder.sections")._by_name["repos"]
   if repos_idx then
-    local fired = bus_reset_survives("repos", repos_idx,
-      "auto-finder.core.repos:changed",
+    reset_and_refocus(repos_idx)
+    local tree = require("auto-finder.views.repos.tree")
+    local real = tree.invalidate
+    local calls = 0
+    tree.invalidate = function(...) calls = calls + 1; return real(...) end
+    core_events.publish("auto-finder.core.repos:changed",
       { kind = "worktree_switched", repo_root = vim.fn.getcwd() })
-    ok("B1: repos view re-arms refresh after bus reset (no manual flag clear)",
-      fired,
-      "manager.refresh did not fire after bus reset + re-focus")
+    vim.wait(1200, function() return calls > 0 end, 10)
+    tree.invalidate = real
+    ok("B1: repos view re-arms after bus reset (it invalidates)", calls > 0, "calls=" .. calls)
+    ok("B1: repos view's subscription set holds the refresh slot",
+      tree._subs and tree._subs:count() >= 1)
   end
-end
-
--- ── B1 invariant: view_subs sets are populated (not stuck at 0) ──
--- The migration uses section._live_subs and section._core_subs;
--- each should have at least one slot after the arm calls above.
-do
-  local files_sec = require("auto-finder.sections")._by_name["files"]
-    and require("auto-finder.sections")._by_number[
-      require("auto-finder.sections")._by_name["files"]]
-  if files_sec and files_sec._live_subs then
-    ok("B1: files view's _live_subs holds ≥1 slot (files + worktree + git)",
-      files_sec._live_subs:count() >= 1,
-      "count=" .. tostring(files_sec._live_subs:count()))
-  end
-  local repos_sec = require("auto-finder.sections")._by_name["repos"]
-    and require("auto-finder.sections")._by_number[
-      require("auto-finder.sections")._by_name["repos"]]
-  if repos_sec and repos_sec._core_subs then
-    ok("B1: repos view's _core_subs holds the refresh slot",
-      repos_sec._core_subs:count() >= 1,
-      "count=" .. tostring(repos_sec._core_subs:count()))
-  end
-end
-
--- ── B2: NuiTree missing-bufnr stack trace path (mac-frequent) ──
--- Lector flagged a `vim.schedule callback: missing bufnr` stack
--- trace surfacing from neotree/ui/renderer.lua during the
--- section [13] directory-hijack flow. The smoke previously
--- tolerated it; v0.2.25 hardens create_tree to bail when
--- state.bufnr is nil/invalid (the async-render-against-stale-
--- state path Mac users hit when fs_scan completes after the
--- panel close / section switch).
---
--- The fix is in the production code path (the vendored fork's
--- renderer.lua at create_tree + show_nodes), but we also add a
--- B2 invariant smoke here: call create_tree against a state
--- with bufnr=nil and assert no error + no tree created.
-do
-  local renderer = require("auto-finder.neotree.ui.renderer")
-  local stale_state = {
-    name = "filesystem",
-    id = "test-stale",
-    bufnr = nil,     -- the failure mode
-    winid = nil,
-    tree = nil,
-  }
-  -- create_tree is local to renderer.lua. We can't call it
-  -- directly. Instead drive the show_nodes downstream path
-  -- which calls create_tree internally — set up a state that
-  -- exercises the bail-out branch.
-  --
-  -- Simpler proof: assert the rendered code structure contains
-  -- the v0.2.25 hardening (the early-return guard on
-  -- `not state.bufnr or not nvim_buf_is_valid(state.bufnr)`).
-  local function read_file(path)
-    local f = io.open(path, "r")
-    if not f then return "" end
-    local s = f:read("*a"); f:close()
-    return s or ""
-  end
-  local renderer_src = read_file(
-    plugin_root .. "/lua/auto-finder/neotree/ui/renderer.lua")
-  ok("B2: create_tree has the v0.2.25 stale-state bail-out guard",
-    renderer_src:find("not state%.bufnr") ~= nil
-      and renderer_src:find("aborting render against stale state") ~= nil,
-    "expected guard text not found")
-  ok("B2: show_nodes has the v0.2.25 nil-tree downstream guard",
-    renderer_src:find("create_tree bailed on stale state") ~= nil,
-    "expected downstream guard text not found")
 end
 
 -- ── B2 (smoke hygiene policy): assert no unhandled async errors ──
@@ -4827,8 +3611,8 @@ do
   end
 
   -- Trigger the section [13] hijack-equivalent path: open + close
-  -- the panel rapidly so async neo-tree callbacks fire against
-  -- potentially-wiped state.
+  -- the panel rapidly so async view callbacks (scans, git reads) land
+  -- against a hidden view.
   af.close()
   vim.wait(50)
   af.open(true)
@@ -5684,62 +4468,6 @@ end)
 -- Six-bucket rendering (`Open → In Progress → Automated → Deferred →
 -- Completed → Archived`) and per-bucket 1-based numbering on every
 -- non-archived bucket.
--- ─────────── 39b. ADR-0050 — renderer dedups duplicate node ids ──
--- nui's tree hard-`error()`s on a duplicate node id, aborting the
--- ENTIRE render. The buffers panel's external-bucket extension can
--- materialise a worktree-root path as BOTH a directory (bucket/parent)
--- and a file node (a directory-buffer at that path), colliding ids.
--- create_nodes now drops the later duplicate so one bad id degrades to
--- a missing node instead of a blank panel. (Placed before [41b], which
--- crashes headless per the known-issue task, so this actually runs.)
-print("\n[39b] ADR-0050 — renderer.create_nodes dedups duplicate node ids")
-section(function()
-  local renderer = require("auto-finder.neotree.ui.renderer")
-  local create_nodes = renderer._create_nodes_for_tests
-  ok("p39b: renderer exposes _create_nodes_for_tests",
-    type(create_nodes) == "function")
-  if type(create_nodes) ~= "function" then return end
-
-  local fake_state = { filtered_items = {}, renderers = {} }
-
-  -- A directory node whose subtree contains "/bucket/wt", plus a
-  -- SIBLING file node with the SAME id "/bucket/wt" (the collision
-  -- the buffers extension produces when a directory-buffer sits at a
-  -- worktree root that's also a nested parent).
-  local source_items = {
-    {
-      id = "/bucket", type = "directory", name = "bucket", loaded = true,
-      children = {
-        {
-          id = "/bucket/wt", type = "directory", name = "wt", loaded = true,
-          children = {
-            { id = "/bucket/wt/f.go", type = "file", name = "f.go" },
-          },
-        },
-      },
-    },
-    { id = "/bucket/wt", type = "file", name = "wt-as-file" },
-    { id = "/bucket/other", type = "file", name = "other" },
-  }
-
-  local ok_call, nodes = pcall(create_nodes, source_items, fake_state, 0)
-  ok("p39b: create_nodes does not error on a duplicate id", ok_call,
-    tostring(nodes))
-  ok("p39b: duplicate top-level id is dropped (kept the first, distinct id survives)",
-    ok_call and type(nodes) == "table" and #nodes == 2,
-    "top-level node count = " .. tostring(ok_call and type(nodes) == "table" and #nodes))
-
-  -- Sanity: with no duplicates every node survives.
-  local clean = {
-    { id = "/a", type = "file", name = "a" },
-    { id = "/b", type = "file", name = "b" },
-  }
-  local ok_clean, clean_nodes = pcall(create_nodes, clean, fake_state, 0)
-  ok("p39b: no false-positive dedup on distinct ids",
-    ok_clean and type(clean_nodes) == "table" and #clean_nodes == 2,
-    tostring(ok_clean and type(clean_nodes) == "table" and #clean_nodes))
-end)
-
 print("\n[40] ADR-0035 Phase 1 — six-bucket panel + numbered non-archived rendering")
 section(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
@@ -6061,68 +4789,45 @@ end)
 -- Real-time vim.diagnostic validator for `.todo-list/automated/*.md`
 -- buffers + bash-disabled panel row indicator.
 -- ─────────── [43] ADR-0040 Batches A+B+E ───────────
-print("\n[43] ADR-0040 A+B+E — scope-safe restore, handle close, surfaced failures, atomic dbase writes")
+print("\n[43] ADR-0040 A+B+E — scope-safe window styling, surfaced failures, reopen-safe subscriptions")
 -- IIFE: the main chunk is near Lua's 200-active-locals limit; a
 -- function scope gets its own budget (same pattern as [42]).
 section(function()
-  -- 43a. C1 (fail-before/pass-after): the tree's window-settings
-  -- restore must be scope-local. Pre-fix, restore wrote 9 options
-  -- via unindexed `vim.wo.x` (:set-like) — the GLOBAL defaults
-  -- changed on every restore. This is the family's vim.wo bug class.
-  local nt_setup = require("auto-finder.neotree.setup")
-  if type(nt_setup._store_local_window_settings) == "function" then
-    local function gopt(name)
-      return vim.api.nvim_get_option_value(name, { scope = "global" })
+  -- 43a. C1: styling the panel window is scope-local. panel/window_style
+  -- writes every option with `scope = "local"`; an unindexed `vim.wo.x` would
+  -- also change the GLOBAL default and leak the panel's look into every other
+  -- window. Style a window with an auto-finder buffer, then a plain buffer
+  -- (which restores the window's own options), and require the globals intact.
+  do
+    local ws = require("auto-finder.panel.window_style")
+    local function gopt(name) return vim.api.nvim_get_option_value(name, { scope = "global" }) end
+    local g_before = {}
+    for _, n in ipairs({ "number", "wrap", "cursorline", "list", "spell", "relativenumber", "winhighlight" }) do
+      g_before[n] = gopt(n)
     end
-    local g_before = {
-      number = gopt("number"), wrap = gopt("wrap"),
-      foldcolumn = gopt("foldcolumn"), spell = gopt("spell"),
-      cursorline = gopt("cursorline"),
-    }
-    local buf43 = vim.api.nvim_create_buf(false, true)
-    local win43 = vim.api.nvim_open_win(buf43, false,
+    local plain = vim.api.nvim_create_buf(false, true)
+    local win43 = vim.api.nvim_open_win(plain, false,
       { relative = "editor", row = 1, col = 1, width = 20, height = 5 })
-    -- give the window distinctive LOCAL values (opposite of defaults)
-    vim.api.nvim_set_option_value("number", not g_before.number,
-      { win = win43, scope = "local" })
-    vim.api.nvim_set_option_value("wrap", not g_before.wrap,
-      { win = win43, scope = "local" })
-    nt_setup._store_local_window_settings(win43)
-    -- simulate the tree flipping the options...
-    vim.api.nvim_set_option_value("number", g_before.number,
-      { win = win43, scope = "local" })
-    vim.api.nvim_set_option_value("wrap", g_before.wrap,
-      { win = win43, scope = "local" })
-    -- ...and the restore putting them back
-    nt_setup._restore_local_window_settings(win43)
-    ok("43a: restore puts the window's LOCAL number back",
-      vim.api.nvim_get_option_value("number", { win = win43 }) == (not g_before.number))
-    ok("43a: restore puts the window's LOCAL wrap back",
-      vim.api.nvim_get_option_value("wrap", { win = win43 }) == (not g_before.wrap))
+    vim.api.nvim_set_option_value("number", true, { win = win43, scope = "local" })
+    local styled = vim.api.nvim_create_buf(false, true)
+    vim.bo[styled].filetype = "auto-finder"
+    vim.api.nvim_win_set_buf(win43, styled)
+    ws.apply(win43)
+    ok("43a: the styled window gets the panel look (cursorline, nonumber, winhighlight)",
+      vim.wo[win43].cursorline == true and vim.wo[win43].number == false
+        and vim.wo[win43].winhighlight:find("Normal:AutoFinderNormal", 1, true) ~= nil,
+      vim.wo[win43].winhighlight)
+    vim.api.nvim_win_set_buf(win43, plain)
+    ws.apply(win43)
+    ok("43a: a non-auto-finder buffer gets the window's own options back",
+      vim.wo[win43].number == true and vim.wo[win43].winhighlight == "",
+      "number=" .. tostring(vim.wo[win43].number) .. " whl=" .. vim.wo[win43].winhighlight)
     for name, before in pairs(g_before) do
-      ok("43a: GLOBAL '" .. name .. "' default survived the restore",
-        gopt(name) == before,
-        string.format("before=%s after=%s", tostring(before), tostring(gopt(name))))
+      ok("43a: GLOBAL '" .. name .. "' default survived the styling",
+        gopt(name) == before, string.format("before=%s after=%s", tostring(before), tostring(gopt(name))))
     end
     pcall(vim.api.nvim_win_close, win43, true)
-  else
-    ok("43a: store/restore test hooks exported", false, "hooks missing")
   end
-
-  -- 43b. C2: discarding watchers closes the libuv handles (stop()
-  -- alone leaked them pre-fix).
-  local fs_watch = require("auto-finder.neotree.sources.filesystem.lib.fs_watch")
-  local dir43 = vim.fn.tempname() .. "_p43-watch"
-  vim.fn.mkdir(dir43, "p")
-  local w43 = fs_watch.watch_folder(dir43, function() end)
-  ok("43b: watcher created with a live handle",
-    w43 ~= nil and w43.handle ~= nil)
-  fs_watch.updated_watched()
-  ok("43b: watcher active after updated_watched", w43 and w43.active == true)
-  fs_watch.stop_watching()
-  ok("43b: stop_watching destroys the uv handle (closed + cleared)",
-    w43 and w43.handle == nil and w43.active == false,
-    "handle=" .. tostring(w43 and w43.handle))
 
   -- 43c. C3 (fail-before/pass-after): a todo.remove API failure must
   -- surface. Pre-fix, `local ok, err = pcall(todo.remove, id)` put
@@ -6146,110 +4851,33 @@ section(function()
     type(captured43) == "string" and captured43:find("boom (p43 stub)", 1, true) ~= nil,
     "captured=" .. tostring(captured43))
 
-  -- 43d. C4 (lector amendment 2): on_close disposes the live-refresh
-  -- subscription sets; re-arm after close works (reopen-safe).
-  local sections = require("auto-finder.sections")
-  local files_idx = sections._by_name and sections._by_name["files"]
-  local files_sec = files_idx and sections._by_number[files_idx]
-  if files_sec and files_sec._live_subs and files_sec._arm_live_refresh_subs then
-    files_sec._arm_live_refresh_subs()
-    ok("43d: live subs armed (count ≥ 1)", files_sec._live_subs:count() >= 1,
-      "count=" .. tostring(files_sec._live_subs:count()))
-    files_sec.on_close()
-    ok("43d: on_close disposes every live-refresh subscription",
-      files_sec._live_subs:count() == 0,
-      "count=" .. tostring(files_sec._live_subs:count()))
-    files_sec._arm_live_refresh_subs()
-    ok("43d: re-arm after close succeeds (reopen-safe)",
-      files_sec._live_subs:count() >= 1,
-      "count=" .. tostring(files_sec._live_subs:count()))
-    files_sec.on_close()
-  else
-    ok("43d: files section with _live_subs available", false,
-      "files_sec=" .. tostring(files_sec ~= nil))
+  -- 43d. C4 (lector amendment 2): on_close disposes the view's subscriptions;
+  -- re-arm on the next show works (reopen-safe).
+  do
+    local fview = require("auto-finder.views.files")
+    local files_idx = require("auto-finder.sections")._by_name["files"]
+    af.open(true)
+    af.focus(files_idx)
+    vim.wait(300, function() return fview._state.shown end, 10)
+    ok("43d: subscriptions armed while shown (count ≥ 1)",
+      fview._state.subs and fview._state.subs:count() >= 1)
+    fview.on_close()
+    ok("43d: on_close disposes every subscription", fview._state.subs:count() == 0,
+      "count=" .. tostring(fview._state.subs:count()))
+    ok("43d: on_close releases every directory watch", fview.watch_count() == 0)
+    af.focus(files_idx)
+    vim.wait(300, function() return fview._state.shown end, 10)
+    ok("43d: re-arm on the next show succeeds (reopen-safe)", fview._state.subs:count() >= 1,
+      "count=" .. tostring(fview._state.subs:count()))
   end
 
 end)
 
 -- ─────────── [44] ADR-0040 Batches C+D ───────────
-print("\n[44] ADR-0040 C+D — async git runner + marks per-render read cache")
+print("\n[44] ADR-0040 D — marks per-render read cache")
 section(function()
-  -- 44a. Batch C: the async git runner executes off the UI thread
-  -- and delivers (ok, lines) on the main loop.
-  -- ADR-0060 consolidation: the local `git_async` this section used to test is
-  -- gone. Every git WRITE here now delegates to `auto-core.git.write`, the
-  -- family's single owner, so what is asserted is the ADAPTER — same contract
-  -- (off the UI thread, `(ok, lines)` on the main loop, counter, failure shape)
-  -- against the new seam. The old runner's own behaviour is covered by
-  -- auto-core's tests/git_write.lua, against a real repo.
-  local nt_commands = require("auto-finder.neotree.sources.common.commands")
-  ok("44a: _run adapter exported", type(nt_commands._run) == "function")
-  ok("44a: and it resolves auto-core's write module",
-    type(nt_commands._core_write) == "function"
-      and type(nt_commands._core_write()) == "table",
-    "auto-core.git.write not reachable — is the rtp pointing at an auto-core "
-      .. "without it?")
-
-  -- A real repo, entered via cwd because that is what the adapter uses.
-  local p44 = vim.fn.tempname() .. "-p44"
-  vim.fn.mkdir(p44, "p")
-  for _, a in ipairs({ { "git", "init", "-q", "-b", "main" },
-                       { "git", "config", "user.email", "t@t" },
-                       { "git", "config", "user.name", "t" } }) do
-    vim.system(a, { cwd = p44, text = true }):wait()
-  end
-  vim.fn.writefile({ "x" }, p44 .. "/f.txt")
-  local prev_cwd = vim.fn.getcwd()
-  vim.cmd("lcd " .. vim.fn.fnameescape(p44))
-
-  local async_before = nt_commands._git_async_count or 0
-  local got_ok, got_lines = nil, nil
-  nt_commands._run("stage", { "f.txt" }, function(g_ok, g_lines)
-    got_ok, got_lines = g_ok, g_lines
-  end)
-  vim.wait(8000, function() return got_ok ~= nil end, 10)
-  ok("44a: the adapter's callback fired with success",
-    got_ok == true, "got_ok=" .. tostring(got_ok) .. " lines=" .. vim.inspect(got_lines))
-  ok("44a: lines is a table (empty on success is correct)",
-    type(got_lines) == "table", vim.inspect(got_lines))
-  ok("44a: spawn counter incremented",
-    (nt_commands._git_async_count or 0) == async_before + 1)
-  ok("44a: and the write really landed in the index",
-    require("auto-core.git.write").has_staged(p44) == true)
-
-  -- failure shape: a refused verb reports ok=false WITH a reason, and does not
-  -- raise — these are bound to keys, so a traceback is the wrong failure.
-  local fail_ok, fail_lines = nil, nil
-  nt_commands._run("commit", nt_commands._pack("   ", nil), function(g_ok, g_lines)
-    fail_ok, fail_lines = g_ok, g_lines
-  end)
-  vim.wait(8000, function() return fail_ok ~= nil end, 10)
-  ok("44a: a refused write reports ok=false", fail_ok == false)
-  ok("44a: with git's or the guard's reason in lines",
-    type(fail_lines) == "table" and #fail_lines >= 1, vim.inspect(fail_lines))
-
-  -- An unknown verb must degrade, not throw: that is the version-skew path.
-  local skew_ok, skew_lines = nil, nil
-  nt_commands._run("no_such_verb_p44", {}, function(g_ok, g_lines)
-    skew_ok, skew_lines = g_ok, g_lines
-  end)
-  vim.wait(4000, function() return skew_ok ~= nil end, 10)
-  ok("44a: an unknown verb degrades to ok=false, not an error", skew_ok == false)
-  -- The arity trap: a plain table drops a trailing nil, which slid the callback
-  -- into commit's `opts` slot so it never fired. `_pack` carries `n` — and it is
-  -- a local helper because LuaJIT has no `table.pack` (my first fix used it and
-  -- aborted the whole section on a nil field).
-  local packed_ok = nil
-  nt_commands._run("commit", nt_commands._pack("", nil), function(g_ok) packed_ok = g_ok end)
-  vim.wait(6000, function() return packed_ok ~= nil end, 10)
-  ok("44a: a table.pack'd nil argument still delivers the callback",
-    packed_ok == false, "callback never fired -> the arity bug is back")
-  ok("44a: and says what is missing",
-    type(skew_lines) == "table" and tostring(skew_lines[1] or ""):find("unavailable", 1, true) ~= nil,
-    vim.inspect(skew_lines))
-
-  vim.cmd("lcd " .. vim.fn.fnameescape(prev_cwd))
-
+  -- 44a (the files panel's git-write adapter) went with the retired fork's
+  -- command set (ADR-0200); auto-core's tests/git_write.lua covers the owner.
   -- 44b. Batch D: marks _read_line serves repeat reads of the same
   -- file from the per-render cache (one open per file per render).
   local marks_view = require("auto-finder.views.marks")
@@ -6290,160 +4918,6 @@ end)
 -- survives) — everything after it, [41b]+[42], silently never ran,
 -- and the printed totals hid the truncation. Tracked as a bug task;
 -- do not add new sections after [41] until it is fixed.
--- ───────── 50. ADR-0059: files:changed does only what's needed ──────────
--- Through v0.3.4 the `files` subscriber read NEITHER `payload.kind` nor
--- `payload.paths` and drove a full root `navigate()` for every event, so
--- a plain buffer write cost a re-index of every expanded directory.
--- (a), (b) and (d) below all FAIL on the unfixed code (which refreshed
--- unconditionally); (c) is the anti-over-suppression guard — a visible
--- structural change must still rescan.
---
--- The tree is stubbed rather than rendered: what's under test is the
--- CLASSIFICATION (kind + visibility → skip/redraw/scan), and the
--- subscriber re-requires manager/renderer at call time, so module-level
--- stubs are seen.
-print("\n[50] ADR-0059 — files:changed does only the work the event requires")
-section(function()
-local ev   = require("auto-finder.core.events")
-local mgr  = require("auto-finder.neotree.sources.manager")
-local rend = require("auto-finder.neotree.ui.renderer")
-
-af.open(true)
-af.focus(1) -- files
-local files_section = require("auto-finder.sections").resolve(1)
-vim.wait(500, function()
-  return files_section and files_section._bufnr ~= nil
-    and vim.api.nvim_buf_is_valid(files_section._bufnr)
-end)
-
-local cwd      = vim.fn.getcwd()
-local open_dir = cwd .. "/lua"                -- stubbed as EXPANDED
-local shut_dir = cwd .. "/tests"              -- stubbed as COLLAPSED
-local rendered = open_dir .. "/rendered.lua"  -- stubbed as an existing node
-
-local shut_node = { type = "directory", loaded = true }
-local nodes = {
-  [rendered] = { type = "file" },
-  [open_dir] = { type = "directory", loaded = true },
-  [shut_dir] = shut_node,
-}
-local fake_tree = { get_node = function(_, id) return nodes[id] end }
-
-local orig_states   = mgr._get_all_states
-local orig_expanded = rend.get_expanded_nodes
-local orig_refresh  = mgr.refresh
-local orig_redraw   = mgr.redraw
-
-mgr._get_all_states = function()
-  return { { name = "filesystem", winid = 1, tree = fake_tree, path = cwd } }
-end
-rend.get_expanded_nodes = function() return { open_dir } end
-
-local refreshes, redraws = {}, {}
-mgr.refresh = function(src) refreshes[#refreshes + 1] = src end
-mgr.redraw  = function(src) redraws[#redraws + 1] = src end
-local function reset() refreshes, redraws = {}, {} end
-
--- (a) §3.1 — upsert on an already-rendered node inside an expanded
---     directory is content-only: redraw in place, never walk the fs.
-reset()
-ev.publish("auto-finder.core.files:changed",
-  { cwd = cwd, kind = "upsert", paths = { rendered } })
-vim.wait(400, function() return #redraws > 0 end)
-ok("59a: upsert on a rendered node redraws, does NOT rescan",
-  #redraws > 0 and #refreshes == 0,
-  "redraws=" .. vim.inspect(redraws) .. " refreshes=" .. vim.inspect(refreshes))
-
--- (b) §3.2 — churn inside a COLLAPSED directory is invisible: no
---     rescan, no redraw, and the directory is marked for a scoped
---     rescan on next expand (`toggle_directory` scans when not loaded).
-reset()
-shut_node.loaded = true
-ev.publish("auto-finder.core.files:changed",
-  { cwd = cwd, kind = "upsert", paths = { shut_dir .. "/whatever.txt" } })
--- Must outlast REFRESH_THROTTLE_MS (800) + the coalesce window,
--- otherwise the unfixed code's refresh is merely throttled rather
--- than absent and this pin would pass for the wrong reason.
-vim.wait(1400)
-ok("59b: churn in a collapsed dir triggers no rescan and no redraw",
-  #refreshes == 0 and #redraws == 0,
-  "redraws=" .. vim.inspect(redraws) .. " refreshes=" .. vim.inspect(refreshes))
-ok("59b: the collapsed dir is marked stale for a scoped rescan on expand",
-  shut_node.loaded == false)
-
--- (c) §3.1 — a delete of a VISIBLE node is structural: must rescan.
---     Guards the fix against over-suppression.
-reset()
-ev.publish("auto-finder.core.files:changed",
-  { cwd = cwd, kind = "delete", paths = { rendered } })
-vim.wait(2000, function() return #refreshes > 0 end)
-ok("59c: delete of a visible node DOES rescan",
-  #refreshes > 0,
-  "refreshes=" .. vim.inspect(refreshes))
-
--- (d) §3.3 — bulk churn in a visible directory is held until the
---     filesystem goes quiet, collapsing into ONE rescan instead of
---     one per throttle window.
-reset()
-for _ = 1, 6 do
-  ev.publish("auto-finder.core.files:changed",
-    { cwd = cwd, kind = "subtree_stale",
-      paths = { open_dir }, parents = { open_dir } })
-  vim.wait(300) -- sustained churn: 6 x 300ms ~= 1.8s, past the throttle
-end
-local during_burst = #refreshes
-vim.wait(3000, function() return #refreshes > 0 end)
-ok("59d: bulk subtree_stale is HELD while churn CONTINUES (not merely throttled)",
-  during_burst == 0,
-  "fired during 1.8s of sustained churn: " .. tostring(during_burst))
-ok("59d: bulk subtree_stale settles into exactly one rescan",
-  #refreshes == 1,
-  "refreshes=" .. vim.inspect(refreshes))
-
-vim.wait(400) -- let any trailing timer land on the stubs, not the real fns
-mgr._get_all_states     = orig_states
-rend.get_expanded_nodes = orig_expanded
-mgr.refresh             = orig_refresh
-mgr.redraw              = orig_redraw
-end)
-
-
--- ═══════════════════════════════════════════════════════════════════
--- [41] + [42] (ADR-0035 automation diagnostics + `s`-modal scaffold)
--- were EXTRACTED to tests/smoke-automation.lua on 2026-08-23.
---
--- WHY: [41] opens a malformed automated template with vim.cmd("edit")
--- to drive the buffer-attach diagnostic path. Run here — after ~45
--- sections of accumulated window/attach/grid state — that edit trips
--- neovim's core grid_line_flush assertion (grid.c:595,
--- `grid_line_clear_to <= grid_line_maxcol`) and ABORTS the process
--- (SIGABRT on Linux; the macOS [41b] SEGFAULT is the same crash class,
--- KB todo 2026-06-13-bug-auto-finder-smoke-suite-silently-truncates-at-41b-…).
--- The abort silently truncated this suite's entire tail ([45]–[50]).
--- Moving [41]/[42] into their own process removes the accumulated-state
--- crash from smoke.lua's hot path. That runner also preserves natural
--- headless geometry because copied synthetic columns/lines independently
--- provoke the same core defect on nvim 0.12.2. See
--- tests/smoke-automation.lua (wired into run-all.sh as "smoke_automation").
--- ═══════════════════════════════════════════════════════════════════
-
-
--- ═══════════════════════════════════════════════════════════════════
--- [45] (ADR-0044 worktree:switched reanchor) was EXTRACTED to
--- tests/smoke-adr0044.lua on 2026-08-23. It asserts against a
--- MATERIALISED panel window; after ~45 sections of accumulated window
--- state the panel does not materialise headlessly here (winid=nil), so
--- [45] logged 5 permanent env failures. In a fresh nvim process it
--- passes 6/0 under plain `nvim --headless` (no pty). Wired into
--- run-all.sh as "smoke_adr0044". See tests/auto-finder-coverage.md.
---
--- [46] (views.tests) + [47] (views.debug), ADR-0048 Phase 3, were
--- CONSOLIDATED into tests/smoke-adr0048.lua, now their sole canonical
--- home. They had lived in BOTH files (a sync hazard), and [46] could
--- not pass here for the same panel-materialisation reason as [45].
--- The "adr0048" suite runs both reliably in a fresh process.
--- ═══════════════════════════════════════════════════════════════════
-
 -- ── [48] views._config_section — launch-config selection ────────
 -- Unit coverage over the shared Config-section component against the
 -- REAL auto-run.import sibling (on the rtp). A launch.json fixture with
@@ -6811,7 +5285,7 @@ end)
 --
 -- Two synthetic views are registered through `cfg.view_modules` rather
 -- than reusing `files` / `repos`: they mount synchronously, so the
--- assertions are about the registry and not about neo-tree timing.
+-- assertions are about the registry and not about view mount timing.
 -- Reported by lector on PR #2.
 print("\n[52] slot assign — survivors keep their buffers across a permutation")
 section(function()

@@ -1,19 +1,14 @@
 ---auto-finder.core — runtime state component (ADR 0026).
 ---
----Single source of truth for the file tree, git status, buffer
----list, repo registry, and worktree state. Subscribes to
----auto-core events on `ensure_started`; publishes auto-finder-
----private topics that views consume.
+---Owns the panel's shared runtime state — git status, buffer list,
+---repo registry and the repos panel's worktree watchers. Subscribes to
+---auto-core events on `ensure_started`; publishes auto-finder-private
+---topics that views consume. The files slot keeps its own lazy tree
+---(views/files) and is not fed from here (ADR-0200).
 ---
----**Phase 3 status: re-armable lifecycle wired.** Phase 1 shipped
----the loadable surface; Phase 3 implements the actual subscribe
----+ translate logic. The caches in `core.files` / `core.git` /
----`core.buffers` / `core.repos` are still placeholders (Phase 4–6
----fills them); what Phase 3 ships is the EVENT WIRING — every
----upstream auto-core topic is captured, every auto-finder.core.*
----translation fires, and the lifecycle survives a bus reset by
----unconditionally dispose-first-then-resubscribe (the contract
----per Lector's review §9 r3 #1).
+---The lifecycle survives a bus reset by unconditionally
+---dispose-first-then-resubscribe (the contract per Lector's review §9
+---r3 #1).
 ---
 ---Lifecycle contract (ADR §2.2 — re-armable):
 ---
@@ -94,103 +89,6 @@ local function _sub(slot, topic, cb)
   M._handles[slot] = up.events.subscribe(topic, cb)
 end
 
--- ── file-event coalescing + burst detection (ADR §2.5) ──
---
--- Phase 4 adds a debounce window over `core.file:*` events so a
--- burst (e.g. 100 file writes in a single tick, or a branch
--- switch that touches hundreds of files) collapses into a single
--- `auto-finder.core.files:changed` emit. Within the window, if
--- > BURST_THRESHOLD events accumulate against the same parent
--- directory, the parent is invalidated wholesale (`kind =
--- 'subtree_stale'`) rather than reassembled from N file events —
--- per ADR §2.5 the upstream `fs.watch` can't supply paired
--- rename events, so directory-scoped operations are unsafe to
--- reconstruct file-by-file.
---
--- Cache mutation happens IMMEDIATELY on each event (so `get(path)`
--- reflects reality even during the debounce window); only the
--- EMIT is deferred.
-local FILES_DEBOUNCE_MS = 100
-local BURST_THRESHOLD   = 50  -- events per parent within window
-local _file_buf = {}            -- { { path, kind } }
-
-local function _flush_file_events()
-  if #_file_buf == 0 then return end
-
-  local buf = _file_buf
-  _file_buf = {}
-
-  -- Group by parent dir for burst detection.
-  local by_parent = {}
-  for _, ev in ipairs(buf) do
-    local parent = vim.fn.fnamemodify(ev.path, ":h")
-    by_parent[parent] = by_parent[parent] or { upsert = {}, delete = {}, count = 0 }
-    by_parent[parent].count = by_parent[parent].count + 1
-    if ev.kind == "delete" then
-      table.insert(by_parent[parent].delete, ev.path)
-    else
-      table.insert(by_parent[parent].upsert, ev.path)
-    end
-  end
-
-  -- Walk parents. A parent above the burst threshold collapses
-  -- into a single subtree_stale event for that dir; everything
-  -- else accumulates into the upsert / delete lists.
-  local stale_parents = {}
-  local upsert_paths  = {}
-  local delete_paths  = {}
-  local files_mod = require("auto-finder.core.files")
-  for parent, group in pairs(by_parent) do
-    if group.count > BURST_THRESHOLD then
-      files_mod.invalidate_subtree(parent)
-      stale_parents[#stale_parents + 1] = parent
-    else
-      for _, p in ipairs(group.upsert) do
-        upsert_paths[#upsert_paths + 1] = p
-      end
-      for _, p in ipairs(group.delete) do
-        delete_paths[#delete_paths + 1] = p
-      end
-    end
-  end
-
-  -- Emit. Each kind gets its own event so subscribers can filter
-  -- on payload.kind; the alternative ("one event with mixed kind
-  -- inside paths[]") would complicate every consumer.
-  local events_mod = require("auto-finder.core.events")
-  local cwd = vim.fn.getcwd()
-  if #stale_parents > 0 then
-    events_mod.publish("auto-finder.core.files:changed", {
-      cwd     = cwd,
-      kind    = "subtree_stale",
-      paths   = stale_parents,
-      parents = stale_parents,
-    })
-  end
-  if #upsert_paths > 0 then
-    events_mod.publish("auto-finder.core.files:changed", {
-      cwd   = cwd,
-      kind  = "upsert",
-      paths = upsert_paths,
-    })
-  end
-  if #delete_paths > 0 then
-    events_mod.publish("auto-finder.core.files:changed", {
-      cwd   = cwd,
-      kind  = "delete",
-      paths = delete_paths,
-    })
-  end
-end
-
--- ADR 0026 Phase 8: file-event coalescer uses shared.debounce
--- instead of an inline vim.defer_fn + timer-id pattern. The
--- coalescer's `cancel` companion is wired into the test-only
--- flush helper below.
-local _file_buf_trigger, _file_buf_cancel =
-  require("auto-finder.shared.debounce").coalesce(
-    _flush_file_events, FILES_DEBOUNCE_MS)
-
 -- ADR-0060 §2.3: the repos-panel refresh for a working-tree edit under a
 -- watched worktree, coalesced. A burst of `core.file:*` (a checkout, a mass
 -- edit) collapses to one `auto-finder.core.repos:changed` — the render re-reads
@@ -198,45 +96,16 @@ local _file_buf_trigger, _file_buf_cancel =
 -- once at module scope so re-arming `ensure_started` reuses the same timer.
 -- Capture the CANCEL companion too. A pending deferred fire that lands after
 -- `core.stop` would invalidate and publish repos:changed from a retired
--- lifecycle — the same stale-refresh class this task fixes, reintroduced at
--- teardown (lector PR #42 #1). `stop()` cancels it, matching the files
--- coalescer's own `_file_buf_cancel` treatment.
+-- lifecycle (lector PR #42 #1). `stop()` cancels it.
+local REPOS_FILE_DEBOUNCE_MS = 100
 local _repos_file_refresh, _repos_file_refresh_cancel =
   require("auto-finder.shared.debounce").coalesce(
     function(path)
       require("auto-finder.core.repos").invalidate()
       require("auto-finder.core.events").publish(
         "auto-finder.core.repos:changed", { kind = "core.file:changed", path = path })
-    end, FILES_DEBOUNCE_MS)
+    end, REPOS_FILE_DEBOUNCE_MS)
 
-local function _enqueue_file_event(path, kind)
-  -- Mutate the cache immediately so `get` reflects reality even
-  -- mid-debounce. Only the emit is debounced.
-  local files_mod = require("auto-finder.core.files")
-  if kind == "delete" then
-    files_mod.delete(path)
-  else
-    files_mod.upsert(path)
-  end
-  _file_buf[#_file_buf + 1] = { path = path, kind = kind }
-  _file_buf_trigger()
-end
-
----Test-only: flush the file-event buffer immediately and clear
----the pending fire. Used by Phase 4 smoke to assert on debounced
----output without waiting on real time.
-function M._flush_file_events_for_tests()
-  _file_buf_cancel()
-  _flush_file_events()
-end
-
----Test-only: read the current file-event buffer length.
-function M._file_buf_len_for_tests()
-  return #_file_buf
-end
-
----Idempotent re-armable lifecycle entry point (ADR §2.2).
----
 ---Contract: regardless of whether prior handles can be proven
 ---valid, this function must leave core subscribed to every
 ---upstream topic it cares about. Default impl is dispose-first-
@@ -244,7 +113,7 @@ end
 ---@param cfg AutoFinderConfig?
 function M.ensure_started(cfg)
   ---@diagnostic disable-next-line: unused-local
-  local _ = cfg  -- consumed by Phase 4+ (warm batch size etc.); Phase 3 wires events only
+  local _ = cfg  -- accepted for signature stability; the wiring needs no config
   -- Optimization fast-path: if the probe says handles are still
   -- valid AND we're started, skip the work. Phase 3 the probe is
   -- always false so this branch never fires; left in place for
@@ -262,21 +131,34 @@ function M.ensure_started(cfg)
 
   -- ── upstream → auto-finder.core.* translation ──
   --
-  -- core.file:* → auto-finder.core.files:changed
-  -- Phase 4 adds debounce + burst-detection per ADR §2.5: cache
-  -- mutation happens immediately on each event (so `get(path)`
-  -- reflects reality), but the EMIT is deferred 100 ms and
-  -- coalesces multiple events into a single
-  -- `auto-finder.core.files:changed` (or `subtree_stale` if
-  -- > 50 events accumulate against one parent within the window).
-  -- See `_enqueue_file_event` / `_flush_file_events` above.
-  _sub("upstream_file", "core.file:*", function(payload, topic)
-    if type(payload) ~= "table" or type(payload.path) ~= "string" then
-      return
-    end
-    local kind = (topic == "core.file:deleted") and "delete" or "upsert"
-    _enqueue_file_event(payload.path, kind)
+  -- ADR-0200 §4.4: core.file:* / core.fs.dir:dirty → auto-finder.core.files:changed,
+  -- only for a directory the files view asked core to watch (core.watchers.watch_dir).
+  -- The event names ONE directory; the view re-reads that directory and nothing else.
+  -- Upstream topics stay subscribed here, never in a view (ADR-0026 A1).
+  _sub("upstream_file_dirs", "core.file:*", function(payload, topic)
+    if type(payload) ~= "table" or type(payload.path) ~= "string" then return end
+    local dir = vim.fs.dirname(payload.path)
+    local watchers = require("auto-finder.core.watchers")
+    if not watchers.is_dir_watched(dir) then return end
+    require("auto-finder.core.events").publish("auto-finder.core.files:changed", {
+      kind = (topic or ""):match("core%.file:(%a+)") or payload.change or "modified",
+      path = payload.path,
+      dir  = dir,
+    })
   end)
+  _sub("upstream_dir_dirty", "core.fs.dir:dirty", function(payload)
+    if type(payload) ~= "table" or type(payload.path) ~= "string" then return end
+    if not require("auto-finder.core.watchers").is_dir_watched(payload.path) then return end
+    require("auto-finder.core.events").publish("auto-finder.core.files:changed", {
+      kind = "dirty", path = payload.path, dir = payload.path,
+    })
+  end)
+  -- auto-core.files prefs → auto-finder.core.files:filters (the files view re-filters without a git read)
+  for _, what in ipairs({ "show_hidden", "show_dotfiles" }) do
+    _sub("upstream_files_" .. what, "state.core:files." .. what .. ":changed", function()
+      require("auto-finder.core.events").publish("auto-finder.core.files:filters", { what = what })
+    end)
+  end
 
   -- core.git.state:changed → auto-finder.core.git:changed
   -- ADR 0026 Phase 5: also flip core.git's readiness to 'cold' so
@@ -437,27 +319,6 @@ function M.ensure_started(cfg)
     end
   end
 
-  -- ── Phase 4: fs.watch handle + chunked cache warm ──
-  --
-  -- Open the working-tree fs.watch via core.watchers and kick off
-  -- the chunked warmer against the cwd's top level. Both are
-  -- idempotent on a re-arm: watchers.open_for returns the existing
-  -- handle bundle for an already-watched cwd; warm.start no-ops
-  -- if a warm is already in progress.
-  --
-  -- max_handles_exceeded degradation (§2.6): watchers logs warn +
-  -- publishes auto-finder.core.ready with payload areas.files =
-  -- 'partial'. The warmer doesn't gate on that — its own walk
-  -- still completes and publishes its own auto-finder.core.ready
-  -- with files = 'ready' on success.
-  local cwd = vim.fn.getcwd()
-  pcall(function()
-    require("auto-finder.core.watchers").open_for(cwd)
-  end)
-  pcall(function()
-    require("auto-finder.core.warm").start(cwd)
-  end)
-
   -- ── ADR-0060 §2.3: arm a live watcher for every WATCHED worktree ──
   --
   -- Watches persist across restarts, so the persisted set must arm here (not
@@ -476,8 +337,8 @@ function M.ensure_started(cfg)
   -- ensure_started clears + recreates a single set of autocmds,
   -- matching the dispose-first-then-resubscribe contract on the
   -- auto-core events side. Each autocmd updates the cache and
-  -- publishes auto-finder.core.buffers:changed. Views can opt in
-  -- via shared.neotree.build_section's `core_refresh_topic` opt.
+  -- publishes auto-finder.core.buffers:changed, which the buffers
+  -- view subscribes to while it is shown.
   pcall(function()
     require("auto-finder.core.buffers")._arm_autocmds()
   end)
@@ -525,7 +386,7 @@ function M.ensure_started(cfg)
   -- `core.file:*`. Firing repos:changed per file would schedule one rerender
   -- each; the coalescer collapses a burst to a single refresh (latest-wins),
   -- which is all the panel needs — the render re-reads the whole worktree
-  -- anyway. Matches the files path's own `FILES_DEBOUNCE_MS` treatment.
+  -- anyway.
   _sub("upstream_file_repos", "core.file:*", function(payload)
     if type(payload) ~= "table" or type(payload.path) ~= "string" then return end
     local ok_w, watchers = pcall(require, "auto-finder.core.watchers")
@@ -547,22 +408,13 @@ function M.ensure_started(cfg)
 end
 
 ---Tear-down counterpart to ensure_started. Disposes every captured
----handle, closes every fs.watch handle, stops the in-progress
----warm. Resets the `_started` flag. Phase 5 will also dispose
----git.watch handles via core.watchers.close_all.
+---handle, stops the repos panel's worktree watchers and the buffers
+---augroup. Resets the `_started` flag.
 function M.stop()
   M._dispose_handles()
-  -- Cancel any pending file-event flush + drop the buffer so the
-  -- next ensure_started starts from a clean slate.
-  _file_buf_cancel()
-  _file_buf = {}
   -- And the repos file-refresh coalescer (lector PR #42 #1): a fire still
   -- pending here would publish repos:changed after teardown.
   _repos_file_refresh_cancel()
-  local ok_warm, warm = pcall(require, "auto-finder.core.warm")
-  if ok_warm and type(warm.stop) == "function" then
-    warm.stop()
-  end
   local ok_w, watchers = pcall(require, "auto-finder.core.watchers")
   if ok_w and type(watchers.close_all) == "function" then
     watchers.close_all()
@@ -601,12 +453,10 @@ end
 -- during development without affecting siblings).
 
 local _submodules = {
-  files    = "auto-finder.core.files",
   git      = "auto-finder.core.git",
   buffers  = "auto-finder.core.buffers",
   repos    = "auto-finder.core.repos",
   watchers = "auto-finder.core.watchers",
-  warm     = "auto-finder.core.warm",
   events   = "auto-finder.core.events",
 }
 

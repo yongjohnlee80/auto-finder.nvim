@@ -26,7 +26,6 @@ local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 -- over `main`, because this change spans both repos and `main` has none of the
 -- new primitives.
 for _, p in ipairs({
-  LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim",
   plugins_root .. "/auto-core.nvim/main",
   plugins_root .. "/auto-core.nvim/" .. branch_dir,
   plugins_root .. "/worktree.nvim/main",
@@ -238,79 +237,9 @@ end)()
   package.loaded["worktree.repos"] = nil
 end)()
 
--- ── [7] the MIGRATED neo-tree commands actually run ──────────────────
---
--- The blocker this exists for. The adapter was declared below its first use, so
--- the four staging commands closed over a nil GLOBAL `_run` and every one died
--- with "attempt to call global '_run'". `M._run` was exported and fine, which is
--- precisely why a test that called `M._run` passed while the commands were dead.
--- So: invoke the COMMANDS.
-;(function()
-  local cmds = require("auto-finder.neotree.sources.common.commands")
-  local node = { type = "file", name = "f.txt", get_id = function() return "f.txt" end }
-  local state = { tree = { get_node = function() return node end } }
-
-  -- These verbs resolve their working directory from the EDITOR's cwd
-  -- (commands.lua `_cwd()` = vim.loop.cwd()) — correct for a real user, whose
-  -- editor sits inside the repo. But this suite runs under tests/run-all.sh,
-  -- which cd's to the plugin worktree, so driving them for REAL once ran
-  -- `git add -A` in the plugin worktree and staged its own files — which then
-  -- rode into a tagged release on a later bare commit (KB todo 2026-09-02).
-  -- Stub the single git-write owner (`auto-core.git.write`, resolved lazily by
-  -- commands.lua `_core_write` via require, so package.loaded is the seam) so
-  -- these verbs are exercised for ROUTING only: no real git touches any tree.
-  local WRITE = "auto-core.git.write"
-  local saved_write = package.loaded[WRITE]
-  local calls = {}
-  local function _rec(verb)
-    return function(...)
-      local n = select("#", ...)
-      calls[#calls + 1] = { verb = verb, cwd = (select(1, ...)) }
-      local cb = select(n, ...)          -- _run appends the callback last
-      if type(cb) == "function" then cb(true, "") end
-    end
-  end
-  -- `.stage` must be a function or _core_write's guard rejects the table.
-  package.loaded[WRITE] = { stage = _rec("stage"), unstage = _rec("unstage"),
-                            stage_all = _rec("stage_all") }
-
-  for _, name in ipairs({ "git_add_file", "git_unstage_file", "git_add_all",
-                          "git_toggle_file_stage" }) do
-    ok("[7] " .. name .. " is callable without raising", (pcall(cmds[name], state)))
-  end
-
-  package.loaded[WRITE] = saved_write
-
-  -- Routing, not merely non-raising: each write reached auto-core's single
-  -- owner (where the cwd is ultimately applied), never a raw git in the suite.
-  -- git_toggle_file_stage reads a status first and short-circuits on a path
-  -- absent from the tree, so it is asserted callable above, not for routing.
-  local function _saw(verb)
-    for _, c in ipairs(calls) do if c.verb == verb then return true end end
-    return false
-  end
-  ok("[7] git_add_all routes to auto-core git.write.stage_all", _saw("stage_all"))
-  ok("[7] git_add_file routes to auto-core git.write.stage", _saw("stage"))
-  ok("[7] git_unstage_file routes to auto-core git.write.unstage", _saw("unstage"))
-
-  -- And the adapter must be declared BEFORE its first use, not merely exported.
-  -- Asserted on the source because that ordering is what broke, and a runtime
-  -- call can be made to pass by an unrelated early return.
-  local src = table.concat(vim.fn.readfile(plugin_root
-    .. "/lua/auto-finder/neotree/sources/common/commands.lua"), "\n")
-  local decl = src:find("local function _run", 1, true)
-  local first_use = nil
-  for pos in src:gmatch("()_run%(") do
-    local line_start = src:sub(1, pos):match("[^\n]*$")
-    if not line_start:match("^%s*%-%-") and not line_start:match("local function $")
-       and not line_start:match("M%._run") then
-      first_use = first_use or pos
-    end
-  end
-  ok("[7] the adapter is declared before its first use",
-    decl and first_use and decl < first_use,
-    string.format("decl=%s first_use=%s", tostring(decl), tostring(first_use)))
-end)()
+-- ── [7] retired with the old fork's command set (ADR-0200): the files
+-- panel never bound its git_* commands, and auto-core's tests/git_write.lua
+-- covers the write owner itself.
 
 -- ── [8] the write topics REACH the view's topic ──────────────────────
 --

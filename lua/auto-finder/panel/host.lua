@@ -13,9 +13,9 @@
 ---    section gets a chance to tear down external resources)
 ---  - `apply_section_keymap` (0..9 / q per buffer; auto-core's section
 ---    primitive provides this but section.attach migration is step 4)
----  - `poke_neotree_redraw` bridge for catch-up redraws after resize
----    so right-aligned components reflow to the new column count
----  - `set_panel_width` cache + neo-tree `cfg.window.width` mirror
+---  - `reflow_views` catch-up repaint of the files / buffers views after a
+---    resize so right-aligned components reflow to the new column count
+---  - `set_panel_width` cache
 ---  - `refresh_winbar` wrapper that delegates to
 ---    `M._panel:set_winbar(sections, focused)` (auto-core's winbar
 ---    primitive replaced the local `panel/winbar.lua` in this step)
@@ -45,32 +45,23 @@ local function panel()
   return require("auto-finder")._panel
 end
 
----Cache the panel width on state and mirror it into neo-tree's
----runtime config so any path that reads `neo.config.window.width`
----(e.g. an external `:Neotree` invocation) lines up with the panel.
+---Cache the panel width on state.
 ---@param state table
 ---@param width integer
 local function set_panel_width(state, width)
   state.panel_width = width
-  local ok, neo = pcall(require, "auto-finder.neotree")
-  if ok and type(neo.config) == "table" and type(neo.config.window) == "table" then
-    neo.config.window.width = width
-  end
 end
 
----Force a re-render of every live neo-tree state in our panel so
----right-aligned components (modified marker, diagnostics, git_status,
----file_size) reflow to the new column count after a resize. neo-tree
----only schedules render_tree on its own events; a bare
----`nvim_win_set_width` doesn't reach the render path. We poke
----`manager.redraw(nil)` which iterates every source's live state and
----calls `renderer.redraw(state)` — cheap (no fs scan, no tree
----rebuild) and tree_is_visible-guarded inside redraw, so closed
----states no-op.
-local function poke_neotree_redraw()
-  local ok, manager = pcall(require, "auto-finder.neotree.sources.manager")
-  if ok and type(manager.redraw) == "function" then
-    pcall(manager.redraw, nil)
+---Repaint the files / buffers views when shown so their right-aligned
+---diagnostic signs reflow to the new column count after a resize. Each
+---view's paint writes only the lines that changed, and a hidden view is
+---skipped (a hidden pane does no work).
+local function reflow_views()
+  for _, name in ipairs({ "auto-finder.views.files", "auto-finder.views.buffers" }) do
+    local ok, view = pcall(require, name)
+    if ok and view._state and view._state.shown and type(view.paint) == "function" then
+      pcall(view.paint)
+    end
   end
 end
 
@@ -103,7 +94,7 @@ function M.ensure_open(cfg, state, force)
 end
 
 ---Expose the unfix helper for callers that need to swap the panel
----buffer outside the focus path (e.g. files.lua's mount_neotree).
+---buffer outside the focus path.
 ---The winid arg is now informational (auto-core panel has its own
 ---`self.winid`); kept for source-level compat with v0.1.x callers.
 ---@param _winid integer|nil
@@ -116,8 +107,8 @@ function M.with_unfixed_buf(_winid, fn)
 end
 
 ---Close the panel window. The section on_close fanout (cleanup of
----external section state — notably the files section deleting its
----cached neo-tree buffer) fires automatically via the panel's
+---external section state — notably the files and buffers views
+---stopping their watches and subscriptions) fires automatically via the panel's
 ---`on_close` callback wired in init.lua's setup() — that path runs
 ---for both the keymap-q close AND a direct `:AutoFinder` toggle, so
 ---this wrapper just delegates.
@@ -197,7 +188,7 @@ function M.refresh_width(cfg, state)
   p:refresh_width()
   set_panel_width(state, vim.api.nvim_win_get_width(state.panel_winid))
   M.refresh_winbar(state)
-  poke_neotree_redraw()
+  reflow_views()
 end
 
 ---WinResized callback: re-clamp the panel back to the user pin when
@@ -211,16 +202,16 @@ function M.enforce_pin(cfg, state)
   local p = panel()
   if not p then return end
   if not (state.user_width and state.user_width > 0) then
-    -- Dynamic mode — don't fight neo-tree, but still poke a redraw
-    -- so right-aligned components reflow when the panel was resized
-    -- by the user dragging the window border.
-    poke_neotree_redraw()
+    -- Dynamic mode — don't fight the auto-expand, but still reflow
+    -- right-aligned components when the panel was resized by the user
+    -- dragging the window border.
+    reflow_views()
     return
   end
   p:enforce_pin()
   set_panel_width(state, vim.api.nvim_win_get_width(state.panel_winid))
   M.refresh_winbar(state)
-  poke_neotree_redraw()
+  reflow_views()
 end
 
 ---Shared post-resize side-effects. Public so the user_width watcher
@@ -231,7 +222,7 @@ function M._refresh_after_resize(state)
   if not panel_is_open(state) then return end
   set_panel_width(state, vim.api.nvim_win_get_width(state.panel_winid))
   M.refresh_winbar(state)
-  poke_neotree_redraw()
+  reflow_views()
 end
 
 return M
