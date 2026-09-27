@@ -65,7 +65,7 @@ list them in `opts.sections`):
 | **marks** | — | nvim marks browser. *Solves: marks you set and then forgot.* |
 | **todos** | — | The auto-core task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. See [Automation](#automation-todo-listautomated). *Solves: tracking work in the repo instead of a browser tab.* |
 | **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) **≥ v0.3.0** | autodb's database explorer, hosted in the panel — connections, workspaces, notes and script history. See [DBase view](#dbase-view--autodb-inside-the-panel). *Solves: querying a managed database without a second application.* |
-| **tests** / **debug** | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | The ADR-0048 pair: a discovered test tree with per-row status glyphs, and a debug view over entry points, `launch.json` configs, live dap sessions and persisted breakpoints. See [Tests & Debug views](#tests--debug-views-auto-run). *Solves: running and debugging without a terminal round-trip.* |
+| **tests** / **debug** | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | The ADR-0048 pair: a discovered test tree with per-row status glyphs, and a debug view over entry points (edited in place; `launch.json` imports into them), live dap sessions and persisted breakpoints — both headed by the state a run will use (active worktree, env file, base, test config). See [Tests & Debug views](#tests--debug-views-auto-run). *Solves: running and debugging without a terminal round-trip.* |
 
 **Every companion is optional and probed at runtime, never imported.**
 auto-finder calls `pcall(require, …)` for autodb, auto-run and
@@ -511,72 +511,87 @@ so it cannot outlive it, and autodb does not ship a completion source yet.
 
 ## Tests & Debug views (auto-run)
 
-Two flat scratch-buffer views (ADR-0048 Phase 3) consuming
-[`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)'s
-public API — pure renderers over auto-run's discovery tree, config
-store, `launch.json` parse, and breakpoint persistence, refreshed by
-the `run.*` event topics. Register with `slot add tests` / `slot add
-debug`.
+Two flat scratch-buffer views (ADR-0048 Phase 3, simplified in ADR 0199)
+over [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim)'s
+public API — its discovery tree, config store, env files and breakpoint
+persistence — refreshed by the `run.*` topics and by
+`core.active_worktree:changed`. Register with `slot add tests` / `slot add
+debug`. Needs auto-run **v0.1.15+** for the header and config management (an
+older auto-run gets a one-line notice and the rest of the pane renders).
 
-Both views render two selection sections above their main body: a
-**Config** section (the VSCode `launch.json` configs auto-run parses —
-the tests view lists `mode:test`, the debug view `mode:debug`) and an
-**Env** section (candidate `.env` files, discovered under the worktree
-root and the bare-repo container, each at `.`, `.config/`, `.vscode/`).
-A `*` marks the per-repo **selected** config / env file; the selection
-feeds every subsequent launch — the config as the *active base*
-(env/build_flags/etc. merged in), the env file highest-precedence.
+**Both panes open with a state header** — always shown, never collapsible —
+stating what a run will use, every value from `auto-run.context` (the same
+answers a run resolves, so the header cannot disagree with what executes):
+
+| Row | Shows | Key |
+|---|---|---|
+| Active worktree | auto-core's active worktree and branch; "not a repository" when it is not one | `w` choose (sets auto-core's active worktree — every plugin follows it; the cwd never changes) |
+| Env | the env file applied to every launch; "(process env only)"; "— MISSING" | `s` choose |
+| Base | the launch config merged under every run, debug and test; "(none)" | `b` choose |
+| Test config *(tests pane)* | per runtime: the config that applies and why — `(picked)`, `(shared pick)`, `(first)` — and any remembered pick that does not apply | `c` choose |
+
+Below it, an **Env** section lists the candidate `.env` files (referenced by
+configs, or discovered under the worktree root and the bare-repo container at
+`.`, `.config/`, `.vscode/`); a `*` marks the selection.
 
 ### tests
 
-The discovered test-position tree (`dir → file → namespace →
-test`) with per-row status glyphs from the last run
-(✓ passed · ✗ failed · ○ skipped · ● running), live-updated on
-`run.results:changed`. Folder collapse persists across sessions.
-The header shows the discovery root, counts, and the scan state —
-including auto-run's structured cap report when a bounded full
-scan aborts.
+A **Test configs** section (the store's `kind=test` configs: a `*` on the one
+each runtime resolves to, with the reason; the shared per-kind pick as its own
+row), then the discovered test-position tree (`dir → file → namespace → test`)
+with per-row status glyphs from the last run (✓ passed · ✗ failed · ○ skipped
+· ● running). Folder collapse persists across sessions. The tree header shows
+the discovery root, counts, and the scan state — including auto-run's
+structured cap report when a bounded full scan aborts.
 
 | Key | Action |
 |---|---|
-| `<CR>` | jump to position (editor-routed); config row → open `launch.json`; env file → open; toggle collapse on a folder / section header |
+| `<CR>` | jump to position (editor-routed); test config → open its file; env file → open; toggle collapse on a folder / section header |
 | `r` | run position under cursor (test / file / namespace / folder = suite) |
 | `R` | re-run the last position run from this panel |
 | `d` | debug the test under cursor (dap strategy) |
-| `o` | toggle details on a test row / config row (env values masked) / env file (KEY=VALUE); collapse on containers |
+| `o` | toggle details on a test row / env file (KEY=VALUE); collapse on containers |
 | `O` | toggle ALL: collapse everything if anything is open, else expand everything |
 | `i` | output float — the run's full terminal output (`go test` logs) |
-| `s` | select / deselect the config or env file under cursor |
-| `e` | edit the env var under cursor (Env section) |
-| `a` | add KEY=VALUE to the env file (env row / Env header) |
+| `s` | test config → pick it for its runtime (again: clear); shared-pick row → clear it; env file → select it; elsewhere → choose the env file |
+| `w` / `b` / `c` | choose the active worktree / base / a runtime's test config |
+| `a` | Test configs section → create a test config (kind, runtime, name); env row / Env header → add KEY=VALUE |
+| `e` | env var → edit its value; test config → open its file |
 | `S` | full worktree scan (bounded; `S` again cancels) |
 | `x` | stop running test jobs |
 | `?` | help overlay |
 
 ### debug
 
-Sections: **Entry Points** (store configs `kind=debug|run`, grouped by
-kind, provenance/tier annotated), **Config** (`mode:debug` `launch.json`
-configs, selectable), **Env**, **Active Sessions** (live nvim-dap
-sessions), and **Breakpoints** (the persisted per-repo store merged with
-live dap state, grouped by file — orphaned persisted entries render
-dimmed). `o` on an entry expands its resolved config with **env values
-masked** — keys and `${VAR}` / `cmd:` refs only, literal values never
-reach the buffer.
+Sections: **Entry Points** (store configs `kind=debug|run`, grouped by kind,
+provenance/tier annotated), **Env**, **Active Sessions** (live nvim-dap
+sessions), and **Breakpoints** (the persisted per-repo store merged with live
+dap state, grouped by file — orphaned persisted entries render dimmed).
+
+An entry point owns its whole config. `o` fans it out into property rows —
+program, args, cwd, build flags, runtime, env files, each env var, and for Rust
+the Cargo identity — shown even when unset, and `e` on a row edits it in place
+(prefilled; lists as one shell-split line; an empty answer clears). **Env values
+stay masked**: the rows show keys and `${VAR}` / `cmd:` refs only, the prompt is
+prefilled with `KEY=` alone, and a malformed answer is refused without echoing
+it. `launch.json` is an import source (`I`), not a live section.
 
 The debug panel has **no delete surface** — breakpoints are managed via
 nvim-dap directly (sign column / API); config files via the files panel.
 
 | Key | Action |
 |---|---|
-| `<CR>` | entry point → open its **program source**; config row → open `launch.json`; session → focus; breakpoint → jump; header → toggle collapse |
+| `<CR>` | entry point → open its **program source**; session → focus; breakpoint → jump; header → toggle collapse |
 | `r` | entry point → **run** the program in an auto-agents playground terminal (prompts `term1`..`term4`) |
 | `d` | entry point → **debug** (dap) |
-| `o` | expand details (resolved config with env masked / session state / breakpoint condition); collapse on headers |
+| `o` | entry point → fan out its properties; session state / breakpoint condition; collapse on headers |
 | `O` | toggle ALL sections open/closed |
-| `e` | edit the entry point's config file; env var → edit its value |
-| `a` | entry point → **export** config to `launch.json` (nearest reachable, else `$WORKSPACE/.config/launch.json`); env row / Env header → add KEY=VALUE |
-| `s` | select / deselect the config or env file under cursor |
+| `e` | property row → edit in place; entry point → open its config file; env var → edit its value |
+| `a` | add an entry point (kind, runtime, name — auto-run scaffolds it); env row / Env header → add KEY=VALUE |
+| `E` | export the entry point to `launch.json` (nearest reachable, else `<worktree>/.config/launch.json`) |
+| `I` | import `launch.json` configurations into the store (one, or all; conflicts skipped and reported) |
+| `s` | env file → select it; elsewhere → choose the env file |
+| `w` / `b` | choose the active worktree / base |
 | `x` | terminate the session under cursor |
 | `p` | pause / continue the session under cursor |
 | `i` | info popup for the row under cursor |
