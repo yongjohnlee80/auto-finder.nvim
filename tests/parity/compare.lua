@@ -30,6 +30,9 @@ for _, p in ipairs({
   LAZY .. "/auto-core.nvim",
   LAZY .. "/worktree.nvim",
   plugins_root .. "/worktree.nvim/main",
+  -- auto-core `main`, then the same-branch sibling (last prepend wins). Without `main` a checkout outside
+  -- CI (which symlinks main into the lazy dir) fell back to a stale lazy copy with no fs.scan.
+  plugins_root .. "/auto-core.nvim/main",
   plugins_root .. "/auto-core.nvim/" .. vim.fn.fnamemodify(plugin_root, ":t"),
   DEPS .. "/mini.icons",
   DEPS .. "/catppuccin",

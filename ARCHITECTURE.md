@@ -63,7 +63,6 @@ lua/auto-finder/
 │
 ├── shared/                   pure helpers, no UI state of their own
 │   ├── help.lua              `?` keymap overlay every view installs
-│   ├── loading.lua           generation-tagged placeholder buffer factory
 │   ├── window.lua            is_any_panel / is_auto_finder_panel predicates
 │   ├── view_subs.lua         per-view subscription set with replace-or-add
 │   └── debounce.lua          coalesce helper (generation-counter cancel)
@@ -157,7 +156,6 @@ flowchart TB
     subgraph SHARED ["shared/ (pure helpers)"]
         direction LR
         SHELP["help.lua<br/>? keymap overlay"]
-        SLOAD["loading.lua<br/>placeholder factory"]
         SWIN["window.lua<br/>panel predicates"]
         SSUBS["view_subs.lua<br/>subscription sets"]
         SDEB["debounce.lua<br/>coalesce(fn, ms)"]
@@ -228,7 +226,7 @@ flowchart TB
     class INIT,CONFIG,STATE,LOG public;
     class COREINIT,CEVENTS,CGIT,CBUF,CREPOS,CWATCH core;
     class VREG,VCONFIG,VFILES,VBUF,VREPOS,VDBASE views;
-    class SHELP,SLOAD,SWIN,SSUBS,SDEB shared;
+    class SHELP,SWIN,SSUBS,SDEB shared;
     class PHOST,PSTYLE,PADMIN panel;
     class ACEVT,ACFS,ACSCAN,ACGITW,ACGITS,ACSTATE,ACPANEL,ACSECTION,ACLOG autocore;
 ```
@@ -325,7 +323,6 @@ model survive. No view uses the placeholder pattern today.
 | Module | Role |
 |---|---|
 | `shared/help.lua` | `install_help_keymap(name, bufnr)` binds `?`; `show_help` lists the buffer's actual normal-mode mappings (`nvim_buf_get_keymap`, with their `desc`) via `auto-core.ui.float.help_overlay`, else a plain float. Used by files, buffers, todos, tests, debug. |
-| `shared/loading.lua` | Generation-tagged placeholder factory. `nofile` + `bufhidden=wipe` + readonly buffer with "Loading <view>…". `is_placeholder` / `matches` predicates. No view in `lua/` uses it today. |
 | `shared/window.lua` | `is_any_panel(winid)` (broad exclusion) + `is_auto_finder_panel(winid)` (narrow lookup). Per [[auto-core-panel-ownership]]'s asymmetric contract. |
 | `shared/view_subs.lua` | `view_subs.new()` returns a set with `replace(slot, topic, cb)` semantics so re-running `on_focus` doesn't duplicate callbacks. |
 | `shared/debounce.lua` | `coalesce(fn, ms)` returns `(trigger, cancel)`. Uses a generation counter rather than timer cancellation because `vim.defer_fn` returns nil (see audit-log F8.1). |

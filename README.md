@@ -612,7 +612,7 @@ auto-finder is layered:
   renderer (`views/files/render.lua`, changed lines only); repos and
   dbase are pure renderers over `worktree.repos` and autodb's drawer.
 - **`shared/`** — pure helpers (help overlay, debounce,
-  loading placeholder, window predicates, subscription sets).
+  window predicates, subscription sets).
 - **`panel/`** — the window host. Implements
   `winfixwidth`/`winfixbuf` protection + the `with_unfixed_buf`
   primitive that internal swaps use, plus the config REPL's
