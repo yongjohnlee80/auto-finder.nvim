@@ -1676,6 +1676,10 @@ print("\n[50] ADR 0199 §6.2 — debug pane entry-point management")
   settle()
   ok("p50: …and the value never reaches the buffer",
     not text():find("rotated", 1, true) and not text():find("hunter2", 1, true), text())
+  -- Set first, so clearing is observable: the fixture has no cwd, and a
+  -- clear of an absent field would pass with the edit doing nothing.
+  edit("cwd", repo)
+  ok("p50: e on cwd sets it", store.get("m5-api").cwd == repo, vim.inspect(store.get("m5-api").cwd))
   edit("cwd", "")
   ok("p50: an empty answer clears the field", store.get("m5-api").cwd == nil, vim.inspect(store.get("m5-api").cwd))
   said = {}
