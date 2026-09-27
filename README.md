@@ -114,8 +114,8 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   — foundation library (panel singleton, state namespace, event bus,
   `fs.watch`, `fs.scan`, `git.watch`, `git.status`, centralized log,
   and the `fs.atomic` write primitive that auto-finder's persistence
-  delegates to). **Hard dep**, at a release that carries `fs.scan` and
-  `git.status.get_async` (auto-core PR #53).
+  delegates to). **Hard dep**, `^0.2.30` (the release that carries
+  `fs.scan` and `git.status.get_async`).
 - [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
   (or `mini.icons` with its devicons mock) — **optional**, recommended.
   Without it, directories and files get plain glyphs.
@@ -164,7 +164,7 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 ```lua
 {
   "yongjohnlee80/auto-finder.nvim",
-  version = "^0.4.0",
+  version = "^0.5.0",
   dependencies = {
     "yongjohnlee80/auto-core.nvim",       -- foundation; hard dep
     "yongjohnlee80/worktree.nvim",        -- repos view
@@ -207,12 +207,12 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 }
 ```
 
-> **Caret pin (`^0.4.0`)**: future v0.4.x releases auto-include
+> **Caret pin (`^0.5.0`)**: future v0.5.x releases auto-include
 > without a manual bump. The plugin holds an additive-only
-> minor-bump contract — v0.4.x releases never rename, remove,
-> or break-shape any existing public surface. Crossing to
-> v0.5.0 (when it eventually lands) requires bumping the caret
-> deliberately.
+> contract within a minor line — v0.5.x releases never rename,
+> remove, or break-shape any existing public surface. v0.5.0
+> itself was a breaking line (the neo-tree fork's retirement; see
+> `CHANGELOG.md`), which is why it needed the caret moved.
 
 That spec alone gives you **config, files, repos, buffers, marks and
 todos**. Nothing else is required.
@@ -656,7 +656,7 @@ is in **[`AUTOMATION.md`](./AUTOMATION.md)**.
   refactor with reimplementation plans:
   [`tests/auto-finder-flaky.test.md`](./tests/auto-finder-flaky.test.md).
 - Version policy: stays within the existing minor line
-  (`v0.4.x`) until explicit approval to bump. See `CHANGELOG.md`
+  (`v0.5.x`) until explicit approval to bump. See `CHANGELOG.md`
   for release-by-release notes.
 
 ### Continuous integration

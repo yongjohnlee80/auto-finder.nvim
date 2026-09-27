@@ -2,10 +2,12 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — the files and buffers slots without the neo-tree fork (ADR-0200)
+## [v0.5.0] — 2026-09-27 — the files and buffers slots without the neo-tree fork (ADR-0200)
 
-**Breaking** — recommended as the next **minor** line; the version is Johno's
-call. Needs auto-core with `fs.scan` and `git.status.get_async` (auto-core #53).
+**Minor, breaking.** Move your caret to `^0.5.0`. Needs auto-core **v0.2.30**
+(`fs.scan`, `git.status.get_async`, `core.fs.dir:dirty`); md-harpoon **v0.2.4**
+keeps its open slots refreshing now that the cwd is no longer watched as a
+whole. Reviewed by Lector (M1–M5).
 
 The files pane was slow on large workspaces and kept working while hidden: it
 rendered through the 21k-line vendored neo-tree fork over a recursive watch of

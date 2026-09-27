@@ -106,10 +106,8 @@ jobs:
           # `main` as well as on PRs. A gate that is red for a reason unrelated
           # to the change under test cannot distinguish a new failure from the
           # standing one.
-          # ADR-0200: auto-core PR #53 head (fs.scan, core.fs.dir:dirty, git.status
-          # get_async + porcelain v2 -z). Points at the PR head while it is open, as
-          # the worktree pin once did for PR #34; moves to main when #53 merges.
-          AUTO_CORE_REF: "0b1908e43ce405d0d7db308b59267aaf60663a02"  # auto-core PR #53 head
+          # ADR-0200: fs.scan, core.fs.dir:dirty, git.status get_async + porcelain v2 -z.
+          AUTO_CORE_REF: "db9e3b446bd895074b23878d408e174b8ecb015f"  # main @ v0.2.30
           # BUMPED for ADR-0083 r11: `p` and `d` call
           # `review.amend_pr_association`, which the previous pin predated.
           # Briefly pointed at PR #34's head while that PR was open; now on
@@ -174,7 +172,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # Kept in step with the install pin above — the guard below asserts it.
-          AUTO_CORE_REF: "0b1908e43ce405d0d7db308b59267aaf60663a02"
+          AUTO_CORE_REF: "db9e3b446bd895074b23878d408e174b8ecb015f"
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.
