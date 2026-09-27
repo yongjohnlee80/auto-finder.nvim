@@ -152,15 +152,17 @@ end
 
 -- ─── choosers (the keys on the header rows) ─────────────────────────
 
+-- Through auto-finder.log, never a bare vim.notify: the toast must also land
+-- in the auto-core ring for :AutoCoreLog triage (smoke A9).
 local function notify(msg, level)
-  vim.notify("auto-finder: " .. msg, level or vim.log.levels.INFO)
+  require("auto-finder.log").notify(msg, { component = "view.state-header", level = level or "info", notify = true })
 end
 
 ---`s` — choose the env file applied to every run, debug and test.
 function M.choose_env()
   local oke, env = pcall(require, "auto-run.env")
   if not oke or type(env.files_list) ~= "function" then
-    return notify("this auto-run.nvim has no env selection API", vim.log.levels.WARN)
+    return notify("this auto-run.nvim has no env selection API", "warn")
   end
   local ok, cands = pcall(env.files_list)
   local items, labels = { false }, { "(process env only)" }
@@ -172,7 +174,7 @@ function M.choose_env()
     if not idx then return end
     local path = items[idx] or nil
     local okset, err = env.set_selected(path)
-    if not okset then notify(tostring(err), vim.log.levels.ERROR) end
+    if not okset then notify(tostring(err), "error") end
   end)
 end
 
@@ -180,7 +182,7 @@ end
 function M.choose_base()
   local oki, import = pcall(require, "auto-run.import")
   if not oki or type(import.configs_list) ~= "function" then
-    return notify("this auto-run.nvim has no launch-config API", vim.log.levels.WARN)
+    return notify("this auto-run.nvim has no launch-config API", "warn")
   end
   local ok, list = pcall(import.configs_list)
   local items, labels = { false }, { "(none)" }
@@ -194,7 +196,7 @@ function M.choose_base()
   vim.ui.select(labels, { prompt = "Base — applies to every run, debug and test" }, function(_, idx)
     if not idx then return end
     local okset, err = import.set_selected(items[idx] or nil)
-    if not okset then notify(tostring(err and err.message or err), vim.log.levels.ERROR) end
+    if not okset then notify(tostring(err and err.message or err), "error") end
   end)
 end
 
@@ -203,7 +205,7 @@ function M.choose_test_config()
   local okc, ctxm = pcall(require, "auto-run.context")
   local okf, cfg = pcall(require, "auto-run.adapters.config")
   if not (okc and okf) or type(cfg.pick) ~= "function" then
-    return notify("this auto-run.nvim cannot choose a test config", vim.log.levels.WARN)
+    return notify("this auto-run.nvim cannot choose a test config", "warn")
   end
   local rts = ctxm.test_runtimes()
   if #rts == 0 then return notify("no test positions discovered yet") end
@@ -233,7 +235,7 @@ function M.choose_test_config()
     vim.ui.select(labels, { prompt = "Test config for " .. rt }, function(_, idx)
       if not idx then return end
       local okset, err = cfg.pick(rt, items[idx] or nil)
-      if not okset then notify(tostring(err), vim.log.levels.ERROR) end
+      if not okset then notify(tostring(err), "error") end
     end)
   end
 
