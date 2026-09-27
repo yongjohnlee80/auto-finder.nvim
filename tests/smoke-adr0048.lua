@@ -1449,6 +1449,94 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
     t2:find(label2, 1, true) ~= nil, t2)
   worktree.set_active(repo)
 
+  -- ── `w`: choose the Active worktree (ADR 0199 §7.2, M4) ──────────
+  -- Lists every worktree under the workspace as `<repo> (<branch>) —
+  -- <relative path>`, marks the current one, and sets auto-core's active
+  -- worktree — the one owner — without changing the cwd.
+  do
+    local ws = vim.fn.tempname() .. "-af-ws"
+    vim.fn.mkdir(ws, "p")
+    make_repo(ws .. "/alpha")
+    vim.fn.mkdir(ws .. "/beta", "p")
+    vim.system({ "git", "clone", "-q", "--bare", ws .. "/alpha", ws .. "/beta/.git" }, { text = true }):wait()
+    vim.system({ "git", "-C", ws .. "/beta", "worktree", "add", "-q", "-b", "feat", ws .. "/beta/feat" },
+      { text = true }):wait()
+    local prev_ws = worktree.get_workspace_root()
+    worktree.set_workspace_root(ws)
+    worktree.set_active(ws .. "/alpha")
+    local cwd_before = vim.fn.getcwd()
+
+    tests_view.on_focus(w, b)
+    local wl = row_line(tests_view, b, "state-worktree") or ""
+    ok("p49w: the Active worktree row names its key [w]", wl:find("[w]", 1, true) ~= nil, wl)
+    maps = keymap_table(b)
+    ok("p49w: tests pane maps w", rawget(maps, "w") ~= nil)
+    local offered
+    stub_select(function(items)
+      offered = items
+      return index_of(items, "beta/feat")
+    end)
+    maps.w.callback()
+    local labels = vim.tbl_map(tostring, offered or {})
+    ok("p49w: w lists every worktree under the workspace as <repo> (<branch>) — <path>",
+      index_of(labels, "alpha (main) — alpha") ~= nil
+        and index_of(labels, "beta (feat) — beta/feat") ~= nil, vim.inspect(labels))
+    ok("p49w: …and marks the current one",
+      index_of(labels, "* alpha (main)") ~= nil, vim.inspect(labels))
+    ok("p49w: choosing sets auto-core's active worktree",
+      worktree.get_active() == require("auto-core.fs.path").normalize(ws .. "/beta/feat"),
+      tostring(worktree.get_active()))
+    ok("p49w: …and never changes the cwd", vim.fn.getcwd() == cwd_before, vim.fn.getcwd())
+    dmaps = keymap_table(b2)
+    ok("p49w: debug pane maps w", rawget(dmaps, "w") ~= nil)
+    vim.ui.select = real_select
+
+    -- A non-repository anchor says what to do about it.
+    local v2 = header.values({ worktree = { is_repo = false, label = "nvim-plugins", source = "cwd" },
+      env = {}, base = {}, runtimes = {}, tests = {} })
+    ok("p49w: a non-repository row says `w` chooses one", v2.worktree.text:find("w to choose one", 1, true) ~= nil,
+      v2.worktree.text)
+
+    worktree.set_workspace_root(prev_ws)
+    worktree.set_active(repo)
+    vim.fn.delete(ws, "rf")
+  end
+
+  -- ── chooser errors read as messages; missing env files are labelled ──
+  -- (Lector M3b notes.) A structured error was stringified as a table
+  -- address, and a referenced env file that does not exist was offered like
+  -- any other and then failed when chosen.
+  do
+    local logm = require("auto-finder.log")
+    local real_notify, said = logm.notify, {}
+    logm.notify = function(msg) said[#said + 1] = tostring(msg) end
+    local real_set = env.set_selected
+    env.set_selected = function() return nil, { code = "boom", message = "injected: cannot select" } end
+    stub_select(function(items) return index_of(items, "hdr.env") end)
+    header.choose_env()
+    env.set_selected = real_set
+    ok("p49e: a structured chooser error shows its message, not a table address",
+      #said == 1 and said[1]:find("injected: cannot select", 1, true) ~= nil
+        and said[1]:find("table: 0x", 1, true) == nil, vim.inspect(said))
+
+    local pm, pe = store.add({ name = "hdr-missing-ref", kind = "run", program = "sh",
+      env_files = { "${worktree}/nowhere.env" } }, { tier = "tracked" })
+    ok("p49e: fixture config referencing a missing env file", pm ~= nil, tostring(pe))
+    said = {}
+    local offered
+    stub_select(function(items) offered = items; return index_of(items, "nowhere.env") end)
+    header.choose_env()
+    local ml = offered and offered[index_of(offered, "nowhere.env") or 0] or ""
+    ok("p49e: a missing env file is labelled missing in the chooser",
+      tostring(ml):find("missing", 1, true) ~= nil, vim.inspect(offered))
+    ok("p49e: …and choosing it explains why instead of trying",
+      env.get_selected() == nil and #said == 1 and said[1]:find("does not exist", 1, true) ~= nil,
+      vim.inspect(said) .. " selected=" .. tostring(env.get_selected()))
+    store.remove("hdr-missing-ref", { tier = "tracked" })
+    logm.notify = real_notify
+    vim.ui.select = real_select
+  end
+
   -- ── degrade: an auto-run without auto-run.context ────────────────
   local saved = package.loaded["auto-run.context"]
   package.loaded["auto-run.context"] = nil
