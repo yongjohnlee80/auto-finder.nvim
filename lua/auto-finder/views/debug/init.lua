@@ -623,10 +623,9 @@ local function _render(bufnr)
     emit_bucket_header("entries", count)
     if not M._collapsed.entries then
       if count == 0 then
-        -- Names what actually creates one: no key in this pane does (`a`
-        -- EXPORTS a config), so the old "`a` scaffolds one" sent users to a
-        -- key that could not help. Pane-local creation is ADR 0199 M5.
-        local l = "  (no debug/run configs — <leader>rc scaffolds one, :AutoRun import reads launch.json)"
+        -- Names the keys that create one, both in this pane (ADR 0199 §6.2):
+        -- `a` adds an entry point, `I` imports from launch.json.
+        local l = "  (no debug/run configs — `a` adds one, `I` imports launch.json)"
         lines[#lines + 1] = l
         mark(#lines - 1, 0, #l, HL.empty)
       end
