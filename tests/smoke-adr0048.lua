@@ -1244,6 +1244,10 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
       end
     end
   end
+  -- Let every render already queued via vim.schedule run BEFORE an action
+  -- whose own event is under test; otherwise a leftover render picks up the
+  -- new state and passes the cell with the subscription deleted (measured).
+  local function settle() vim.wait(300, function() return false end) end
   local function wait_for(view, buf, kind, needle)
     vim.wait(1000, function()
       local l = row_line(view, buf, kind)
@@ -1287,6 +1291,7 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
   ok("p49: Test config shows the resolver's answer and its source (first)",
     tc:find("go: " .. first .. " (first)", 1, true) ~= nil, tc)
 
+  settle()
   cfgm.pick("go", other)
   tc = wait_for(tests_view, b, "state-test-config", "(picked)") or ""
   ok("p49: a pick re-renders the row (run.config:changed) and says (picked)",
@@ -1310,6 +1315,7 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
   st = store.read_state(); st.test_picks = nil; store.write_state(st)
   exec.clear_pick(nil)
 
+  settle()
   env.set_selected(repo .. "/hdr.env")
   local el = wait_for(tests_view, b, "state-env", "hdr.env") or ""
   ok("p49: selecting an env file re-renders Env (run.env:changed) with its path",
@@ -1322,6 +1328,7 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
   env.set_selected(nil)
   wf(repo .. "/hdr.env", "HDR=1\n")
 
+  settle()
   import.set_selected("HdrBase")
   local bl = wait_for(tests_view, b, "state-base", "HdrBase") or ""
   ok("p49: selecting a base re-renders Base with its name",
@@ -1418,9 +1425,17 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
 
   -- ── a worktree switch re-renders BOTH panes on its own event ─────
   -- Nothing else is rendered by the cell: the only trigger is auto-core's
-  -- core.active_worktree:changed.
-  worktree.set_active(repo2)
+  -- core.active_worktree:changed. DRAIN first: the cells above queue renders
+  -- via vim.schedule, and measured on VM43 thirteen of them were still pending
+  -- here — they flushed after the switch and turned this cell green with the
+  -- subscription deleted. Draining, then asserting the panes still show the
+  -- OLD worktree, leaves the switch's own event as the only way to pass.
+  settle()
   local label2 = vim.fn.fnamemodify(repo2, ":t")
+  ok("p49: precondition — both headers still show the previous worktree",
+    not (row_line(tests_view, b, "state-worktree") or ""):find(label2, 1, true)
+      and not (row_line(debug_view, b2, "state-worktree") or ""):find(label2, 1, true))
+  worktree.set_active(repo2)
   local t1 = wait_for(tests_view, b, "state-worktree", label2) or ""
   local t2 = wait_for(debug_view, b2, "state-worktree", label2) or ""
   ok("p49: switching the active worktree re-renders the tests header",
