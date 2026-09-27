@@ -12,13 +12,12 @@
 ---  - Header line with the discovery root + file/position counts,
 ---    plus the live scan state (`scanning…` / structured cap
 ---    report when a bounded scan aborts — no-silent-caps rule).
----  - A "Config" section above Env: the `kind=test` VSCode
----    `launch.json` configs auto-run parses, with a `*` marker on the
----    per-repo selected config. Selecting one makes it the active base
----    merged into every subsequent launch (env/build_flags/etc.).
----    Shared renderer/actions in `views/_config_section.lua` (debug
----    view shows `kind=debug`). `o` expands resolved fields with env
----    VALUES masked (§8.2).
+---  - A "Test configs" section above Env (ADR 0199 §6.2): the auto-run
+---    store's `kind=test` configs, a `*` on the one that applies to each
+---    runtime with the resolver's reason, and the shared per-kind pick as
+---    its own row. `s` picks / clears, `a` creates one. Renderer/actions
+---    in `views/_test_configs.lua`. (It replaced a launch.json "Config"
+---    section; the state header's `b` chooses that base now.)
 ---  - An "Env" section (§8.4, r5) above the position tree: candidate
 ---    env files with a `*` marker on the per-repo selection, rows
 ---    dimmed when the file is missing. Shared renderer/actions in
@@ -84,7 +83,7 @@ local FILETYPE = "auto-finder"
 -- user `:hi AutoFinderTests*` overrides always win (`default = true`).
 local HL = {
   header       = "AutoFinderTestsHeader",      -- top status line
-  config_header = "AutoFinderTestsConfigHeader", -- Config section header
+  config_header = "AutoFinderTestsConfigHeader", -- Test configs section header
   env_header  = "AutoFinderTestsEnvHeader",   -- Env section header (§8.4)
   scan_state  = "AutoFinderTestsScanState",   -- scanning… / cap report
   scan_capped = "AutoFinderTestsScanCapped",  -- the cap warning lines
@@ -164,9 +163,9 @@ M._bufnr = nil
 
 -- Per-buffer row metadata, in render order. Shapes:
 --   { kind="header",       lnum }
---   { kind="config-header", lnum }          -- Config section header
---   { kind="config",        lnum, name, runtime, selected }
---   { kind="config-detail", lnum, name }    -- expanded field child
+--   { kind="test-configs-header", lnum }    -- Test configs section header
+--   { kind="test-config",   lnum, name, runtime }
+--   { kind="test-shared-pick", lnum, name } -- the shared per-kind pick
 --   { kind="env-header", lnum }             -- Env section header (§8.4)
 --   { kind="env-file",   lnum, path, source, exists, selected, synthetic? }
 --   { kind="env-var",    lnum, path, key, file_lnum }
@@ -225,7 +224,7 @@ local env_section = require("auto-finder.views._env_section")
 
 -- Shared Config-section renderer/actions (launch-config selection) —
 -- the tests view passes kind="test"; the debug view kind="debug".
-local config_section = require("auto-finder.views._config_section")
+local test_configs = require("auto-finder.views._test_configs")
 
 -- Pseudo position-id keying the Env section's collapse state inside
 -- M._collapsed / the persisted `tests_collapsed` table. Real position
@@ -437,30 +436,14 @@ local function _render(bufnr)
     lines[#lines + 1] = ""
   end
 
-  -- ── Config section (launch-config selection) — above Env ─────
-  do
-    local cfg_list, cfg_reason = config_section.collect("test")
-    local collapsed = M._collapsed[CONFIG_SECTION_ID] == true
-    local chevron = collapsed and "▶ " or "▼ "
-    local label = string.format("Config (%d)", cfg_list and #cfg_list or 0)
-    lines[#lines + 1] = chevron .. label
-    local lnum0 = #lines - 1
-    mark(lnum0, 0, #chevron, HL.chevron)
-    mark(lnum0, #chevron, #chevron + #label, HL.config_header)
-    rows[#rows + 1] = { kind = "config-header", lnum = lnum0 + 1 }
-    if not collapsed then
-      config_section.emit({
-        list     = cfg_list,
-        reason   = cfg_reason,
-        kind     = "test",
-        lines    = lines,
-        mark     = mark,
-        rows     = rows,
-        expanded = M._expanded,
-      })
-    end
-    lines[#lines + 1] = ""
-  end
+  -- ── Test configs (ADR 0199 §6.2) — above Env ─────────────────
+  test_configs.emit({
+    lines = lines, rows = rows, mark = mark,
+    collapsed = M._collapsed[CONFIG_SECTION_ID] == true,
+    hl = { chevron = HL.chevron, header = HL.config_header, name = HL.test,
+           marker = HL.glyph_pass, note = HL.duration, empty = HL.empty },
+  })
+  lines[#lines + 1] = ""
 
   -- ── Env section (§8.4, r5) — above the position tree ──────────
   do
@@ -658,12 +641,12 @@ end
 local function _open(row)
   if not row then return end
 
-  if row.kind == "config-header" then
+  if row.kind == "test-configs-header" then
     _toggle_collapsed({ id = CONFIG_SECTION_ID, type = "dir" })
     _rerender()
     return
   end
-  if config_section.open(row, _open_file) then return end
+  if test_configs.open(row, _open_file) then return end
   if row.kind == "env-header" then
     -- Persisted via the same dir mechanism as folder collapse.
     _toggle_collapsed({ id = ENV_SECTION_ID, type = "dir" })
@@ -847,12 +830,8 @@ end
 ---@param row table?
 local function _toggle_expand(row)
   if not row then return end
-  if row.kind == "config-header" then
+  if row.kind == "test-configs-header" then
     _toggle_collapsed({ id = CONFIG_SECTION_ID, type = "dir" })
-    _rerender()
-    return
-  end
-  if config_section.toggle_expand(row, M._expanded) then
     _rerender()
     return
   end
@@ -1015,7 +994,7 @@ end
 ---`O`: toggle the WHOLE tree open/closed. Semantics: if ANY container
 ---or section is currently open, collapse everything; only when nothing
 ---is open does it expand everything (short-circuits on the first open
----item). Structure only — the position tree's containers + the Config /
+---item). Structure only — the position tree's containers + the Test configs /
 ---Env section headers — never the per-row `o` detail expansions. Built
 ---for large repos where you want to hide thousands of tests in one key.
 local function _toggle_all()
@@ -1092,31 +1071,37 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.tests: stop running test jobs")
   set("s", function()
       local row = _row_under_cursor(panel_winid)
-      -- On a Config or Env row: select THAT row, as before. Anywhere else —
+      -- On a Test config row: pick / clear it for its runtime. On an Env row:
+      -- select THAT file, as before. Anywhere else —
       -- including the header's Env row — open the env chooser, so the key
       -- works from wherever the cursor is (ADR 0199 §5.2).
       if row and row.kind ~= "state-env" then
-        if config_section.select(row) then return end
+        if test_configs.select(row) then return end
         if env_section.select(row) then return end
       end
       require("auto-finder.views._state_header").choose_env()
     end,
-    "auto-finder.tests: select the env file (on a Config/Env row: that row; elsewhere: choose from a list)")
+    "auto-finder.tests: Test config row → pick/clear it for its runtime; Env row → select that file; elsewhere → choose the env file")
   set("w", function() require("auto-finder.views._state_header").choose_worktree() end,
     "auto-finder.tests: choose the Active worktree (auto-core's — every plugin follows it; the cwd stays)")
   set("b", function() require("auto-finder.views._state_header").choose_base() end,
     "auto-finder.tests: choose the Base — the launch config merged under every run, debug and test")
   set("c", function() require("auto-finder.views._state_header").choose_test_config() end,
     "auto-finder.tests: choose the test config for a runtime (writes that runtime's pick)")
-  set("e", function() env_section.edit_var(_row_under_cursor(panel_winid)) end,
-    "auto-finder.tests: edit the env var's value under cursor (vim.ui.input, prefilled)")
+  set("e", function()
+      local row = _row_under_cursor(panel_winid)
+      if env_section.edit_var(row) then return end
+      test_configs.open(row, _open_file)
+    end,
+    "auto-finder.tests: env var → edit its value (prefilled); test config → open its file")
   set("a", function()
     local row = _row_under_cursor(panel_winid)
+    if test_configs.add(row) then return end
     if row and (row.kind == "env-file" or row.kind == "env-header") then
       env_section.add(row.kind == "env-file" and row or nil)
     end
   end,
-    "auto-finder.tests: add KEY=VALUE to the env file under cursor (Env header targets the selected file)")
+    "auto-finder.tests: Test configs → create a test config; env file/header → add KEY=VALUE")
 
   require("auto-finder.shared.help").install_help_keymap("tests", bufnr)
 end
