@@ -26,8 +26,10 @@ today's look.
 - **A toggle storm is bounded** by the expanded set and the scanner's interval.
   It can no longer reach a directory you have not expanded.
 - **Git colours on names** again, from one shared `git status --porcelain=v2 -z`
-  per repo per settled change (nested repos answered by their own read). A clean
-  file next to a new one is no longer coloured untracked (the fork's rule was).
+  per repo per settled change (nested repos answered by their own read). A
+  commit or `git add` from a terminal recolours too: the view holds one narrow
+  `git.watch` per shown repo, released on hide. A clean file next to a new one
+  is no longer coloured untracked (the fork's rule was).
 - **Same look**: icons, indent markers, dotfile dimming, diagnostics signs,
   cut/copy marks, the root row, and the panel window's options, byte-for-byte
   against goldens captured from the fork (`tests/parity/`). Every highlight is an

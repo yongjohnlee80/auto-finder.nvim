@@ -3,9 +3,9 @@
 -- Run: nvim --headless -u NONE -l tests/severance.lua
 --
 -- A static check over the shipped tree (lua/, plugin/) and the suites (tests/): no module, require,
--- config key, dependency or comment names neo-tree, nui or plenary — except the ONE named exemption
--- below, which the forked-codebase-severance convention requires to carry its reason here, at the
--- guard, and to be checked for its premise and its liveness (named-exemptions-have-four-parts).
+-- config key, dependency or comment names neo-tree, nui or plenary — except the named exemptions
+-- below, which the forked-codebase-severance convention requires to carry their reason here, at the
+-- guard, and to be checked for their premise and their liveness (named-exemptions-have-four-parts).
 
 local root = vim.fn.fnamemodify(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p"), ":h:h")
 dofile(root .. "/tests/_sandbox.lua")("severance")
@@ -26,9 +26,35 @@ end
 -- tests/parity/compare.lua is exempt for the same names and a second reason: the goldens it compares
 -- against were recorded from the retired fork, so their spans NAME NeoTree* groups, and the gate maps
 -- AutoFinder* back through the alias table to compare them.
+--
+-- tests/bench/files-panel.lua drives the retired fork as the BEFORE baseline of the ADR-0200 benchmark: it
+-- passes autovim's old `neo_tree` block and puts nui / plenary on the runtimepath for that run only. It
+-- requires no fork module itself, and every such name sits behind `MODE == "before"`.
+local function names_no_retired_module(c)
+  return c:find("neotree") == nil and c:find("require%s*%(?%s*[\"']auto%-finder%.neo") == nil
+end
 local EXEMPT = {
-  ["lua/auto-finder/views/files/highlights.lua"] = { allowed = { "NeoTree" } },
-  ["tests/parity/compare.lua"] = { allowed = { "NeoTree" } },
+  ["lua/auto-finder/views/files/highlights.lua"] = {
+    allowed = { "NeoTree" },
+    live = function(c) return c:find("NeoTree") ~= nil end,
+    premise = function(c) return names_no_retired_module(c) and c:find("neo%-tree") == nil end,
+  },
+  ["tests/parity/compare.lua"] = {
+    allowed = { "NeoTree" },
+    live = function(c) return c:find("NeoTree") ~= nil end,
+    premise = function(c) return names_no_retired_module(c) and c:find("neo%-tree") == nil end,
+  },
+  ["tests/bench/files-panel.lua"] = {
+    allowed = { "neo_tree", "neo-tree", "plenary", "nui" },
+    live = function(c) return c:find("OPTS.neo_tree", 1, true) ~= nil end,
+    premise = function(c)
+      -- the fork is only ever the before run's configuration
+      local before_branch = c:match('if MODE == "before" then(.-)\nelse')
+      local outside = c:gsub('if MODE == "before" then.-\nelse', "")
+      return names_no_retired_module(c) and before_branch ~= nil and before_branch:find("neo_tree") ~= nil
+        and outside:find("neo_tree") == nil
+    end,
+  },
 }
 
 -- Forbidden anywhere else. Case-sensitive Lua patterns.
@@ -105,13 +131,12 @@ for _, rel in ipairs({ "lua/auto-finder/neotree.lua", "lua/auto-finder/neotree/i
 end
 
 print("\n[3] the named exemptions: premise and liveness")
-for rel in pairs(EXEMPT) do
+for rel, ex in pairs(EXEMPT) do
   local content = read(rel)
   ok("LIVE: the exempt file exists: " .. rel, content ~= nil)
-  ok("LIVE: " .. rel .. " still names NeoTree* groups (an unused exemption excuses the next thing written there)",
-    content ~= nil and content:find("NeoTree") ~= nil)
-  ok("PREMISE: " .. rel .. " names no retired module path",
-    content ~= nil and content:find("neotree") == nil and content:find("neo%-tree") == nil)
+  ok("LIVE: " .. rel .. " still uses what it is exempt for (an unused exemption excuses the next thing written there)",
+    content ~= nil and ex.live(content))
+  ok("PREMISE: " .. rel .. " holds to the reason it is exempt", content ~= nil and ex.premise(content))
 end
 do
   local hl = read("lua/auto-finder/views/files/highlights.lua")
