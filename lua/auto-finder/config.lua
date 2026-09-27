@@ -9,8 +9,7 @@ local M = {}
 ---@field sections string[]      -- ordered list of section names enabled this session
 ---@field view_modules? table<string, string>     -- ADR 0026: third-party view registry (name → require path)
 ---@field section_modules? table<string, string>  -- deprecated alias for view_modules; accepted in v0.2.x
----@field files table            -- per-section opts forwarded to neo-tree's `filesystem` source on setup; consumer keymap overrides go in `files.window.mappings`
----@field repos table            -- per-section opts forwarded to the `auto-finder-repos` source on setup; consumer keymap overrides go in `repos.window.mappings`
+---@field files AutoFinderFilesConfig
 ---@field hijack_directories boolean  -- replace directory buffers with the panel + cwd at the dir
 ---
 ---NOTE: the `side` field was removed in v0.1.x — the panel is now
@@ -20,20 +19,22 @@ local M = {}
 ---consumer configs; persisted `panel.side` values in the store are
 ---also ignored on load.
 ---
----Per-section config (one table per section name) is forwarded to
----the underlying neo-tree source's default config at setup time.
----Consumers can inject custom keymaps without modifying the plugin:
+---`apply()` warns once about any option it does not recognise (see
+---`M.warn_unknown`) and drops it from the merged config.
+
+---@class AutoFinderFilesConfig
+---@field follow boolean             -- reveal the entered file while the files slot is shown
+---@field auto_expand_width boolean  -- widen the panel (up to width.max) to fit the longest row, unless pinned
+---@field never_show string[]        -- names never listed (default { ".git", "node_modules" })
+---@field mappings table<string, string|function|false>  -- lhs → files action name | function | false (unmap)
+---
+---Example — add a key and drop one:
 ---```lua
 ---opts = {
----  sections = { "config", "files", "repos" },
----  repos = {
----    window = {
----      mappings = {
----        ["<C-x>"] = "close_node",
----        -- … any binding the auto-finder-repos source's commands
----        --   module exposes (open / open_split / open_vsplit /
----        --   open_tabnew / refresh / etc.)
----      },
+---  files = {
+---    mappings = {
+---      ["<C-s>"] = "open_split",   -- any name from views/files ACTIONS
+---      ["y"] = false,              -- unmap
 ---    },
 ---  },
 ---}
@@ -90,31 +91,20 @@ M.defaults = {
   section_modules = nil,
   files = {
     -- Reveal the file backing the currently focused window in the
-    -- files tree on every BufEnter. Maps to neo-tree's native
-    -- `filesystem.follow_current_file = { enabled = true }` when
-    -- true. Default ON because users commonly expect the tree to
-    -- track the active buffer (matches LazyVim defaults).
+    -- files tree on every BufEnter while the files slot is shown.
+    -- Default ON (matches LazyVim defaults).
     follow = true,
-  },
-  -- Per-section opts for the `repos` section. Forwarded to the
-  -- `auto-finder-repos` neo-tree source on setup so consumers can
-  -- inject window mappings without forking the plugin.
-  --
-  -- Discovery (which dirs are git repos, what counts as a worktree,
-  -- the bare-vs-`.git` layout detection) and the active root are
-  -- delegated to worktree.nvim — no parallel options live here.
-  -- Configure those via `require("worktree").setup({ root = …,
-  -- bare_dir = … })` and the repos section picks them up at render
-  -- time.
-  repos = {
-    -- Reveal the repo containing the currently focused buffer in
-    -- the repos panel on every BufEnter. Implemented as a BufEnter
-    -- autocmd that walks up from the buffer's path until it hits a
-    -- direct child of `core.workspace_root`, then reveals it.
-    -- Default OFF — the active-repo signal is noisier than the
-    -- active-file signal, and many users don't switch repos
-    -- mid-session.
-    follow = false,
+    -- Widen the panel to fit the longest row (up to `width.max`); a user
+    -- pin (`:AutoFinder resize`) always wins. Default ON: autovim ran the
+    -- retired files pane with its auto_expand_width on.
+    auto_expand_width = true,
+    -- Names never listed in the tree or in `/` search results. Nobody
+    -- browses `.git/objects`, and an installed `node_modules` dwarfs
+    -- the project around it.
+    never_show = { ".git", "node_modules" },
+    -- Extra or overriding keymaps for the files slot (see the
+    -- AutoFinderFilesConfig example above).
+    mappings = {},
   },
   -- Per-section opts for the `dbase` section, forwarded to
   -- `auto-finder.sections.dbase` via `section.configure(opts)` on setup so the
@@ -126,21 +116,6 @@ M.defaults = {
   -- and any consumer passing `dbase = {}` keep working.
   dbase = {},
   hijack_directories = true,
-  -- Forwarded as-is to `require("auto-finder.neotree").setup()`
-  -- before any section mounts. The forked neo-tree no longer needs
-  -- a separate consumer plugin spec — auto-finder's `setup()` calls
-  -- the fork's `setup()` with whatever you put here. Use it for
-  -- `window.auto_expand_width`, `filesystem.filtered_items`,
-  -- `filesystem.components`, `default_component_configs`, etc.
-  --
-  -- Phase 5 of the fork-neo-tree refactor (v0.1.3): consumer-side
-  -- `lua/plugins/neo-tree.lua` was deleted in autovim and its opts
-  -- moved here, because with both upstream `neo-tree.nvim` and
-  -- auto-finder's `lua/neo-tree/` shim shipping the same require
-  -- path, runtimepath ordering picked one or the other
-  -- non-deterministically. Routing through `cfg.neo_tree` gets the
-  -- consumer's opts to OUR fork unambiguously.
-  neo_tree = {},
 }
 
 ---@param cfg AutoFinderConfig
@@ -181,6 +156,31 @@ function M.validate(cfg)
   return nil
 end
 
+-- Top-level keys accepted beyond `M.defaults`: `side` (ignored since v0.1.x), `log_level` (forwarded
+-- to the logger), `section_modules` (deprecated alias of `view_modules`).
+M.ACCEPTED = { side = true, log_level = true, section_modules = true }
+
+---Warn once about options auto-finder does not know — a typo, or a key an older release read that no
+---longer exists — instead of ignoring them silently. Checks the top level and `files`.
+---@param user_opts table?
+function M.warn_unknown(user_opts)
+  if type(user_opts) ~= "table" then return end
+  local unknown = {}
+  for k in pairs(user_opts) do
+    if M.defaults[k] == nil and not M.ACCEPTED[k] then unknown[#unknown + 1] = tostring(k) end
+  end
+  if type(user_opts.files) == "table" then
+    for k in pairs(user_opts.files) do
+      if M.defaults.files[k] == nil then unknown[#unknown + 1] = "files." .. tostring(k) end
+    end
+  end
+  if #unknown == 0 then return end
+  table.sort(unknown)
+  pcall(function()
+    require("auto-finder.log").warn("config", "unknown option(s) ignored: " .. table.concat(unknown, ", "))
+  end)
+end
+
 ---@param user_opts table?
 ---@return AutoFinderConfig
 function M.apply(user_opts)
@@ -191,7 +191,11 @@ function M.apply(user_opts)
   if user_opts and user_opts.width and user_opts.width.default ~= nil then
     user_opts.width.percentage = user_opts.width.percentage  -- keep if explicit
   end
+  M.warn_unknown(user_opts)
   local merged = vim.tbl_deep_extend("force", {}, M.defaults, user_opts or {})
+  for k in pairs(merged) do
+    if M.defaults[k] == nil and not M.ACCEPTED[k] then merged[k] = nil end
+  end
   -- ADR 0026 Phase 2 backwards-compat: merge the legacy
   -- `section_modules` key into `view_modules` so the registry's
   -- single source of truth is the new name. Both keys are accepted
@@ -229,6 +233,11 @@ function M.apply(user_opts)
       and user_opts and user_opts.width and user_opts.width.default
       and not (user_opts.width.percentage) then
     merged.width.percentage = nil
+  end
+  -- A consumer's `files.never_show` replaces the default list (deep_extend
+  -- would merge the two lists index by index).
+  if user_opts and type(user_opts.files) == "table" and type(user_opts.files.never_show) == "table" then
+    merged.files.never_show = vim.deepcopy(user_opts.files.never_show)
   end
   local err = M.validate(merged)
   if err then

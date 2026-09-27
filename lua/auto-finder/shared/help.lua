@@ -1,12 +1,10 @@
 ---auto-finder.shared.help — the `?` keymap overlay every view shares (ADR-0200 §4.9).
 ---
----Moved unchanged from the retired shared/neotree.lua, where it lived although it never depended on
----neo-tree: the overlay lists the view buffer's actual normal-mode mappings (nvim_buf_get_keymap), so it
+---The overlay lists the view buffer's actual normal-mode mappings (nvim_buf_get_keymap), so it
 ---shows whatever the view and any consumer override wired, and prefers auto-core.ui.float.help_overlay,
 ---falling back to a plain float.
 ---
----Every view sets a `desc` on each mapping, so no entry renders blank (the fork left descriptions empty for
----mappings bound to Lua functions).
+---Every view sets a `desc` on each mapping, so no entry renders blank.
 ---@module 'auto-finder.shared.help'
 
 local M = {}

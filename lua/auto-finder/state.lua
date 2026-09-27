@@ -14,8 +14,8 @@
 ---    == "number"` checks
 ---  - **mirror sync**: a single watch in setup() keeps `M.state.user_
 ---    width` and `M.state.section` consistent with the namespace, so
----    the existing reader sites (winbar status, neo-tree fork's
----    pin-check, M.open's default-section fallback) keep working
+---    the existing reader sites (winbar status, the files/buffers
+---    auto-expand pin check, M.open's default-section fallback) keep working
 ---    unchanged
 ---  - **migration shim**: the one-shot legacy-store→namespace seed
 ---    runs here (called from init.lua's setup once after store.load)

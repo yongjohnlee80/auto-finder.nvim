@@ -31,14 +31,13 @@ local function help_lines()
     "  help, ?, :h                  show this help (use `help <topic>` to drill in)",
     "  focus <N|name>               switch section (e.g. focus 1, focus files)",
     "  panel resize <N>             pin panel width to N cols (HARD CAP, in [min..max])",
-    "  panel reset | dynamic        clear pin; let neo-tree auto-expand again",
+    "  panel reset | dynamic        clear pin; let the tree auto-expand again",
     "  panel show                   display mode, default, range, live width",
     "  files show hidden            show .gitignored files in the tree",
     "  files show dotfiles          show files starting with `.` in the tree",
     "  files hide hidden            hide .gitignored files",
     "  files hide dotfiles          hide files starting with `.`",
     "  files follow on|off|toggle   reveal the active buffer in the files tree on BufEnter",
-    "  repos follow on|off|toggle   reveal the active buffer's repo in the repos panel",
     "  slot add <type>              add a section of <type> at the end of the slot list",
     "  slot remove <N>              remove section at slot N (N>=1; slot 0 is protected)",
     "  slot modify <N> <type>       replace the section at slot N with <type>",
@@ -50,51 +49,29 @@ local function help_lines()
     "  clear                        wipe history above the prompt",
     "  quit                         close the panel",
     "",
-    "  defaults: hidden + dotfiles are SHOWN; files-follow ON, repos-follow OFF.",
+    "  defaults: hidden + dotfiles are SHOWN; files-follow ON.",
     "",
   }
 end
 
----Mutate neo-tree's runtime config for the filesystem source's
----filtered_items, then refresh the active section so the change is
----visible immediately.
+---Set a file-visibility preference. The canonical store is
+---`auto-core.files` (show_hidden = gitignored files, show_dotfiles =
+---names starting with "."); the files view watches both and applies a
+---change live, and other consumers (md-harpoon's picker) read the same
+---keys.
 ---@param what "hidden"|"dotfiles"
 ---@param show boolean
 ---@return string|nil err
 local function set_files_filter(what, show)
-  local ok, neo = pcall(require, "auto-finder.neotree")
-  if not ok then return "auto-finder.neotree is not installed" end
-  if type(neo.config) ~= "table" then return "auto-finder.neotree config is not loaded yet" end
-  neo.config.filesystem = neo.config.filesystem or {}
-  local fi = neo.config.filesystem.filtered_items or {}
-  if what == "hidden" then
-    -- "hidden" → gitignored files. neo-tree's `hide_gitignored = false`
-    -- makes them appear in the tree; `visible = true` styles them as
-    -- visible-but-marked. We flip both for "show" so the change is
-    -- consistent with neo-tree's two-axis filtering.
-    fi.hide_gitignored = not show
-    if show then fi.visible = true end
-  elseif what == "dotfiles" then
-    fi.hide_dotfiles = not show
-    if show then fi.visible = true end
-  else
+  if what ~= "hidden" and what ~= "dotfiles" then
     return "unknown filter '" .. tostring(what) .. "' (try hidden|dotfiles)"
   end
-  neo.config.filesystem.filtered_items = fi
-  -- Persist via the canonical auto-core.files prefs so a `files
-  -- show/hide` toggle here also propagates to other consumers
-  -- (md-harpoon's snacks-picker invocation, future plugins). No
-  -- more local store.update — the canonical prefs live in
-  -- state.namespace("core") files.show_hidden / files.show_dotfiles.
-  -- Note the negative→positive flip: store used `hide_*`, auto-core
-  -- uses `show_*`.
   local ok_core, core = pcall(require, "auto-core")
-  if ok_core and core and core.files then
-    if what == "hidden" then
-      core.files.set_show_hidden(show == true)
-    else
-      core.files.set_show_dotfiles(show == true)
-    end
+  if not (ok_core and core and core.files) then return "auto-core is not installed" end
+  if what == "hidden" then
+    core.files.set_show_hidden(show == true)
+  else
+    core.files.set_show_dotfiles(show == true)
   end
   return nil
 end
@@ -115,28 +92,9 @@ local function resolve_follow_action(action, current)
     .. tostring(action) .. "')"
 end
 
----Update neo-tree's runtime filesystem.follow_current_file.enabled
----so toggling at runtime takes effect on the next BufEnter without
----needing setup() to re-run.
----@param enabled boolean
-local function set_neotree_follow(enabled)
-  local ok, neo = pcall(require, "auto-finder.neotree")
-  if not ok or type(neo.config) ~= "table" then return end
-  neo.config.filesystem = neo.config.filesystem or {}
-  local fcf = neo.config.filesystem.follow_current_file
-  if type(fcf) ~= "table" then
-    fcf = { leave_dirs_open = false }
-    neo.config.filesystem.follow_current_file = fcf
-  end
-  fcf.enabled = enabled == true
-end
-
----Toggle a section's `cfg.<section>.follow` flag in-place on the
----live config, mirroring the change into neo-tree's runtime config
----for the files case so the BufEnter reveal turns on/off immediately.
----For repos, the autocmd installed by init.lua reads the flag at
----fire time, so the in-memory mutation is enough.
----@param section "files"|"repos"
+---Toggle `cfg.files.follow` in-place on the live config. The files
+---view reads the flag on every BufEnter, so the change applies at once.
+---@param section "files"
 ---@param action string|nil  -- "on" | "off" | "toggle"
 ---@return string|nil err
 local function set_follow(section, action)
@@ -149,9 +107,6 @@ local function set_follow(section, action)
   local new_state, err = resolve_follow_action(action, current)
   if err then return err end
   af.state.config[section].follow = new_state
-  if section == "files" then
-    set_neotree_follow(new_state)
-  end
   -- v0.2.70: persist the toggle in the auto-finder state namespace so
   -- it survives nvim restarts (setup() reads it back and overrides the
   -- config default). Best-effort — a persistence failure must not
@@ -184,7 +139,6 @@ local function status_lines()
     live = tostring(vim.api.nvim_win_get_width(af.state.panel_winid))
   end
   local files_follow = cfg.files and cfg.files.follow == true
-  local repos_follow = cfg.repos and cfg.repos.follow == true
   return {
     "",
     "  section: " .. tostring(af.state.section),
@@ -195,8 +149,7 @@ local function status_lines()
       "   min: " .. tostring(w.min) ..
       "   max: " .. tostring(w.max) ..
       "   cols: " .. tostring(cols),
-    "  follow  files: " .. (files_follow and "on" or "off") ..
-      "   repos: " .. (repos_follow and "on" or "off"),
+    "  follow  files: " .. (files_follow and "on" or "off"),
     "  enabled: " .. table.concat(labels, " "),
     "",
   }
@@ -471,7 +424,7 @@ local function dispatch(input)
       end
     elseif sub == "reset" or sub == "dynamic" then
       -- `dynamic` is the user-facing alias for `reset` — both clear
-      -- the pin and re-enable neo-tree's auto_expand_width.
+      -- the pin and let the files/buffers views auto-expand again.
       vim.schedule(function() af.reset_width() end)
     elseif sub == "show" then
       emit(panel_show_lines())
@@ -501,29 +454,11 @@ local function dispatch(input)
           emit({ "files: " .. err })
         else
           emit({ "files: " .. action .. " " .. what })
-          -- Re-render the files section so the change is visible
-          -- immediately. If the user is currently on a different
-          -- section, the change still takes effect on next focus.
-          vim.schedule(function() af.reload() end)
         end
       end
     else
       emit({ "files: action must be 'show', 'hide', or 'follow' (got '"
         .. tostring(action) .. "')" })
-    end
-
-  elseif verb == "repos" then
-    local action = toks[2]
-    if action == "follow" then
-      local err = set_follow("repos", toks[3])
-      if err then
-        emit({ "repos follow: " .. err })
-      else
-        local state = af.state.config.repos.follow and "on" or "off"
-        emit({ "repos follow: " .. state })
-      end
-    else
-      emit({ "repos: action must be 'follow' (got '" .. tostring(action) .. "')" })
     end
 
   elseif verb == "slot" then
@@ -746,7 +681,7 @@ local function complete_at(prompt, cursor_col)
 
   local candidates
   if #prev_toks == 0 then
-    candidates = { "help", "?", ":h", "focus", "panel", "files", "repos", "slot",
+    candidates = { "help", "?", ":h", "focus", "panel", "files", "slot",
                    "reload", "status", "clear", "quit" }
   elseif #prev_toks == 1 and prev_toks[1] == "focus" then
     -- Numeric indices and section names from the live registry.
@@ -783,10 +718,6 @@ local function complete_at(prompt, cursor_col)
       and (prev_toks[2] == "show" or prev_toks[2] == "hide") then
     candidates = { "hidden", "dotfiles" }
   elseif #prev_toks == 2 and prev_toks[1] == "files" and prev_toks[2] == "follow" then
-    candidates = { "on", "off", "toggle" }
-  elseif #prev_toks == 1 and prev_toks[1] == "repos" then
-    candidates = { "follow" }
-  elseif #prev_toks == 2 and prev_toks[1] == "repos" and prev_toks[2] == "follow" then
     candidates = { "on", "off", "toggle" }
   elseif #prev_toks == 1 and prev_toks[1] == "slot" then
     candidates = { "add", "remove", "modify", "assign", "types" }
@@ -844,7 +775,7 @@ local function complete_at(prompt, cursor_col)
   elseif #prev_toks == 1 and prev_toks[1] == "help" then
     -- `help <topic>` opens the topic's help directly. Topics map to
     -- the verb groups so users discover what's available.
-    candidates = { "focus", "panel", "files", "repos", "slot", "general" }
+    candidates = { "focus", "panel", "files", "slot", "general" }
   else
     candidates = {}
   end
@@ -923,15 +854,15 @@ local TOPIC_HELP = {
     "",
     "  panel resize <N>           pin panel width to N cols (HARD CAP)",
     "                               N must satisfy width.min <= N <= width.max",
-    "  panel reset                clear the pin; let neo-tree auto-expand again",
+    "  panel reset                clear the pin; let the tree auto-expand again",
     "  panel dynamic              alias for `panel reset`",
     "  panel show                 display mode / default / range / live",
     "",
     "  Modes:",
-    "    pinned   panel is locked to the pin; neo-tree's auto_expand_width",
-    "             is forced off on the live state so it can't fight the pin.",
-    "    dynamic  panel starts at width.default; neo-tree's auto_expand_width",
-    "             is free to grow it on demand. (default mode at startup)",
+    "    pinned   panel is locked to the pin; the files/buffers views never",
+    "             widen it.",
+    "    dynamic  panel starts at width.default; the files/buffers views",
+    "             widen it to fit the longest row. (default mode at startup)",
     "",
   },
   files = {
@@ -943,24 +874,10 @@ local TOPIC_HELP = {
     "  files follow on|off|toggle   reveal the active buffer in the files tree",
     "",
     "  defaults: hidden + dotfiles are SHOWN; files-follow is ON.",
-    "  follow maps to neo-tree's `filesystem.follow_current_file` and",
-    "  fires on every BufEnter. Toggling here updates the live runtime",
-    "  config (no setup() re-run needed) and persists across restarts",
-    "  (v0.2.70; stored in the auto-finder state namespace).",
-    "",
-  },
-  repos = {
-    "",
-    "  repos follow on|off|toggle   reveal the active buffer's repo",
-    "                                 in the repos panel on every BufEnter",
-    "",
-    "  default: OFF — the active-repo signal is noisier than the active-",
-    "  file signal. Requires auto-core (workspace_root is resolved via",
-    "  `auto-core.git.worktree.get_workspace_root()`). Walks up from the",
-    "  buffer's path until it hits a direct child of workspace_root,",
-    "  then calls neo-tree's `reveal_file` on the auto-finder-repos",
-    "  source. No-op if the repos section's buffer isn't currently live.",
-    "  Toggles persist across restarts (v0.2.70), same as files-follow.",
+    "  follow reveals the entered file on every BufEnter while the files",
+    "  slot is shown. Toggling here updates the live config (no setup()",
+    "  re-run needed) and persists across restarts (auto-finder state",
+    "  namespace).",
     "",
   },
   slot = function()

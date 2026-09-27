@@ -1,6 +1,6 @@
 ---View — auto-run test discovery tree (ADR-0048 §8.1).
 ---
----Flat scratch-buffer view, NOT neo-tree-backed (same UX shape as
+---Flat scratch-buffer view with its own renderer (same UX shape as
 ---`auto-finder.views.todos` / `.marks`). A pure renderer over
 ---auto-run.nvim's public discovery surface: the position tree
 ---(`dir → file → namespace → test`), the last-results map, and the
@@ -1100,10 +1100,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   end,
     "auto-finder.tests: add KEY=VALUE to the env file under cursor (Env header targets the selected file)")
 
-  local ok_help, neotree_shared = pcall(require, "auto-finder.shared.neotree")
-  if ok_help and type(neotree_shared.install_help_keymap) == "function" then
-    neotree_shared.install_help_keymap("tests", bufnr)
-  end
+  require("auto-finder.shared.help").install_help_keymap("tests", bufnr)
 end
 
 -- ─── auto-refresh subscriptions ───────────────────────────────

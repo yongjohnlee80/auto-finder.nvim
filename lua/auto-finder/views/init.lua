@@ -135,10 +135,8 @@ end
 ---panel right now), or nil if no view is active. Reads
 ---`auto-finder.state.section` — the section/view number the
 ---host module tracks — and resolves it to the view name via
----the registry. Used by the five-guard `_still_current`
----predicate in `shared/neotree.lua` (ADR §2.3 — guard #4:
----"did the user switch view between the placeholder mount and
----our deferred callback?").
+---the registry. Views use it to ask "am I the view on screen?"
+---before acting on a deferred callback (the files view's follow).
 ---@return string|nil
 function M.active()
   local ok, af = pcall(require, "auto-finder")

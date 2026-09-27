@@ -1194,10 +1194,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("R", function() _render(bufnr) end,
     "auto-finder.debug: refresh")
 
-  local ok_help, neotree_shared = pcall(require, "auto-finder.shared.neotree")
-  if ok_help and type(neotree_shared.install_help_keymap) == "function" then
-    neotree_shared.install_help_keymap("debug", bufnr)
-  end
+  require("auto-finder.shared.help").install_help_keymap("debug", bufnr)
 end
 
 -- ─── auto-refresh subscriptions ───────────────────────────────

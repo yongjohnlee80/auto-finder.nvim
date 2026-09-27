@@ -10,8 +10,8 @@ M.version = "0.4.16"
 
 ---Public-surface accessor for the registered-repos registry. Lazy-
 ---loaded so consumers can `require("auto-finder").repos.add(path)`
----directly. The underlying module owns persistence + neo-tree
----source notification.
+---directly. The underlying module owns persistence + repos
+---change notification.
 M.repos = setmetatable({}, {
   __index = function(_, k) return require("auto-finder.repos")[k] end,
 })
@@ -88,8 +88,6 @@ function M.setup(user_opts)
     local log = require("auto-finder.log")
     log.setup(cfg)  -- forward cfg.log_level if set
     log.register_events({
-      "scan.started",
-      "scan.completed.slow",
       -- dbase section (auto-finder.dbase.*) — opt-in toast events
       -- for informational dbase lifecycle. ERROR-class failures
       -- (`dbase.call.failed`, `dbase.setup.failed`) are NOT in this
@@ -152,83 +150,17 @@ function M.setup(user_opts)
   end)
 
   -- v0.2.70: a follow toggle made via the admin DSL (`files follow
-  -- on|off`, `repos follow on|off`) persists in the auto-finder
-  -- state namespace and overrides the config default on the next
-  -- setup. nil = never toggled → `cfg.<section>.follow` stands.
-  -- Must run BEFORE the follow_current_file translation below so
-  -- the persisted value is what reaches neo-tree.
+  -- on|off`) persists in the auto-finder state namespace and overrides
+  -- the config default on the next setup. nil = never toggled →
+  -- `cfg.files.follow` stands. The files view reads it live.
   do
     local st = require("auto-finder.state")
-    for _, sec in ipairs({ "files", "repos" }) do
+    for _, sec in ipairs({ "files" }) do
       local persisted = st.get_follow(sec)
       if persisted ~= nil and cfg[sec] then
         cfg[sec].follow = persisted
       end
     end
-  end
-
-  -- Translate `cfg.files.follow` (per-section convenience flag) into
-  -- neo-tree's native `filesystem.follow_current_file = { enabled }`
-  -- so the filesystem source reveals the active buffer on BufEnter.
-  -- Must happen BEFORE the neotree setup call below so the merged
-  -- config carries the value into the source's defaults.
-  if cfg.files and cfg.files.follow ~= nil then
-    cfg.neo_tree = cfg.neo_tree or {}
-    cfg.neo_tree.filesystem = cfg.neo_tree.filesystem or {}
-    local existing = cfg.neo_tree.filesystem.follow_current_file
-    if existing == nil then
-      cfg.neo_tree.filesystem.follow_current_file = {
-        enabled = cfg.files.follow == true,
-        leave_dirs_open = false,
-      }
-    elseif type(existing) == "table" and existing.enabled == nil then
-      -- Don't clobber a consumer's explicit shape; only seed the
-      -- enabled flag they didn't set.
-      existing.enabled = cfg.files.follow == true
-    end
-  end
-
-  -- v0.2.4: keymap audit (ADR 0008). Inject our overrides into
-  -- cfg.neo_tree.filesystem.window.mappings BEFORE the neo-tree
-  -- setup call so consumer customizations merge on top of OURS,
-  -- not the bare upstream defaults. Adds:
-  --   * editor-routed open/split/vsplit/tabnew/<cr>/<2-LeftMouse>
-  --   * H rewired through auto-core.files.set_show_hidden
-  --   * removes e / < / > / . / <esc> (replaced with "none")
-  -- See `M._inject_keymap_overrides` for the full table.
-  M._inject_keymap_overrides(cfg)
-
-  -- v0.2.7: register every bundled neo-tree source we ship a
-  -- section module for. Our fork's `defaults.lua` declares
-  -- `sources = { "filesystem" }`, so neotree's setup pipeline
-  -- only builds `default_configs["filesystem"]`. A `buffers`
-  -- section then trips `assert(default_configs[sd.name])` at
-  -- `manager.lua:124` because the buffers default_config was
-  -- never built. Append every bundled source to `cfg.neo_tree.sources`
-  -- so each one's default_config exists at section-mount time —
-  -- even if the corresponding section isn't currently enabled
-  -- (slot DSL may add it at runtime via `slot add <type>`).
-  M._register_bundled_neotree_sources(cfg)
-
-  -- Forward the consumer's `cfg.neo_tree` table to our forked
-  -- neo-tree's setup. Phase 5: this is what gets consumer-side
-  -- `filtered_items`, `components`, `window.auto_expand_width`, etc.
-  -- to the fork rather than the upstream `neo-tree.nvim` plugin —
-  -- which used to lose the race because both shipped `lua/neo-tree.lua`.
-  -- Calling our setup() unconditionally is idempotent (neo-tree's
-  -- ensure_config caches the merge result and won't re-merge unless
-  -- new_user_config was staged).
-  pcall(function()
-    require("auto-finder.neotree").setup(cfg.neo_tree or {})
-  end)
-
-  -- If `repos` is enabled, register the auto-finder-repos source with
-  -- neo-tree so `cmd.execute({ source = "auto-finder-repos" })` works.
-  -- Order: section registry first (so we know whether repos is enabled),
-  -- then neo-tree setup (just above), THEN source registration before
-  -- any section mount can fire.
-  if require("auto-finder.views")._by_name["repos"] then
-    M._register_neotree_workspace_source(cfg.repos)
   end
 
   -- If `dbase` is enabled, forward the consumer's `cfg.dbase` (sources
@@ -259,8 +191,8 @@ function M.setup(user_opts)
   --      panel.user_width / panel.last_section on next save, so legacy
   --      values eventually drain from the JSON file.)
   --   3. Read the namespace back into M.state.user_width / M.state.section
-  --      so the existing reader sites (winbar status, neo-tree pin
-  --      check, M.open default-section fallback) keep working unchanged.
+  --      so the existing reader sites (winbar status, the auto-expand
+  --      pin check, M.open default-section fallback) keep working unchanged.
   --   4. Install watchers that re-mirror namespace → M.state on every
   --      mutation. Setters in panel/host.lua go through state_mod.set_*
   --      and trigger this.
@@ -306,11 +238,10 @@ function M.setup(user_opts)
       max     = cfg.width.max,
     },
     -- filetype intentionally nil: each section mounts its own buffer
-    -- with its own filetype (`auto-finder` for the neo-tree mounts,
+    -- with its own filetype (`auto-finder` for the views,
     -- `auto-finder-config` for the prompt section). Setting a host
     -- filetype on the scratch placeholder would conflict with the
-    -- inherit-guard test ([9]) and confuse neo-tree's command
-    -- override which keys off the source-window's filetype.
+    -- inherit-guard test ([9]).
     on_open  = function(winid)
       M.state.panel_winid = winid
       M.state.panel_width = vim.api.nvim_win_get_width(winid)
@@ -318,11 +249,9 @@ function M.setup(user_opts)
     on_close = function()
       M.state.panel_winid = nil
       -- Section on_close fanout: every cached section gets a chance
-      -- to tear down external resources before the panel buffers go
-      -- stale (notably: the files section deletes its cached
-      -- neo-tree buffer so the next reopen re-mounts fresh; without
-      -- this, neo-tree's win_enter redirect crashes on
-      -- `attempt to index local 'tree' (a nil value)`).
+      -- to tear down external resources when the panel closes (the
+      -- files and buffers views stop their watches, subscriptions and
+      -- timers — a hidden pane does no work — but keep their buffer).
       --
       -- We mutate `_bufs` in place rather than reassigning so the
       -- `state.section_buffers` alias stays valid.
@@ -376,8 +305,7 @@ function M.setup(user_opts)
   -- Wrap `registry:focus` so EVERY focus dispatch (admin REPL,
   -- winbar click, buffer-local 0..9 keymap, programmatic
   -- `M._registry:focus(N)`) runs the auto-finder-specific tail:
-  -- mirror `state.section`, persist `last_section` to the namespace,
-  -- and pump a catch-up neo-tree redraw. Auto-core's `attach()`
+  -- mirror `state.section` and persist `last_section` to the namespace. Auto-core's `attach()`
   -- already wires the click router to call `registry:focus(N)` and
   -- its `apply_keymap` does the same, so wrapping here covers both
   -- without overrides.
@@ -397,10 +325,6 @@ function M.setup(user_opts)
       if _wskey_focus then
         pcall(require("auto-finder.state").set_last_section_for,
           _wskey_focus, active)
-      end
-      local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
-      if ok_mgr and type(manager.redraw) == "function" then
-        pcall(manager.redraw, nil)
       end
     end
     M._registry.focus = function(self, key)
@@ -436,7 +360,6 @@ function M.setup(user_opts)
   -- this module (so the auto-finder.init module reference closes
   -- over them via require, not via inline closure):
   --
-  --   - core.file:* → auto-finder.core.files:changed
   --   - core.git.state:changed → auto-finder.core.git:changed
   --   - worktree:switched → auto-finder.core.repos:changed
   --                       + M._reseed_sections_for_workspace()
@@ -454,86 +377,20 @@ function M.setup(user_opts)
   -- the `_handles_still_valid` probe is an optimization (Open
   -- Question #1) that activates when auto-core publishes
   -- `core.events:bus_reset`.
-  -- Phase 3c note: previously re-synced
-  -- `state.window.auto_expand_width` here so a session restart with
-  -- a saved pin wouldn't expand on first files focus. The forked
-  -- renderer now reads `M.state.user_width` directly each render —
-  -- the persisted pin is already in `M.state.user_width` by this
-  -- point in setup, so the renderer sees the pin from its very
-  -- first call. No manual sync needed.
-  -- File-filter prefs hydration. Canonical source of truth is now
-  -- `auto-core.files.{show_hidden,show_dotfiles}` (see auto-core
-  -- module of the same name). Legacy `persisted.files.*` from
-  -- `<config>/.auto-finder/config.json` is one-shot migrated to the
-  -- canonical store on first run after upgrade — older nvims that
-  -- pre-date auto-core fall through harmlessly.
-  --
-  -- Naming flip: the legacy schema used `hide_*` (true = hide);
-  -- auto-core uses `show_*` (true = show). Negate at the boundary.
-  --
-  -- Reload the legacy store here: `M._migrate_legacy_panel_store` above
-  -- drained the `panel` block but preserves `files.*`, so this read
-  -- still surfaces the file-filter prefs for one-shot hydration.
+  -- File-filter prefs. Canonical source of truth is
+  -- `auto-core.files.{show_hidden,show_dotfiles}`; the files view reads
+  -- and watches them itself. Legacy `persisted.files.*` from
+  -- `<config>/.auto-finder/config.json` is one-shot migrated here
+  -- (the legacy schema used `hide_*`, auto-core uses `show_*`).
   do
     local persisted = require("auto-finder.store").load()
     local ok_core, core = pcall(require, "auto-core")
-    if ok_core and core and core.files then
-      -- One-shot migration from legacy store, if values present.
-      if persisted.files then
-        if persisted.files.hide_dotfiles ~= nil then
-          core.files.set_show_dotfiles(not persisted.files.hide_dotfiles)
-        end
-        if persisted.files.hide_gitignored ~= nil then
-          core.files.set_show_hidden(not persisted.files.hide_gitignored)
-        end
+    if ok_core and core and core.files and persisted.files then
+      if persisted.files.hide_dotfiles ~= nil then
+        core.files.set_show_dotfiles(not persisted.files.hide_dotfiles)
       end
-      -- Apply the canonical values into neo-tree's runtime config.
-      local ok_neo, neo = pcall(require, "auto-finder.neotree")
-      if ok_neo and type(neo.config) == "table" then
-        neo.config.filesystem = neo.config.filesystem or {}
-        neo.config.filesystem.filtered_items =
-          neo.config.filesystem.filtered_items or {}
-        local fi = neo.config.filesystem.filtered_items
-        fi.hide_dotfiles   = not core.files.get_show_dotfiles()
-        fi.hide_gitignored = not core.files.get_show_hidden()
-        if core.files.get_show_dotfiles() or core.files.get_show_hidden() then
-          fi.visible = true
-        end
-      end
-      -- Watch for external mutations (admin REPL, future remote
-      -- API) and re-apply to neo-tree's filtered_items at runtime.
-      local function _resync_filter()
-        local ok_n, n = pcall(require, "auto-finder.neotree")
-        if not ok_n or type(n.config) ~= "table" then return end
-        n.config.filesystem = n.config.filesystem or {}
-        n.config.filesystem.filtered_items =
-          n.config.filesystem.filtered_items or {}
-        local f = n.config.filesystem.filtered_items
-        f.hide_dotfiles   = not core.files.get_show_dotfiles()
-        f.hide_gitignored = not core.files.get_show_hidden()
-        -- Re-render the active files section so the filter changes
-        -- become visible without the user toggling sections.
-        pcall(function()
-          require("auto-finder.neotree.sources.manager").refresh("filesystem")
-        end)
-      end
-      core.files.watch_show_hidden(_resync_filter)
-      core.files.watch_show_dotfiles(_resync_filter)
-    elseif persisted.files then
-      -- auto-core not installed (legacy install) — apply directly
-      -- from the old store schema.
-      local ok_neo, neo = pcall(require, "auto-finder.neotree")
-      if ok_neo and type(neo.config) == "table" then
-        neo.config.filesystem = neo.config.filesystem or {}
-        neo.config.filesystem.filtered_items =
-          neo.config.filesystem.filtered_items or {}
-        local fi = neo.config.filesystem.filtered_items
-        if persisted.files.hide_dotfiles ~= nil then
-          fi.hide_dotfiles = persisted.files.hide_dotfiles
-        end
-        if persisted.files.hide_gitignored ~= nil then
-          fi.hide_gitignored = persisted.files.hide_gitignored
-        end
+      if persisted.files.hide_gitignored ~= nil then
+        core.files.set_show_hidden(not persisted.files.hide_gitignored)
       end
     end
   end
@@ -550,7 +407,7 @@ function M.setup(user_opts)
   })
 
   -- WinResized re-clamps the panel back to the user pin if anyone
-  -- (notably neo-tree's `auto_expand_width`, which calls
+  -- (notably the files/buffers auto-expand, which calls
   -- `nvim_win_set_width` directly and bypasses both our cached width
   -- and `winfixwidth`) grew the panel beyond the pin. This is what
   -- makes `panel resize N` a hard cap as opposed to a soft default.
@@ -563,15 +420,9 @@ function M.setup(user_opts)
     end,
   })
 
-  -- (BufWinEnter/BufEnter bounce-guard removed in v0.1.1+2. We now
-  -- protect the panel via `winfixbuf = true` set in panel/host.lua's
-  -- ensure_open; vim itself refuses to swap the panel's buffer via
-  -- :edit / :buffer / b#, neo-tree's open_file handler catches the
-  -- E1513 and falls back to a sibling window, and our own legitimate
-  -- swaps wrap with with_unfixed_buf. The previous bounce mechanism
-  -- caused duplicate-neo-tree windows when `find_or_create_target_window`
-  -- fell through to vsplit and the new window inherited the panel's
-  -- neo-tree buffer.)
+  -- The panel is protected by `winfixbuf = true` (panel/host.lua
+  -- ensure_open): vim refuses to swap its buffer via :edit / :buffer /
+  -- b#, and our own legitimate swaps wrap with with_unfixed_buf.
 
   -- Directory hijack — ONE-SHOT firing as early as we can manage so
   -- we win against other directory-hijacking autocmds (LazyVim's
@@ -614,51 +465,6 @@ function M.setup(user_opts)
       vim.schedule(function() M._maybe_hijack_startup_directory() end)
     end
   end
-
-  -- Repos-follow: BufEnter autocmd that reveals the repo containing
-  -- the currently focused buffer in the repos panel. Installed
-  -- unconditionally (whenever the repos section exists) so the
-  -- admin-DSL toggle `repos follow on|off` can flip behavior live —
-  -- the autocmd body reads `M.state.config.repos.follow` at fire
-  -- time, so a false flag short-circuits cheaply.
-  if require("auto-finder.views")._by_name["repos"] then
-    M._install_repos_follow_autocmd(group)
-  end
-
-  -- Files-follow: install our OWN BufEnter autocmd that calls
-  -- `filesystem.follow()` directly. v0.2.1 / v0.2.2 relied on the
-  -- forked neo-tree's internal event-bus subscription
-  -- (`manager.subscribe(events.VIM_BUFFER_ENTER, ...)`), which is
-  -- installed inside `M.navigate()` and gated on
-  -- `config.follow_current_file.enabled` AT MOUNT TIME. Two
-  -- failure modes followed: (1) runtime toggles never wired the
-  -- subscription, and (2) the neotree event chain was silently
-  -- no-op'ing for `position = "current"` mounts in some sessions.
-  -- Subscribing here gives a single hot path that respects the
-  -- live `cfg.files.follow` flag and works regardless of when the
-  -- section was mounted.
-  if require("auto-finder.views")._by_name["files"] then
-    M._install_files_follow_autocmd(group)
-  end
-
-  -- Buffers-refresh: own BufAdd/BufDelete/BufFilePost/TermOpen
-  -- autocmd that re-renders the buffers source against the panel's
-  -- win-keyed state. The forked buffers source's internal subscriber
-  -- (`buffers/init.lua:setup` → `manager.subscribe(VIM_BUFFER_ADDED,
-  -- ...)`) calls `buffers_changed_internal`, which resolves state
-  -- via `manager.get_state(name, tabid)` — same stub-vs-real
-  -- mismatch as files-follow had: `position = "current"` mounts
-  -- key the rendered state under `state_by_win[panel_winid]`, not
-  -- `state_by_tab[tabid]`, so the stub is returned and the refresh
-  -- silently no-ops. Installing the autocmd here drives the same
-  -- `items.get_opened_buffers(state)` body against the right state.
-  --
-  -- Installed UNCONDITIONALLY — slot DSL `slot add buffers` can land
-  -- the section live after setup, and the fire body checks at fire
-  -- time whether a real buffers state exists. The fast path is cheap
-  -- (one `_get_all_states()` walk per debounce window) so the
-  -- unconditional install is acceptable even when buffers isn't on.
-  M._install_buffers_refresh_autocmd(group)
 
   -- v0.2.5: per-project section composition. Subscribe to
   -- `worktree:switched` so a worktree switch re-loads the
@@ -709,273 +515,6 @@ function M.setup(user_opts)
   end
 end
 
----Install a debounced BufEnter autocmd that calls the filesystem
----source's `follow()` whenever a real file is entered. Gated on
----the live `M.state.config.files.follow` flag so admin-DSL toggles
----take effect instantly. No-op when the buffer isn't a real file
----or focus is inside one of our own panel buffers.
----@param group integer  -- AutoFinderPanel augroup
-function M._install_files_follow_autocmd(group)
-  local pending = false
-  local DEBOUNCE_MS = 60
-  -- Guards a reveal scan so BufEnter bursts can't pile up multi-second
-  -- root walks that serialise into an editor freeze. Reset in the scan
-  -- callback (and by a safety timer if the async scan never calls back).
-  local reveal_in_flight = false
-
-  local function fire()
-    pending = false
-    local live_cfg = M.state and M.state.config
-    if not (live_cfg and live_cfg.files and live_cfg.files.follow) then
-      return
-    end
-
-    -- Bail unless the files section is the active panel slot.
-    local files_idx = require("auto-finder.views")._by_name["files"]
-    if M.state and M.state.section ~= files_idx then return end
-
-    local buf = vim.api.nvim_get_current_buf()
-    if vim.bo[buf].buftype ~= "" then return end  -- skip terminal/qf/help
-    local ft = vim.bo[buf].filetype
-    if ft == "auto-finder" or ft == "auto-finder-popup"
-        or ft == "auto-finder-config" or ft == "auto-finder-help" then
-      return
-    end
-    local path = vim.api.nvim_buf_get_name(buf)
-    if path == nil or path == "" then return end
-
-    -- Drive reveal directly against the panel's win-keyed state.
-    -- Why not just call `filesystem.follow()`? Its `follow_internal`
-    -- pulls state via `manager.get_state(name, tabid)` with no
-    -- winid, which returns the TAB-keyed stub state (path=nil)
-    -- when the panel was mounted with `position = "current"` —
-    -- that path keeps the rendered state under `state_by_win[winid]`,
-    -- not `state_by_tab[tabid]`. Direct-reveal walks
-    -- `_get_all_states()` for the auto-finder panel's win-keyed
-    -- filesystem state and drives the same reveal body (fs_scan
-    -- get_items → renderer.focus_node).
-    local panel_winid = M.state and M.state.panel_winid
-    if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
-      return
-    end
-    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
-    if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
-    local state
-    for _, s in ipairs(mgr._get_all_states()) do
-      if s.name == "filesystem" and s.winid == panel_winid and s.path then
-        state = s
-        break
-      end
-    end
-    if not state then return end
-
-    local path_norm = vim.fs.normalize(path)
-    local root_norm = state.path:gsub("/+$", "")
-    if path_norm:sub(1, #root_norm + 1) ~= root_norm .. "/" then return end
-
-    local ok_ren, renderer = pcall(require, "auto-finder.neotree.ui.renderer")
-    if not ok_ren then return end
-
-    -- Short-circuit: if the target node is already materialised in the
-    -- loaded tree, just move the cursor to it — NO filesystem scan.
-    -- BufEnter fires far more often than the tree structure changes
-    -- (window/focus churn, cursor-trail float windows, plugins
-    -- re-entering a buffer). Re-walking the whole monorepo on each
-    -- reveal was pure waste and, on a large tree, the source of the
-    -- per-keystroke editor lag. `true` = do_not_focus_window (this is a
-    -- passive follow — never yank the user's window focus).
-    if state.tree and state.tree:get_node(path_norm) then
-      pcall(renderer.focus_node, state, path_norm, true)
-      return
-    end
-
-    -- Node not loaded yet → a reveal scan is genuinely needed. Guard
-    -- against launching another while one is in flight so a burst of
-    -- BufEnters can't stack root scans.
-    if reveal_in_flight then return end
-    local ok_scan, fs_scan = pcall(require,
-      "auto-finder.neotree.sources.filesystem.lib.fs_scan")
-    if not ok_scan then return end
-
-    reveal_in_flight = true
-    -- Safety net: never wedge follow permanently if the async scan
-    -- aborts without invoking the callback.
-    vim.defer_fn(function() reveal_in_flight = false end, 10000)
-    local ok = pcall(fs_scan.get_items, state, nil, path_norm, function()
-      reveal_in_flight = false
-      pcall(renderer.focus_node, state, path_norm, true)
-    end)
-    if not ok then reveal_in_flight = false end
-  end
-
-  vim.api.nvim_create_autocmd("BufEnter", {
-    group = group,
-    desc = "auto-finder: files-follow direct reveal (cfg.files.follow)",
-    callback = function()
-      if pending then return end
-      pending = true
-      vim.defer_fn(fire, DEBOUNCE_MS)
-    end,
-  })
-end
-
----Install a debounced BufAdd/BufDelete/BufFilePost/TermOpen autocmd
----that re-renders the buffers source against the panel's win-keyed
----state. Works around the same forked-neo-tree state-keying mismatch
----that broke files-follow in v0.2.1 — `buffers/init.lua`'s
----`buffers_changed_internal` walks `manager.get_state(name, tabid)`
----which returns a `state_by_tab` stub (no path, no winid, no tree)
----for `position = "current"` mounts. The rendered state lives under
----`state_by_win[panel_winid]` and the stub-returning refresh path
----silently no-ops, leaving the panel empty until something else
----triggers a full rebuild.
----
----This autocmd does the same job correctly: walk
----`mgr._get_all_states()` for the win-keyed buffers state bound to
----`M.state.panel_winid` and call `items.get_opened_buffers(state)`
----directly. Idempotent w.r.t. the fork's internal subscriber — both
----can fire on the same BufAdd; the fork's call hits the stub and
----no-ops, ours hits the real state and updates the tree.
----@param group integer  -- AutoFinderPanel augroup
----Internal helper: actually run the buffers-state refresh against
----the live neo-tree state for the panel window. Extracted from the
----autocmd-fire body so the on_focus dirty-bit consumer (see
----`auto-finder/sections/buffers.lua`) can re-use the exact same
----logic without duplicating the winfixbuf wrap + stuck-loading
----reset.
----@param panel_winid integer
-function M._refresh_buffers_now(panel_winid)
-  if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
-    return
-  end
-  local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
-  if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
-  local ok_items, items = pcall(require,
-    "auto-finder.neotree.sources.buffers.lib.items")
-  if not ok_items then return end
-  for _, state in ipairs(mgr._get_all_states()) do
-    if state.name == "buffers"
-        and state.winid == panel_winid
-        and state.tree
-    then
-      -- Heal a nil path instead of skipping. manager.dir_changed nils
-      -- `state.path` (and sets dirty) when the cwd changes while the
-      -- buffers window isn't visible — e.g. a worktree switch with the
-      -- files section up. Requiring `state.path` here made every
-      -- subsequent rebuild silently no-op, so buffers opened after the
-      -- switch never appeared until a full remount.
-      if not state.path then
-        state.path = vim.fn.getcwd()
-      end
-      state.dirty = false
-      -- The renderer's "current" branch swaps the freshly-built tree
-      -- buffer into `state.winid` via `nvim_win_set_buf` — which
-      -- raises E1513 against the auto-core.ui.panel singleton's
-      -- `winfixbuf = true`. Wrap with `Panel:with_unfixed_buf` so the
-      -- swap goes through and `winfixbuf` is restored on return.
-      --
-      -- Also force-clear a stuck `state.loading` flag. The flag gets
-      -- stuck-true when a prior call errored before reaching its
-      -- `state.loading = false` reset. Once stuck, every future
-      -- `get_opened_buffers` early-returns. Clearing here is
-      -- idempotent vs concurrent runs (the autocmd debounce
-      -- serializes us; on_focus is a single call).
-      state.loading = false
-      local panel = M._panel
-      if panel and type(panel.with_unfixed_buf) == "function" then
-        panel:with_unfixed_buf(function()
-          pcall(items.get_opened_buffers, state)
-        end)
-      else
-        pcall(items.get_opened_buffers, state)
-      end
-    end
-  end
-end
-
-function M._install_buffers_refresh_autocmd(group)
-  local pending = false
-  local DEBOUNCE_MS = 80
-
-  local function fire()
-    pending = false
-    -- The buffers section's bufnr cache is the cheapest "is the panel
-    -- currently showing buffers?" check. If buffers isn't the active
-    -- section we still refresh the state in case the user toggles to
-    -- it — but skipping when no state exists keeps the loop cheap.
-    local panel_winid = M.state and M.state.panel_winid
-    if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
-      return
-    end
-    -- v0.2.11 gate: only refresh when the buffers source is the
-    -- currently-DISPLAYED section in the panel. Otherwise
-    -- `get_opened_buffers` ends in `renderer.show_nodes` →
-    -- `nvim_win_set_buf(panel, state.bufnr)`, which clobbers
-    -- whichever section the user actually has up (regression
-    -- introduced in v0.2.9).
-    --
-    -- v0.2.13: when the gate skips, set `M._buffers_dirty = true` so
-    -- the buffers section's `on_focus` hook can run the refresh on
-    -- behalf of the skipped autocmd next time the user focuses
-    -- buffers. Previously the comment claimed "re-mount on focus
-    -- handles it" — but the section's bufnr is CACHED across
-    -- focuses, so the cached state.tree survives and shows the
-    -- stale snapshot. The dirty bit is the breadcrumb.
-    --
-    -- Active-section probe via the auto-finder registry rather than
-    -- `state.bufnr == nvim_win_get_buf(panel)`: the latter races with
-    -- the renderer's buffer reassignment during show_nodes.
-    local registry = M._registry
-    if not registry then
-      M._buffers_dirty = true
-      return
-    end
-    local active_number = registry.active
-    if active_number == nil then
-      M._buffers_dirty = true
-      return
-    end
-    local buffers_active = false
-    for _, sect in ipairs(registry.sections or {}) do
-      if sect.name == "buffers" and sect.number == active_number then
-        buffers_active = true; break
-      end
-    end
-    if not buffers_active then
-      M._buffers_dirty = true
-      return
-    end
-    -- Buffers IS active — run the refresh against the live state.
-    -- Clear the dirty flag since we're handling it inline.
-    M._buffers_dirty = false
-    M._refresh_buffers_now(panel_winid)
-  end
-
-  -- Three signals to react to:
-  --   BufAdd       — a buffer joined the buffer list (`:edit foo.md`,
-  --                  bufferline pin, etc.)
-  --   BufDelete    — a buffer left the list (`:bd`, `:bw`)
-  --   BufFilePost  — a buffer was renamed (`:saveas`, `:Rename`)
-  --   TermOpen     — a terminal buffer was created; show up under
-  --                  the "Terminals" sub-folder.
-  -- We deliberately do NOT react to BufEnter — get_opened_buffers
-  -- runs through every buffer + every nesting folder, and BufEnter
-  -- fires ~10×/s during navigation. Debouncing alone isn't enough;
-  -- the BufAdd/BufDelete pair captures all the mutations cheaply.
-  local events = { "BufAdd", "BufDelete", "BufFilePost", "TermOpen" }
-  for _, e in ipairs(events) do
-    vim.api.nvim_create_autocmd(e, {
-      group = group,
-      desc = "auto-finder: buffers-refresh against panel win-keyed state",
-      callback = function()
-        if pending then return end
-        pending = true
-        vim.defer_fn(fire, DEBOUNCE_MS)
-      end,
-    })
-  end
-end
-
 ---Resolve the workspace root via auto-core when present, falling
 ---back to nil. Used by the repos-follow autocmd to anchor the
 ---walk-up-to-child computation. Returns nil if auto-core isn't
@@ -992,94 +531,6 @@ function M._workspace_root()
   local v = core.git.worktree.get_workspace_root()
   if type(v) == "string" and v ~= "" then return v end
   return nil
-end
-
----Install a debounced BufEnter autocmd that reveals the repo
----containing the active buffer's path inside the repos section.
----Skipped silently if auto-core's workspace_root isn't available
----(repo discovery needs the workspace anchor).
----@param group integer  -- the augroup id to attach to
-function M._install_repos_follow_autocmd(group)
-  local last_revealed = nil
-  local pending = false
-  local DEBOUNCE_MS = 80
-
-  local function reveal()
-    pending = false
-    -- Re-read the live flag each fire so the admin-DSL toggle
-    -- (`repos follow on|off`) takes effect without re-installing
-    -- the autocmd.
-    local live_cfg = M.state and M.state.config
-    if not (live_cfg and live_cfg.repos and live_cfg.repos.follow) then
-      return
-    end
-
-    -- Bail unless the repos section is the active panel slot.
-    local repos_idx = require("auto-finder.views")._by_name["repos"]
-    if M.state and M.state.section ~= repos_idx then return end
-
-    local buf = vim.api.nvim_get_current_buf()
-    if vim.bo[buf].buftype ~= "" then return end  -- skip terminals / quickfix / help
-    local path = vim.api.nvim_buf_get_name(buf)
-    if path == nil or path == "" then return end
-
-    local root = M._workspace_root()
-    if not root then return end
-    local root_norm = vim.fs.normalize(root):gsub("/+$", "")
-    local path_norm = vim.fs.normalize(path)
-    if path_norm:sub(1, #root_norm + 1) ~= root_norm .. "/" then return end
-
-    -- Compute the direct child of root that contains `path`. That's
-    -- the repo the user is editing inside.
-    local rel = path_norm:sub(#root_norm + 2)
-    local first = rel:match("^([^/]+)")
-    if not first then return end
-    local repo_path = root_norm .. "/" .. first
-    if repo_path == last_revealed then return end
-
-    -- Ensure the reveal is driven against the panel's win-keyed state.
-    local panel_winid = M.state and M.state.panel_winid
-    if not panel_winid or not vim.api.nvim_win_is_valid(panel_winid) then
-      return
-    end
-
-    local ok_mgr, mgr = pcall(require, "auto-finder.neotree.sources.manager")
-    if not ok_mgr or type(mgr._get_all_states) ~= "function" then return end
-    local state
-    for _, s in ipairs(mgr._get_all_states()) do
-      if s.name == "auto-finder-repos" and s.winid == panel_winid then
-        state = s; break
-      end
-    end
-    if not state then return end
-
-    -- Drive reveal directly against the state. This avoids jumping
-    -- the current window to the panel and back. The repos source uses
-    -- synthetic ids for workspace nodes, so convert the filesystem
-    -- repo path before asking it to reveal.
-    local repo_node_id = "auto-finder-repos://" .. repo_path
-    local nav_ok = pcall(mgr.navigate, state, nil, repo_node_id)
-    if nav_ok then
-      local section = require("auto-finder.views")._by_number[repos_idx]
-      if section and state.bufnr and vim.api.nvim_buf_is_valid(state.bufnr) then
-        section._bufnr = state.bufnr
-        if M.state and M.state.section_buffers then
-          M.state.section_buffers[repos_idx] = state.bufnr
-        end
-      end
-      last_revealed = repo_path
-    end
-  end
-
-  vim.api.nvim_create_autocmd("BufEnter", {
-    group = group,
-    desc = "auto-finder: repos-follow reveal on BufEnter (cfg.repos.follow)",
-    callback = function()
-      if pending then return end
-      pending = true
-      vim.defer_fn(reveal, DEBOUNCE_MS)
-    end,
-  })
 end
 
 -- ── v0.2.4 keymap audit (ADR 0008) ─────────────────────────────
@@ -1145,154 +596,6 @@ function M._editor_target_winid()
   return nil
 end
 
----Build a neo-tree command callback that opens the selected node
----in a real editor window (NOT inside the panel column).
----  * file node → focus an editor window, then run
----    `:<open_cmd> <path>` there. Falls back to a fresh
----    `rightbelow vsplit <path>` when no editor window exists.
----  * directory node → defer to neo-tree's native toggle_node
----    (no editor routing — same as upstream's open-on-directory).
----
----Why this exists: `position = "current"` makes the panel the
----"current" window, so neo-tree's native open_split / open_vsplit
----commands run `:split` / `:vsplit` from INSIDE the panel column.
----See ADR 0008 for the full rationale.
----@param open_cmd "edit"|"split"|"vsplit"|"tabnew"
----@return fun(state: table)
-function M._route_open_to_editor(open_cmd)
-  return function(state)
-    local tree = state and state.tree
-    if not tree then return end
-    local ok_node, node = pcall(tree.get_node, tree)
-    if not ok_node or not node then return end
-
-    -- Directory → delegate to native toggle_node (handles
-    -- expand/collapse + lazy-load semantics).
-    if node.type == "directory" or require("auto-finder.neotree.utils").is_expandable(node) then
-      local cc = require("auto-finder.neotree.sources.common.commands")
-      local fs = require("auto-finder.neotree.sources.filesystem")
-      cc.toggle_node(state, require("auto-finder.neotree.utils").wrap(
-        fs.toggle_directory, state))
-      return
-    end
-
-    local path = node.path or node:get_id()
-    if not path or path == "" then return end
-    local target = M._editor_target_winid()
-    if target then
-      pcall(vim.api.nvim_set_current_win, target)
-      pcall(vim.cmd,
-        (open_cmd or "edit") .. " " .. vim.fn.fnameescape(path))
-    else
-      -- No editor window — create one alongside the panel.
-      pcall(vim.cmd, "rightbelow vsplit " .. vim.fn.fnameescape(path))
-    end
-  end
-end
-
----Toggle hidden-file visibility via auto-core.files (the canonical
----preference key the admin DSL writes to), then refresh the
----filesystem source. Single source of truth between the H keymap
----and the `files show/hide hidden` DSL command.
----@param state table  -- neo-tree state (unused — kept for the command signature)
-function M._toggle_hidden_via_core(state)
-  local _ = state  -- explicit unused
-  local ok, core = pcall(require, "auto-core")
-  if ok and type(core) == "table" and type(core.files) == "table" then
-    local cur = core.files.get_show_hidden() == true
-    core.files.set_show_hidden(not cur)
-  end
-  pcall(function()
-    require("auto-finder.neotree.sources.manager").refresh("filesystem")
-  end)
-end
-
----Inject the v0.2.4 keymap overrides into the consumer's
----`cfg.neo_tree.filesystem.window.mappings` BEFORE the neo-tree
----setup call. Keeps the override at the consumer-side wiring
----layer (not inside the fork's vendored `defaults.lua`) so a
----future upstream rebase doesn't conflict on the audit. ADR 0008.
----@param cfg AutoFinderConfig
-function M._inject_keymap_overrides(cfg)
-  cfg.neo_tree = cfg.neo_tree or {}
-
-  -- v0.2.5: build a per-source applier so filesystem AND buffers
-  -- share the same audit. `H` (toggle_hidden) is filesystem-only —
-  -- the buffers source doesn't display hidden gitignored files,
-  -- just open nvim buffers, so we skip it there.
-  local function apply_overrides(source_key, opts)
-    cfg.neo_tree[source_key] = cfg.neo_tree[source_key] or {}
-    cfg.neo_tree[source_key].window =
-      cfg.neo_tree[source_key].window or {}
-    cfg.neo_tree[source_key].window.mappings =
-      cfg.neo_tree[source_key].window.mappings or {}
-
-    local m = cfg.neo_tree[source_key].window.mappings
-
-    -- Skip if the consumer already bound the key (custom intent
-    -- always wins). We only fill defaults.
-    local function default(key, value)
-      if m[key] == nil then m[key] = value end
-    end
-
-    -- ── B: open/split family routed through editor window ──────
-    default("<cr>",          M._route_open_to_editor("edit"))
-    default("<2-LeftMouse>", M._route_open_to_editor("edit"))
-    default("S",             M._route_open_to_editor("split"))
-    default("s",             M._route_open_to_editor("vsplit"))
-    default("t",             M._route_open_to_editor("tabnew"))
-
-    -- ── H: rewire toggle_hidden through auto-core.files ────────
-    if opts and opts.toggle_hidden then
-      default("H", M._toggle_hidden_via_core)
-    end
-
-    -- ── C: remove keys irrelevant to our model ─────────────────
-    -- neo-tree's documented unbind sentinel is the string "none".
-    default("e",     "none")
-    default("<",     "none")
-    default(">",     "none")
-    default(".",     "none")
-    default("<esc>", "none")
-  end
-
-  apply_overrides("filesystem", { toggle_hidden = true })
-  apply_overrides("buffers",    { toggle_hidden = false })
-end
-
----Bundled neo-tree sources that auto-finder ships a section
----module for. Each entry maps to `lua/auto-finder/neotree/sources/<name>/`
----in the fork. Sections that mount a CUSTOM neo-tree source
----(today: `repos` → `auto-finder-repos`) go through their own
----explicit registration helper (`_register_neotree_workspace_source`)
----and aren't listed here.
-local _BUNDLED_NEOTREE_SOURCES = { "filesystem", "buffers" }
-
----Ensure `cfg.neo_tree.sources` contains every bundled source we
----ship a section module for. Without this, neotree's setup
----pipeline only builds `default_configs` for sources listed in
----`cfg.neo_tree.sources` (or the fork's `defaults.sources` =
----`{ "filesystem" }`). A subsequent `slot add buffers` then
----asserts at `manager.lua:124` because `default_configs["buffers"]`
----was never built.
----
----Idempotent: skips entries already present. Respects the
----consumer's `cfg.neo_tree.sources` ordering — we only APPEND
----missing bundled names.
----@param cfg AutoFinderConfig
-function M._register_bundled_neotree_sources(cfg)
-  cfg.neo_tree = cfg.neo_tree or {}
-  cfg.neo_tree.sources = cfg.neo_tree.sources or { "filesystem" }
-  local present = {}
-  for _, s in ipairs(cfg.neo_tree.sources) do present[s] = true end
-  for _, name in ipairs(_BUNDLED_NEOTREE_SOURCES) do
-    if not present[name] then
-      cfg.neo_tree.sources[#cfg.neo_tree.sources + 1] = name
-      present[name] = true
-    end
-  end
-end
-
 -- ── v0.2.5 slot DSL (ADR 0008 addendum) ───────────────────────
 
 ---Compute the per-workspace key used by per-project section
@@ -1348,8 +651,7 @@ function M._available_section_types()
 
   -- Bundled views — each subdir under views/ with an init.lua is a
   -- view name. Leading-underscore subdirs (if any future internal
-  -- helpers land there) are excluded for parity with the old
-  -- _neotree/_storage exclusion.
+  -- helpers land there) are excluded.
   local views_dir = lua_root .. "/views"
   local vh = vim.uv.fs_scandir(views_dir)
   if vh then
@@ -1375,7 +677,7 @@ function M._available_section_types()
   -- already covered them. We keep this scan for any third-party
   -- module dropped into our sections/ tree by an out-of-tree
   -- installer (rare but documented). Underscore-prefixed files
-  -- (_neotree, _dbase_*, _storage) and init.lua are excluded.
+  -- (_dbase_*, _storage) and init.lua are excluded.
   local sections_dir = lua_root .. "/sections"
   local sh = vim.uv.fs_scandir(sections_dir)
   if sh then
@@ -1728,7 +1030,7 @@ function M._reseed_sections_for_workspace()
 end
 
 ---Drop the repos section's cached bufnr (firing its `on_close` so
----neo-tree's state cleanup runs) and re-focus if repos is the
+---the view tears down) and re-focus if repos is the
 ---active section. Used by `core.ensure_started`'s
 ---`worktree:switched` subscriber — extracted from the inline
 ---closure that used to live at init.lua:357-378 before ADR 0026
@@ -1740,8 +1042,8 @@ function M._drop_repos_bufnr_on_worktree_switched()
     if s.name == "repos" then repos_def = s; break end
   end
   if not repos_def then return end
-  -- Drop the cached repos bufnr (fires on_close so neo-tree's
-  -- state cleanup runs). Mutate `_bufs` in place so the
+  -- Drop the cached repos bufnr (fires on_close so the view
+  -- tears down). Mutate `_bufs` in place so the
   -- `state.section_buffers` alias stays valid.
   local b = M._registry._bufs[repos_def.number]
   if b and vim.api.nvim_buf_is_valid(b) and repos_def.on_close then
@@ -1951,86 +1253,6 @@ function M.slot_assign(tail)
   return nil
 end
 
----Register the `auto-finder-repos` neo-tree source so
----`cmd.execute({ source = "auto-finder-repos", … })` works inside the
----repos section.
----
----Neo-tree's normal setup pipeline (setup/init.lua's per-source loop
----around line 525-660) does several things our source needs:
----
----  1. Builds `nt.config[source_name]` with `components`, `commands`,
----     `renderers`, and a merged `window` block. `cmd.execute` reads
----     `nt.config[source].window.position` directly, so this entry
----     MUST exist or focus crashes with
----     `attempt to index field … (a nil value)`.
----  2. Calls `manager.setup(source_name, source_config, global_config,
----     module)` which sets the per-source default config in the source
----     data table AND stashes the module reference (used by command
----     wrappers and `manager.get_state(source_name)`).
----
----We replicate enough of that pipeline here that a `cmd.execute` call
----against `auto-finder-repos` flows through cleanly. Base config is
----deep-copied from neo-tree's filesystem source so we inherit a
----working renderers / window-mappings shape; our source's own
----`default_config` and the consumer's `cfg.repos` are layered on top.
----@param extra table?  -- consumer overrides to merge atop the source defaults
-function M._register_neotree_workspace_source(extra)
-  local ok_neo, neo = pcall(require, "auto-finder.neotree")
-  if not ok_neo then return end
-  if type(neo.ensure_config) == "function" then
-    pcall(neo.ensure_config)
-  end
-  if type(neo.config) ~= "table" then return end
-
-  local ok_src, src = pcall(require, "auto-finder-repos")
-  if not ok_src then
-    require("auto-finder.log").error("init",
-      "failed to require 'auto-finder-repos': " .. tostring(src))
-    return
-  end
-
-  -- Per-source config. Order (later wins):
-  --   1. filesystem source as a base (gives renderers + working window mappings)
-  --   2. our overrides (name, display_name, our components + commands)
-  --   3. our source's `default_config` (own keymaps inside the panel)
-  --   4. consumer's `cfg.repos` (their keymaps / overrides)
-  local base = vim.deepcopy(neo.config.filesystem or {})
-  local components_ok, components = pcall(require, "auto-finder-repos.components")
-  local commands_ok, commands = pcall(require, "auto-finder-repos.commands")
-  local source_config = vim.tbl_deep_extend("force",
-    base,
-    {
-      name = "auto-finder-repos",
-      display_name = src.display_name or " Git ",
-      components = components_ok and components or nil,
-      commands = commands_ok and commands or nil,
-    },
-    src.default_config or {},
-    extra or {})
-
-  -- Make the per-source config visible to `cmd.execute` and friends.
-  neo.config["auto-finder-repos"] = source_config
-
-  -- Add to neo.config.sources so future ensure_config / setup re-runs
-  -- include us when iterating known sources.
-  neo.config.sources = neo.config.sources or { "filesystem", "buffers", "git_status" }
-  local already_listed = false
-  for _, s in ipairs(neo.config.sources) do
-    if s == "auto-finder-repos" then already_listed = true; break end
-  end
-  if not already_listed then
-    table.insert(neo.config.sources, "auto-finder-repos")
-  end
-
-  -- Run the manager-side setup so `manager.get_state("auto-finder-repos")`
-  -- can find us, and so the source's own `setup()` (no-op for us) is
-  -- invoked symmetrically with neo-tree's built-in sources.
-  local ok_mgr, manager = pcall(require, "auto-finder.neotree.sources.manager")
-  if ok_mgr and type(manager.setup) == "function" then
-    pcall(manager.setup, "auto-finder-repos", source_config, neo.config, src)
-  end
-end
-
 ---One-shot directory hijack: if the initial buffer's name is an
 ---existing directory on disk, replace it with a scratch and open the
 ---panel. Idempotent — safe to call multiple times; only acts the
@@ -2153,12 +1375,11 @@ function M.reset_width()
   require("auto-finder.panel.host").reset_width(M.state.config, M.state)
 end
 
----Re-render the active section. Calls the section's `on_close`
----hook (which wipes any cached neo-tree buffer for neo-tree-backed
----sections) and then re-focuses, so the next mount picks up any
----runtime config change (e.g. after `files show/hide …` mutated
----neo-tree's filtered_items, or after `repos add` changed the
----registry).
+---Re-render the active section. Calls the section's `on_close` hook,
+---then its `reset` hook when it has one (the files view drops its
+---model so a changed `never_show` applies), and re-focuses, so the
+---next mount picks up any runtime config change (e.g. after
+---`repos add` changed the registry).
 function M.reload()
   local section = require("auto-finder.views").resolve(M.state.section or 0)
   if not section then return end
@@ -2166,6 +1387,7 @@ function M.reload()
     M.state.section_buffers[section.number] = nil
   end
   if type(section.on_close) == "function" then pcall(section.on_close) end
+  if type(section.reset) == "function" then pcall(section.reset) end
   M.focus(section.number)
 end
 
