@@ -238,10 +238,13 @@ function M.git_refresh()
     if n and n.repo_root then repos[dir] = true end
   end
   local status = require("auto-core.git.status")
-  local watchers = require("auto-finder.core.watchers")
+  -- hold a git watch for exactly the repos shown (a commit / add / checkout from a terminal touches only
+  -- .git/: this watch is what recolours then); a nested repo that left the model is released here
+  require("auto-finder.core.watchers").set_git_owner(model_mod.WATCH_OWNER, repos)
+  for repo in pairs(S.git) do
+    if not repos[repo] then S.git[repo] = nil end
+  end
   for repo in pairs(repos) do
-    -- a commit / add / checkout from a terminal touches only .git/: this watch is what recolours then
-    watchers.watch_git(repo, model_mod.WATCH_OWNER)
     status.get_async(repo, { ignored = true }, function(entries)
       if not rawequal(token, model.token) or not S.shown then return end
       S.git[repo] = entries and gitc.build(entries, repo) or nil
@@ -276,8 +279,10 @@ local function resolve_repo_top(model)
 end
 
 -- ── watches ────────────────────────────────────────────────────────────────────────────────────────
+-- Idempotent: watch_dir is per (path, owner), so this re-asserts a hold rather than trusting node.watch — a
+-- core teardown (core.reload → watchers.close_all) drops every handle while the model keeps its flags.
 local function arm(node)
-  if node.watch or node.type ~= "directory" or not S.shown then return end
+  if node.type ~= "directory" or not S.shown then return end
   node.watch = require("auto-finder.core.watchers").watch_dir(node.path, model_mod.WATCH_OWNER) or nil
 end
 
@@ -364,7 +369,16 @@ function M.resume(panel_winid)
   if S.shown then
     -- replace semantics: a re-focus re-arms what an auto-core bus reset dropped (v0.2.25 B1)
     subscribe()
-    if S.model and S.model.root ~= vim.fn.getcwd() then M.reroot(vim.fn.getcwd()) end
+    if S.model and S.model.root ~= vim.fn.getcwd() then return M.reroot(vim.fn.getcwd()) end
+    -- and the watches a core teardown (core.reload) dropped: re-arm, then re-read what went unwatched
+    local watchers = require("auto-finder.core.watchers")
+    local lost = {}
+    for _, d in ipairs(model_mod.expanded_dirs(S.model)) do
+      if not watchers.is_dir_watched(d) then lost[#lost + 1] = d end
+      arm(S.model.nodes[d])
+    end
+    for _, d in ipairs(lost) do read_then_paint(d, true) end
+    if #lost > 0 then git_schedule() end
     return
   end
   if not S.model or S.model.root ~= vim.fn.getcwd() then

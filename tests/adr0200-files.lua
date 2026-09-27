@@ -341,6 +341,43 @@ section("[8] git colours", function()
   ok("…and the committed file loses its untracked colour", S.git[ROOT] and S.git[ROOT][ROOT .. "/a/g1.txt"] == nil)
 end)
 
+section("[8b] git holds follow the repos the pane shows", function()
+  local watchers = require("auto-finder.core.watchers")
+  ok("precondition: the outer repo and the expanded nested repo are both held",
+    watchers._gits[ROOT] ~= nil and watchers._gits[ROOT .. "/nested"] ~= nil, vim.inspect(vim.tbl_keys(watchers._gits)))
+  local n0 = fview.git_watch_count()
+  vim.fn.delete(ROOT .. "/nested", "rf")
+  wait(function() return S.model.nodes[ROOT .. "/nested"] == nil end, 2000)
+  wait(function() return watchers._gits[ROOT .. "/nested"] == nil end, 2000)
+  ok("a nested repo deleted while shown releases its git watch", watchers._gits[ROOT .. "/nested"] == nil
+    and fview.git_watch_count() == n0 - 1, vim.inspect(vim.tbl_keys(watchers._gits)))
+  ok("…and its colours are forgotten", S.git[ROOT .. "/nested"] == nil)
+  -- recreate: held again once expanded
+  mk("nested/inner.txt")
+  git(ROOT .. "/nested", "init", "-q", "-b", "main")
+  wait(function() return S.model.nodes[ROOT .. "/nested"] ~= nil end, 2000)
+  wait(function() return visible_paths()[ROOT .. "/nested"] end, 1000)
+  expand("nested")
+  wait(function() return watchers._gits[ROOT .. "/nested"] ~= nil end, 2000)
+  ok("a recreated nested repo, expanded, is held again (one watch)", watchers._gits[ROOT .. "/nested"] ~= nil
+    and fview.git_watch_count() == n0, fview.git_watch_count())
+end)
+
+section("[8c] core.reload while shown: watches come back on the next focus", function()
+  local expanded = #model_mod.expanded_dirs(S.model)
+  ok("precondition: watches == expanded dirs", fview.watch_count() == expanded, fview.watch_count())
+  require("auto-finder.core").reload(af.state.config)
+  ok("precondition: the reload dropped every core-held watch", fview.watch_count() == 0, fview.watch_count())
+  af.focus(1)
+  ok("the next focus restores one watch per expanded directory", fview.watch_count() == expanded,
+    fview.watch_count() .. " vs " .. expanded)
+  wait(function() return fview.git_watch_count() >= 1 end, 1500)
+  ok("…and the repo git watch", fview.git_watch_count() >= 1, fview.git_watch_count())
+  vim.fn.writefile({ "x" }, ROOT .. "/b/after-reload.txt")
+  wait(function() return visible_paths()[ROOT .. "/b/after-reload.txt"] end, 1500)
+  ok("an external create after the reload appears", visible_paths()[ROOT .. "/b/after-reload.txt"] == true)
+end)
+
 section("[9] keymaps: kept keys act, dropped keys are unmapped", function()
   local b = S.bufnr
   local function mapped(lhs)

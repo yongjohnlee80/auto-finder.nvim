@@ -137,6 +137,18 @@ function M.unwatch_git_owner(owner)
   for _, path in ipairs(paths) do M.unwatch_git(path, owner) end
 end
 
+---Make `owner`'s git holds exactly `want` (a set of paths): hold the new ones, release the rest.
+---@param owner any
+---@param want table<string, boolean>
+function M.set_git_owner(owner, want)
+  local drop = {}
+  for path, g in pairs(M._gits) do
+    if g.owners[owner] and not want[path] then drop[#drop + 1] = path end
+  end
+  for _, path in ipairs(drop) do M.unwatch_git(path, owner) end
+  for path in pairs(want) do M.watch_git(path, owner) end
+end
+
 ---Number of git watches, all or those `owner` holds.
 function M.git_watch_count(owner)
   local n = 0
