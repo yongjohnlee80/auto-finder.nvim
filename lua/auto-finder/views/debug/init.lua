@@ -526,6 +526,13 @@ local function _render(bufnr)
   local sessions = _collect_sessions()
   local bp_groups = _collect_breakpoints(ar)
 
+  -- ── state header (ADR 0199 §5.2): always shown, never collapsible. The
+  -- debug pane has no Config row — each entry point owns its whole config.
+  require("auto-finder.views._state_header").emit({
+    lines = lines, rows = rows, mark = mark, pane = "debug",
+    hl = { label = HL.fm_label, value = HL.fm_value, null = HL.fm_null, warn = HL.bp_marker },
+  })
+
   local function emit_bucket_header(section, count)
     local cfg = BUCKETS[section]
     if #lines > 0 then lines[#lines + 1] = "" end
@@ -613,7 +620,10 @@ local function _render(bufnr)
     emit_bucket_header("entries", count)
     if not M._collapsed.entries then
       if count == 0 then
-        local l = "  (no debug/run configs — `a` scaffolds one)"
+        -- Names what actually creates one: no key in this pane does (`a`
+        -- EXPORTS a config), so the old "`a` scaffolds one" sent users to a
+        -- key that could not help. Pane-local creation is ADR 0199 M5.
+        local l = "  (no debug/run configs — <leader>rc scaffolds one, :AutoRun import reads launch.json)"
         lines[#lines + 1] = l
         mark(#lines - 1, 0, #l, HL.empty)
       end
@@ -1181,10 +1191,18 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.debug: env row/header → add KEY=VALUE; entry → export config to launch.json (new: $WORKSPACE/.config)")
   set("s", function()
       local row = _row_under_cursor(panel_winid)
-      if config_section.select(row) then return end
-      env_section.select(row)
+      -- On a Config or Env row: select THAT row, as before. Anywhere else —
+      -- including the header's Env row — open the env chooser, so the key
+      -- works from wherever the cursor is (ADR 0199 §5.2).
+      if row and row.kind ~= "state-env" then
+        if config_section.select(row) then return end
+        if env_section.select(row) then return end
+      end
+      require("auto-finder.views._state_header").choose_env()
     end,
-    "auto-finder.debug: select/deselect the config or env file under cursor (applied to every launch)")
+    "auto-finder.debug: select the env file (on a Config/Env row: that row; elsewhere: choose from a list)")
+  set("b", function() require("auto-finder.views._state_header").choose_base() end,
+    "auto-finder.debug: choose the Base — the launch config merged under every run, debug and test")
   set("x", function() _terminate(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: terminate the session under cursor")
   set("p", function() _pause_continue(_row_under_cursor(panel_winid)) end,
@@ -1231,6 +1249,10 @@ local function _ensure_subscriptions()
     ev.subscribe("run.env:changed",         _on_event),
     ev.subscribe("run.job:started",         _on_event),
     ev.subscribe("run.job:exited",          _on_event),
+    -- The header's Active worktree row, and everything read under it, follow
+    -- auto-core's active worktree; without this the pane kept showing the
+    -- previous worktree after a switch until something else re-rendered it.
+    ev.subscribe("core.active_worktree:changed", _on_event),
   }
 end
 

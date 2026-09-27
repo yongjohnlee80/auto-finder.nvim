@@ -387,6 +387,12 @@ local function _render(bufnr)
     if okr and type(res) == "table" then results = res end
   end
 
+  -- ── state header (ADR 0199 §5.2): always shown, never collapsible ──
+  require("auto-finder.views._state_header").emit({
+    lines = lines, rows = rows, mark = mark, pane = "tests",
+    hl = { label = HL.fm_label, value = HL.fm_value, null = HL.fm_null, warn = HL.scan_capped },
+  })
+
   -- ── header: root + counts + scan state ────────────────────────
   do
     local root = okt and tree.root.path or "?"
@@ -1086,10 +1092,20 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.tests: stop running test jobs")
   set("s", function()
       local row = _row_under_cursor(panel_winid)
-      if config_section.select(row) then return end
-      env_section.select(row)
+      -- On a Config or Env row: select THAT row, as before. Anywhere else —
+      -- including the header's Env row — open the env chooser, so the key
+      -- works from wherever the cursor is (ADR 0199 §5.2).
+      if row and row.kind ~= "state-env" then
+        if config_section.select(row) then return end
+        if env_section.select(row) then return end
+      end
+      require("auto-finder.views._state_header").choose_env()
     end,
-    "auto-finder.tests: select/deselect the config or env file under cursor (applied to every launch)")
+    "auto-finder.tests: select the env file (on a Config/Env row: that row; elsewhere: choose from a list)")
+  set("b", function() require("auto-finder.views._state_header").choose_base() end,
+    "auto-finder.tests: choose the Base — the launch config merged under every run, debug and test")
+  set("c", function() require("auto-finder.views._state_header").choose_test_config() end,
+    "auto-finder.tests: choose the test config for a runtime (writes that runtime's pick)")
   set("e", function() env_section.edit_var(_row_under_cursor(panel_winid)) end,
     "auto-finder.tests: edit the env var's value under cursor (vim.ui.input, prefilled)")
   set("a", function()
@@ -1132,6 +1148,10 @@ local function _ensure_subscriptions()
     ev.subscribe("run.results:changed",   _on_event),
     ev.subscribe("run.env:changed",       _on_event),
     ev.subscribe("run.config:changed",    _on_event),
+    -- The header's Active worktree row, and everything read under it, follow
+    -- auto-core's active worktree; without this the pane kept showing the
+    -- previous worktree after a switch until something else re-rendered it.
+    ev.subscribe("core.active_worktree:changed", _on_event),
   }
 end
 
