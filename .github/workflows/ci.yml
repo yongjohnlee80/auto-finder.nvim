@@ -106,7 +106,10 @@ jobs:
           # `main` as well as on PRs. A gate that is red for a reason unrelated
           # to the change under test cannot distinguish a new failure from the
           # standing one.
-          AUTO_CORE_REF: "5bba92e0bbcf46dc9f486373958f06dd7803627c"  # main @ v0.2.24
+          # ADR-0200: auto-core PR #53 head (fs.scan, core.fs.dir:dirty, git.status
+          # get_async + porcelain v2 -z). Points at the PR head while it is open, as
+          # the worktree pin once did for PR #34; moves to main when #53 merges.
+          AUTO_CORE_REF: "0b1908e43ce405d0d7db308b59267aaf60663a02"  # auto-core PR #53 head
           # BUMPED for ADR-0083 r11: `p` and `d` call
           # `review.amend_pr_association`, which the previous pin predated.
           # Briefly pointed at PR #34's head while that PR was open; now on
@@ -115,8 +118,9 @@ jobs:
           # still resolvable, but not a thing to leave a gating job resting on.
           WORKTREE_REF:  "9a5542e57561329ef9706588c23985fc95157dd4"  # main, carries amend_pr_association
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
-          PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
-          NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
+          # The parity goldens' icon provider and colour scheme (tests/fixtures/parity/manifest.json).
+          MINI_ICONS_REF: "f642e3ba8c12afbc8f32f6d77ef6597eac56786f"
+          CATPPUCCIN_REF: "edefef779ab08ce1a4a404713e3012b0d202bd35"
           NVIM_DAP_REF:  "c9a0738e45f1bd41d792a126941348dce661cf9b"
         run: ./.github/install-deps.sh
 
@@ -150,7 +154,7 @@ jobs:
           test "$got" = "$NVIM_VERSION"
           lazy="$HOME/.local/share/nvim/lazy"
           siblings="$(dirname "$(dirname "$GITHUB_WORKSPACE")")"
-          for d in plenary.nvim nui.nvim nvim-dap auto-core.nvim worktree.nvim; do
+          for d in nvim-dap auto-core.nvim worktree.nvim; do
             test -d "$lazy/$d" || { echo "missing lazy/$d" >&2; exit 1; }
           done
           for d in auto-core.nvim worktree.nvim auto-run.nvim; do
@@ -170,7 +174,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # Kept in step with the install pin above — the guard below asserts it.
-          AUTO_CORE_REF: "5bba92e0bbcf46dc9f486373958f06dd7803627c"
+          AUTO_CORE_REF: "0b1908e43ce405d0d7db308b59267aaf60663a02"
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.
@@ -219,6 +223,8 @@ jobs:
           esac
 
       - name: tests/run-all.sh
+        env:
+          AF_PARITY_DEPS: /home/runner/af-parity-deps
         run: ./tests/run-all.sh
 
   # CONSUMER DRIFT.
@@ -270,8 +276,9 @@ jobs:
           # still resolvable, but not a thing to leave a gating job resting on.
           WORKTREE_REF:  "9a5542e57561329ef9706588c23985fc95157dd4"  # main, carries amend_pr_association
           AUTO_RUN_REF:  "11f2cd836d01abcdaf765b894994fba6b03eb291"
-          PLENARY_REF:   "74b06c6c75e4eeb3108ec01852001636d85a932b"
-          NUI_REF:       "10fc361835c856ba4233ef5ea135b919bf3dce97"
+          # The parity goldens' icon provider and colour scheme (tests/fixtures/parity/manifest.json).
+          MINI_ICONS_REF: "f642e3ba8c12afbc8f32f6d77ef6597eac56786f"
+          CATPPUCCIN_REF: "edefef779ab08ce1a4a404713e3012b0d202bd35"
           NVIM_DAP_REF:  "c9a0738e45f1bd41d792a126941348dce661cf9b"
         run: ./.github/install-deps.sh
 
@@ -308,6 +315,8 @@ jobs:
           exit 1
 
       - name: tests/run-all.sh
+        env:
+          AF_PARITY_DEPS: /home/runner/af-parity-deps
         run: ./tests/run-all.sh
 
       # THE ADDRESSEE. Without this a red scheduled run is a row in the Actions

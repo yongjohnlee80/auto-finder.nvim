@@ -7,6 +7,7 @@
 # Usage:
 #   tests/run-all.sh                      # run all suites
 #   AF_KNOWN_ENV_FAILS=N tests/run-all.sh # tolerate N genuine env fails
+#   AF_PARITY_DEPS=<dir> tests/run-all.sh # required by the parity gate
 #
 # ── SUMMARY SENTINEL (KB todo 2026-08-23) ──────────────────────────
 # Each suite ends by printing a canonical "N passed, M failed" summary
@@ -142,7 +143,7 @@ run_suite() {
   # marker? Suites use three heterogeneous but recognised formats:
   #   • "N passed, M failed"                      (smoke, adr0048, …)
   #   • "<prefix>: N passed, M failed, K skipped" (legacy prefixed form)
-  #   • "RESULT: all expectations met|NOT met"    (adr0059-e2e)
+  #   • "RESULT: all expectations met|NOT met"    (legacy)
   # Anything else means the suite truncated before its end-of-file.
   local saw_summary=0
   if printf '%s\n' "$out" | grep -qE "[0-9]+ passed, [0-9]+ failed|RESULT: (all expectations met|expectations NOT met)"; then
@@ -187,19 +188,19 @@ SUITES=(
   # [46]/[47]/[48] (ADR-0048 Phase 3, views.tests/debug/env) — canonical
   # home for these panel-materialisation sections.
   "adr0048|tests/smoke-adr0048.lua"
-  # ADR-0059 end-to-end: real fs.watch -> translator -> mounted panel,
-  # counting actual root scans. The smoke [50] pins stub the tree, so
-  # this is the only suite covering the real pipeline.
-  "adr0059-e2e|tests/adr0059-e2e.lua"
+  # ADR-0200 — the files slot rebuilt without the retired fork: a hidden
+  # pane does nothing, in-flight reads die with a hide/re-root, a toggle
+  # storm is bounded, watches == expanded dirs, git colours, keymaps.
+  # Counts the WORK (directory reads, git subprocesses, watch handles).
+  "adr0200-files|tests/adr0200-files.lua"
+  # ADR-0200 §4.9 — no reference to the retired fork or its two UI
+  # dependencies outside the two named exemptions, each checked for
+  # premise and liveness.
+  "severance|tests/severance.lua"
   "adr0060-repos|tests/adr0060-repos-render.lua"
   "adr0060-git-actions|tests/adr0060-git-actions.lua"
-  "v0267-loop|tests/v0267-loop-guard.lua"
-  # ADR-0060 r1 — view-lifecycle latch.
-  "r1-lifecycle|tests/adr0060-r1-view-lifecycle.lua"
   # ADR-0065 P3 — review authoring: draft, identity slug, interim submit.
   "adr0065-p3|tests/adr0065-p3-submit.lua"
-  # ADR-0069 - semantic auto-core git-read call-site migration.
-  "adr0069-git-reads|tests/adr0069-git-reads.lua"
   # ADR-0083 - attach review feedback to in-progress task.
   "adr0083-attach|tests/adr0083-repos-task-attach.lua"
   # ADR-0083 - diff resumption and session persistence.
@@ -221,14 +222,14 @@ SUITES=(
 )
 
 # The XDG contract binds EVERY runnable entrypoint, not only the ones
-# this runner executes: bench-files-panel.lua and
-# adr0060-gitignore-probe.lua are run by hand and would reintroduce the
+# this runner executes: a suite run by hand would reintroduce the
 # writable-$HOME dependency just as effectively. So preflight discovers
 # tests/*.lua rather than reading the manifest, and excludes only
-# underscore-prefixed support modules (_sandbox.lua itself).
+# underscore-prefixed support modules (_sandbox.lua itself). The parity
+# gate is an entrypoint one level down; fixture.lua is its support module.
 preflight_targets() {
   local f
-  for f in tests/*.lua; do
+  for f in tests/*.lua tests/parity/compare.lua; do
     case "$(basename "$f")" in
       _*) continue ;;      # support module, not an entrypoint
     esac
@@ -265,6 +266,26 @@ fi
 for entry in "${SUITES[@]}"; do
   run_suite "${entry%%|*}" "${entry#*|}"
 done
+
+# ── PARITY GATE (ADR-0200 §5 cell 1) ──────────────────────────────
+# The rebuilt slots must render what the retired fork rendered: lines,
+# spans and resolved colours against frozen goldens. It needs the icon
+# provider and colour scheme the goldens were captured with, pinned in
+# tests/fixtures/parity/manifest.json and supplied via AF_PARITY_DEPS.
+# Missing deps FAIL the run: a gate that skips itself when its inputs are
+# absent is green on every machine that never set it up. AF_SKIP_PARITY=1
+# is the one explicit opt-out, and it is printed where nobody misses it.
+if [ "${AF_SKIP_PARITY:-0}" = "1" ]; then
+  echo "── parity ────────────────────────────────"
+  echo "   !!! parity: SKIPPED by AF_SKIP_PARITY=1 — this run does NOT prove render parity !!!"
+elif [ -z "${AF_PARITY_DEPS:-}" ] || [ ! -d "${AF_PARITY_DEPS}/mini.icons" ] || [ ! -d "${AF_PARITY_DEPS}/catppuccin" ]; then
+  echo "── parity ────────────────────────────────"
+  echo "   ✗ parity: AF_PARITY_DEPS must name a directory holding mini.icons and catppuccin"
+  echo "     at the SHAs in tests/fixtures/parity/manifest.json (or set AF_SKIP_PARITY=1)"
+  overall=1
+else
+  run_suite "parity" "tests/parity/compare.lua"
+fi
 
 # ── SELF-STAGE GUARD: verdict ──────────────────────────────────────
 if [ "$GIT_GUARD_ACTIVE" -eq 1 ]; then

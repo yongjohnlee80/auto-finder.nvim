@@ -37,13 +37,14 @@ local plugins_root = vim.fn.fnamemodify(plugin_root, ":h:h")
 for _, p in ipairs({
   plugin_root,
   LAZY .. "/auto-core.nvim",
-  LAZY .. "/nui.nvim",
-  LAZY .. "/plenary.nvim",
   -- Real nvim-dap for the debug-view breakpoint sections ([47]) — the
   -- §8.3 delete paths run against the actual dap.breakpoints
   -- get/set/remove surface, not a stub.
   LAZY .. "/nvim-dap",
   plugins_root .. "/auto-core.nvim/main",
+  -- Same-branch sibling after `main`, so it wins (prepend reverses order): the files slot needs
+  -- auto-core.fs.scan, and a cross-repo change lives in two same-named worktrees until it merges.
+  plugins_root .. "/auto-core.nvim/" .. vim.fn.fnamemodify(plugin_root, ":t"),
   -- auto-run sibling (soft dep of the tests/debug views). Same
   -- sibling-worktree resolution as auto-core above.
   plugins_root .. "/auto-run.nvim/main",
@@ -52,8 +53,6 @@ for _, p in ipairs({
     vim.opt.runtimepath:prepend(p)
   end
 end
--- Auto-finder ships its own forked neo-tree at lua/auto-finder/neotree.
--- Upstream `neo-tree.nvim` is intentionally NOT on the runtimepath.
 
 vim.o.columns = 200
 vim.o.lines = 60
@@ -81,13 +80,6 @@ local function ok(name, cond, detail)
   end
 end
 
--- Same neo-tree pre-setup as tests/smoke.lua's prelude: auto-finder's
--- setup() re-calls it via cfg.neo_tree; pre-calling confirms the
--- merge_config path caches correctly.
-require("auto-finder.neotree").setup({
-  window = { auto_expand_width = true },
-  filesystem = { hijack_netrw_behavior = "disabled" },
-})
 
 -- ───────────────────────── [1] setup() — shared bootstrap ─────────────────────────
 -- Duplicated from tests/smoke.lua section [1]: [46] drives the panel
@@ -100,10 +92,6 @@ local setup_ok, err = pcall(af.setup, {
   width = { default = 38, min = 25, max = 100 },
   default_section = 1,
   sections = { "config", "files" },
-  neo_tree = {
-    window = { auto_expand_width = true },
-    filesystem = { hijack_netrw_behavior = "disabled" },
-  },
 })
 ok("setup returns without error", setup_ok, err)
 ok("state.config populated", af.state.config ~= nil)

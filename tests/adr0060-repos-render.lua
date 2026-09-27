@@ -13,9 +13,6 @@ local root = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h:h")
 local LAZY = vim.fn.expand("~/.local/share/nvim/lazy")
 local sib = vim.fn.fnamemodify(root, ":h:h")
 local branch_dir = vim.fn.fnamemodify(root, ":t")
-for _, p in ipairs({ LAZY .. "/nui.nvim", LAZY .. "/plenary.nvim" }) do
-  if vim.fn.isdirectory(p) == 1 then vim.opt.runtimepath:prepend(p) end
-end
 -- The marker each dependency must actually PROVIDE for this suite to mean
 -- anything -- the same surfaces the loaded_from() assertions below check.
 -- A checkout lacking it is not an older version of the dependency, it is one

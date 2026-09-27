@@ -13,10 +13,12 @@
 # Refs come from the environment. An EMPTY ref means "whatever the default
 # branch is now" — that is the drift job's whole purpose, so it is a supported
 # value and not a mistake:
-#   AUTO_CORE_REF  WORKTREE_REF  AUTO_RUN_REF  PLENARY_REF  NUI_REF  NVIM_DAP_REF
+#   AUTO_CORE_REF  WORKTREE_REF  AUTO_RUN_REF  NVIM_DAP_REF  MINI_ICONS_REF  CATPPUCCIN_REF
 #
-# neo-tree is NOT here: auto-finder ships its own fork under
-# lua/auto-finder/neotree. Nor is gitgraph, which is named only in a comment
+# The parity gate (tests/parity/compare.lua, ADR-0200) renders with the icon
+# provider and colour scheme its goldens were captured with, so those two are
+# pinned to the SHAs in tests/fixtures/parity/manifest.json and exposed through
+# AF_PARITY_DEPS. gitgraph is not here: it is named only in a comment
 # explaining why a path is not driven headless.
 set -euo pipefail
 
@@ -52,9 +54,14 @@ for spec in "auto-core.nvim:${AUTO_CORE_REF:-}" \
 done
 
 echo "third-party:"
-clone_at https://github.com/nvim-lua/plenary.nvim "$lazy/plenary.nvim"  "${PLENARY_REF:-}"
-clone_at https://github.com/MunifTanjim/nui.nvim "$lazy/nui.nvim"      "${NUI_REF:-}"
 # Real nvim-dap: smoke and smoke-adr0048 drive the actual surface rather than a
 # stub, and both prepend it only `if isdirectory` — omitting it would not fail
 # the suite, it would quietly test less.
 clone_at https://github.com/mfussenegger/nvim-dap "$lazy/nvim-dap"     "${NVIM_DAP_REF:-}"
+
+# Parity-gate dependencies (ADR-0200 §5 cell 1), outside the lazy dir so no suite
+# picks them up by accident: only compare.lua reads AF_PARITY_DEPS.
+parity="$HOME/af-parity-deps"
+mkdir -p "$parity"
+clone_at https://github.com/nvim-mini/mini.icons "$parity/mini.icons" "${MINI_ICONS_REF:-}"
+clone_at https://github.com/catppuccin/nvim       "$parity/catppuccin" "${CATPPUCCIN_REF:-}"
