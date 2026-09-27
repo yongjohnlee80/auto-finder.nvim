@@ -44,7 +44,7 @@ function M.values(st)
     if w.is_repo then
       text = tostring(w.label) .. (w.branch and ("  (" .. w.branch .. ")") or "")
     else
-      text = tostring(w.label) .. " — not a repository"
+      text = tostring(w.label) .. " — not a repository · w to choose one"
     end
     if w.source and w.source ~= "active" then
       text = text .. "  · from " .. w.source
@@ -134,7 +134,7 @@ function M.emit(opts)
       rows[#rows + 1] = { kind = "state-unavailable", lnum = #lines }
     else
       local v = M.values(st)
-      push("state-worktree", "Active worktree", v.worktree.text, v.worktree.tone, nil)
+      push("state-worktree", "Active worktree", v.worktree.text, v.worktree.tone, "w")
       push("state-env", "Env", v.env.text, v.env.tone, "s")
       push("state-base", "Base", v.base.text, v.base.tone, "b")
       if opts.pane == "tests" then
@@ -152,6 +152,15 @@ end
 
 -- ─── choosers (the keys on the header rows) ─────────────────────────
 
+---A chooser error as text. auto-run's setters return structured errors
+---(`{ code, message }`); tostring() on one prints a table address.
+---@param err any
+---@return string
+local function errtext(err)
+  if type(err) == "table" then return tostring(err.message or err.code or vim.inspect(err)) end
+  return tostring(err)
+end
+
 -- Through auto-finder.log, never a bare vim.notify: the toast must also land
 -- in the auto-core ring for :AutoCoreLog triage (smoke A9).
 local function notify(msg, level)
@@ -165,16 +174,71 @@ function M.choose_env()
     return notify("this auto-run.nvim has no env selection API", "warn")
   end
   local ok, cands = pcall(env.files_list)
-  local items, labels = { false }, { "(process env only)" }
+  local items, labels, missing = { false }, { "(process env only)" }, {}
   for _, c in ipairs(ok and cands or {}) do
     items[#items + 1] = c.path
-    labels[#labels + 1] = vim.fn.fnamemodify(c.path, ":~")
+    -- A config can reference an env file that does not exist. Offered
+    -- unmarked, it looked like any other and then failed when chosen.
+    local label = vim.fn.fnamemodify(c.path, ":~")
+    if c.exists == false then
+      label = label .. "  (missing)"
+      missing[#items] = true
+    end
+    labels[#labels + 1] = label
   end
   vim.ui.select(labels, { prompt = "Env file for every run, debug and test" }, function(_, idx)
     if not idx then return end
+    if missing[idx] then
+      return notify(vim.fn.fnamemodify(items[idx], ":~")
+        .. " does not exist — create it, or choose another", "warn")
+    end
     local path = items[idx] or nil
     local okset, err = env.set_selected(path)
-    if not okset then notify(tostring(err), "error") end
+    if not okset then notify(errtext(err), "error") end
+  end)
+end
+
+---`w` — choose the Active worktree: every worktree under the workspace, as
+---`<repo> (<branch>) — <relative path>`. Sets auto-core's active worktree —
+---the one owner (ADR 0199 §7.2) — and never changes the cwd, so the editor
+---stays where it is while every auto-core consumer follows the choice (the
+---same as a worktree.nvim switch, minus the `cd`).
+function M.choose_worktree()
+  local okw, wt = pcall(require, "auto-core.git.worktree")
+  if not okw or type(wt.collect) ~= "function" or type(wt.set_active) ~= "function" then
+    return notify("this auto-core.nvim cannot list worktrees", "warn")
+  end
+  local fs_path = require("auto-core.fs.path")
+  local root = fs_path.normalize(wt.get_workspace_root() or vim.fn.getcwd())
+  local entries, seen = {}, {}
+  local function add(list)
+    for _, e in ipairs(list or {}) do
+      local p = e.path and fs_path.normalize(e.path)
+      if p and not e.bare and not seen[p] then
+        seen[p] = true
+        entries[#entries + 1] = { path = p, branch = e.branch, detached = e.detached }
+      end
+    end
+  end
+  -- The workspace root is itself a repo when nvim was opened inside one
+  -- (collect walks only its children).
+  if fs_path.exists(root .. "/.git") then add((wt.list(root))) end
+  add((wt.collect(root)))
+  if #entries == 0 then return notify("no worktrees found under " .. vim.fn.fnamemodify(root, ":~")) end
+  table.sort(entries, function(a, b) return a.path < b.path end)
+
+  local active = wt.get_active()
+  active = active and fs_path.normalize(active) or nil
+  local labels = {}
+  for i, e in ipairs(entries) do
+    local rel = e.path == root and "." or (e.path:sub(1, #root + 1) == root .. "/" and e.path:sub(#root + 2) or e.path)
+    local repo = rel == "." and vim.fn.fnamemodify(root, ":t") or rel:match("^[^/]+")
+    local branch = e.branch or (e.detached and "detached") or "?"
+    labels[i] = (e.path == active and "* " or "  ") .. repo .. " (" .. branch .. ") — " .. rel
+  end
+  vim.ui.select(labels, { prompt = "Active worktree (auto-core — shared by every plugin)" }, function(_, idx)
+    if not idx then return end
+    wt.set_active(entries[idx].path)
   end)
 end
 
@@ -196,7 +260,7 @@ function M.choose_base()
   vim.ui.select(labels, { prompt = "Base — applies to every run, debug and test" }, function(_, idx)
     if not idx then return end
     local okset, err = import.set_selected(items[idx] or nil)
-    if not okset then notify(tostring(err and err.message or err), "error") end
+    if not okset then notify(errtext(err), "error") end
   end)
 end
 
@@ -235,7 +299,7 @@ function M.choose_test_config()
     vim.ui.select(labels, { prompt = "Test config for " .. rt }, function(_, idx)
       if not idx then return end
       local okset, err = cfg.pick(rt, items[idx] or nil)
-      if not okset then notify(tostring(err), "error") end
+      if not okset then notify(errtext(err), "error") end
     end)
   end
 

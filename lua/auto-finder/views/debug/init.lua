@@ -1201,6 +1201,8 @@ local function _apply_keymaps(bufnr, panel_winid)
       require("auto-finder.views._state_header").choose_env()
     end,
     "auto-finder.debug: select the env file (on a Config/Env row: that row; elsewhere: choose from a list)")
+  set("w", function() require("auto-finder.views._state_header").choose_worktree() end,
+    "auto-finder.debug: choose the Active worktree (auto-core's — every plugin follows it; the cwd stays)")
   set("b", function() require("auto-finder.views._state_header").choose_base() end,
     "auto-finder.debug: choose the Base — the launch config merged under every run, debug and test")
   set("x", function() _terminate(_row_under_cursor(panel_winid)) end,
