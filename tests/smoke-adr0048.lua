@@ -1909,6 +1909,24 @@ print("\n[51] ADR 0199 §6.2 — tests pane Test configs section")
   tests_view.on_focus(w, b)
   local sp = find(function(r) return r.kind == "test-shared-pick" end)
   ok("p51: the shared per-kind pick has its own row", sp ~= nil and line_of(sp):find(other, 1, true) ~= nil, text())
+  -- A FAILED clear must not claim success (Lector M5b): the pick stays, the
+  -- row stays, and the user is told it failed — never "cleared".
+  do
+    local logm = require("auto-finder.log")
+    local real_notify, told = logm.notify, {}
+    logm.notify = function(msg, o) told[#told + 1] = { msg = tostring(msg), level = o and o.level } end
+    local real_ws = store.write_state
+    store.write_state = function() return false, "injected: read-only" end
+    press("s", sp)
+    store.write_state = real_ws
+    logm.notify = real_notify
+    ok("p51: a failed shared-pick clear says it failed, never 'cleared'",
+      #told == 1 and told[1].level == "error" and not told[1].msg:find("cleared the", 1, true),
+      vim.inspect(told))
+    ok("p51: …and the pick and its row remain", (exec.picks() or {}).test == other
+      and find(function(r) return r.kind == "test-shared-pick" end) ~= nil, vim.inspect(exec.picks()))
+    sp = find(function(r) return r.kind == "test-shared-pick" end)
+  end
   press("s", sp)
   ok("p51: s on the shared-pick row clears it",
     (exec.picks() or {}).test == nil and cfgm.test_config_name("go") == first, vim.inspect(exec.picks()))
