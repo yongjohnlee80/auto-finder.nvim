@@ -1411,7 +1411,9 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
     not have["state-test-config"], text_of(b2))
   ok("p49: the empty Entry Points hint names what actually creates a config",
     text_of(b2):find("`a` scaffolds one", 1, true) == nil
-      and text_of(b2):find("<leader>rc scaffolds one", 1, true) ~= nil, text_of(b2))
+      and text_of(b2):find("<leader>rc", 1, true) == nil
+      and text_of(b2):find("`a` adds one", 1, true) ~= nil and text_of(b2):find("`I` imports", 1, true) ~= nil,
+    text_of(b2))
   local dmaps = keymap_table(b2)
   ok("p49: debug pane maps s and b", rawget(dmaps, "s") and rawget(dmaps, "b"))
   local _, dwrow = row_line(debug_view, b2, "state-worktree")
