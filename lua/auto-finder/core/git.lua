@@ -152,9 +152,8 @@ function M.snapshot_async(cwd, cb)
     return
   end
   -- Wait for the next auto-finder.core.git:changed event, then
-  -- fire. (Phase 4's `auto-finder.core.ready` topic is for files;
-  -- git readiness has no equivalent "global ready" signal — it's
-  -- per-repo and populates on first query.)
+  -- fire. (Git readiness has no "global ready" signal — it's per-repo
+  -- and populates on first query.)
   local events_mod = require("auto-finder.core.events")
   local handle
   handle = events_mod.subscribe("auto-finder.core.git:changed", function()

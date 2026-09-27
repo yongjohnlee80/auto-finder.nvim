@@ -1,40 +1,21 @@
----auto-finder.core.watchers — fs.watch + git.watch handle owner.
+---auto-finder.core.watchers — every libuv watcher auto-finder holds (ADR-0026 A2).
 ---
----Owns every libuv-backed watcher auto-finder uses. Today these
----are scattered across the section modules; ADR 0026 Phase 4
----centralizes fs.watch ownership here so handles survive section
----switches and panel-close events. Phase 5 will add git.watch
----ownership alongside.
+---Two kinds, both owned here so no view opens a handle itself:
 ---
----Lifecycle hooks (called from `auto-finder.core.ensure_started`
----and `core.stop`):
+---  * per-DIRECTORY watches for the files slot (ADR-0200 §4.4): one non-recursive
+---    `fs.watch` per directory the view has expanded, only while it is shown. Owner-
+---    scoped: a directory stays watched while any owner still wants it.
+---      watchers.watch_dir(path, owner) / unwatch_dir(path, owner) / unwatch_owner(owner)
+---      watchers.is_dir_watched(path) / dir_watch_count(owner?)
+---  * per-WORKTREE watches for the repos panel (ADR-0060 §2.3): one `git.watch` for
+---    commits/checkouts and one recursive working-tree `fs.watch` for the UNCOMMITTED
+---    row, for each worktree in worktree.nvim's watch registry.
+---      watchers.reconcile_watched()
 ---
----  watchers.open_for(cwd)   — start fs.watch (Phase 4)
----                              + git.watch (Phase 5, deferred)
----  watchers.close_for(cwd)  — stop the pair (used on reload)
----  watchers.close_all()     — full teardown (used on core.stop)
----  watchers.list()          — list of watched cwds
----
----Handle-cap degradation (ADR §2.6): when
----`auto-core.fs.watch.start` returns an error indicating
----max_handles exhaustion, log warn to `auto-finder.core.watchers`
----per [[auto-family-logging]] AND publish
----`auto-finder.core.ready` with payload `areas.files = 'partial'`
----so subscribers (the warmer + future views) can surface a "live
----refresh limited" badge. Manual `:AutoFinderReload` / `R` still
----works regardless.
----
----**Phase 4 status: fs.watch ownership lands.** Phase 5 adds
----git.watch. Phase 7 wires graceful degradation telemetry into
----the new view mount contract.
----
+---  watchers.close_all()           — full teardown (core.stop)
 ---@module 'auto-finder.core.watchers'
 
 local M = {}
-
--- Per-cwd handle map. Phase 4 populates `fs`; Phase 5 adds `git`.
---   { [cwd] = { fs = <handle>, git = <handle>? }, … }
-M._handles = {}
 
 ---@return table|nil  auto-core.fs.watch module, or nil if absent
 local function _fs_watch_mod()
@@ -49,11 +30,6 @@ local function _fs_watch_mod()
 end
 
 ---@return table|nil  auto-core.git.watch module, or nil if absent
----auto-core ≥ v0.1.19 ships git.watch; older versions return nil
----here and we silently skip the .git/-plumbing watcher. The
----decorator path remains correct (git status pulls via
----neo-tree's bundled git query); it's just less responsive to
----external commits.
 local function _git_watch_mod()
   local ok, core = pcall(require, "auto-core")
   if not ok or type(core) ~= "table"
@@ -65,106 +41,67 @@ local function _git_watch_mod()
   return core.git.watch
 end
 
----Start fs.watch for `cwd`. Idempotent — re-call returns the
----existing handle bundle without re-opening. Soft-fails if
----auto-core's fs.watch surface isn't loadable.
----@param cwd string
----@return table|nil bundle  { fs = <handle> } or nil on failure
-function M.open_for(cwd)
-  if M._handles[cwd] then return M._handles[cwd] end
+-- ── per-DIRECTORY watches (files slot, ADR-0200 §4.4) ──────────────────────────
+M._dirs = {}  -- { [path] = { handle = <fs.watch handle>, owners = { [owner] = true } } }
+
+---Watch `path` (non-recursive) on behalf of `owner`. Idempotent per (path, owner).
+---@param path string
+---@param owner any
+---@return boolean ok
+function M.watch_dir(path, owner)
+  local d = M._dirs[path]
+  if d then
+    d.owners[owner] = true
+    return true
+  end
   local fs_watch = _fs_watch_mod()
-  if not fs_watch then return nil end
-
-  local bundle = {}
-
-  -- Working-tree fs.watch. Recursive walk per the existing
-  -- shared/neotree.lua semantics. Open first so a partial-
-  -- coverage signal lands before we attempt git.watch (which
-  -- doesn't have a max_handles failure mode of its own — it's
-  -- the three narrow handles ADR 0025 added).
-  local fs_handle, fs_err = fs_watch.start(cwd, { recursive = true })
-  if fs_handle then
-    bundle.fs = fs_handle
-  else
-    local err_str = tostring(fs_err)
-    pcall(function()
-      require("auto-finder.log").warn("core.watchers",
-        "fs.watch start failed at " .. cwd .. ": " .. err_str)
-    end)
-    if err_str:match("max_handles") then
-      pcall(function()
-        require("auto-finder.core.files")._set_readiness("partial")
-        require("auto-finder.core.events").publish(
-          "auto-finder.core.ready",
-          { areas = { files = "partial" } })
-      end)
-    end
-  end
-
-  -- `.git/`-plumbing watcher (ADR 0025). Soft-deps on
-  -- auto-core ≥ v0.1.19. If cwd isn't in a git repo, the
-  -- auto-core side returns nil + err; we log debug (routine,
-  -- not an error) and proceed with just the working-tree
-  -- watcher. The git decorator path still works via neo-tree's
-  -- bundled git query — Phase 5 ships the real cache.
-  -- ADR-0060 §2.8: no git.watch. It existed so the files panel could
-  -- re-decorate when the index moved (ADR-0025); the panel no longer
-  -- decorates by git, so the handle would fire into nothing. The repos panel
-  -- watches per-worktree and opt-in instead (§2.3). `bundle.git` stays in the
-  -- shape so M.list() and close_for() are unchanged for any caller that still
-  -- reads it.
-
-  -- Only register the bundle if at least one watcher came up.
-  -- An entry with both handles nil is indistinguishable from
-  -- "never tried" and pollutes M.list().
-  if bundle.fs or bundle.git then
-    M._handles[cwd] = bundle
-    return bundle
-  end
-  return nil
+  if not fs_watch then return false end
+  local h = fs_watch.start(path, { recursive = false, self_extend = false })
+  if not h then return false end
+  M._dirs[path] = { handle = h, owners = { [owner] = true } }
+  return true
 end
 
----Stop the fs.watch + git.watch handles for `cwd`. No-op if
----`cwd` isn't being watched. Idempotent.
----@param cwd string
-function M.close_for(cwd)
-  local bundle = M._handles[cwd]
-  if not bundle then return end
-  local fs_watch  = _fs_watch_mod()
-  local git_watch = _git_watch_mod()
-  if fs_watch and bundle.fs and type(fs_watch.stop) == "function" then
-    pcall(fs_watch.stop, bundle.fs)
+---Stop watching `path` for `owner`; the handle closes when no owner is left.
+function M.unwatch_dir(path, owner)
+  local d = M._dirs[path]
+  if not d then return end
+  d.owners[owner] = nil
+  if next(d.owners) == nil then
+    local fs_watch = _fs_watch_mod()
+    if fs_watch then pcall(fs_watch.stop, d.handle) end
+    M._dirs[path] = nil
   end
-  if git_watch and bundle.git and type(git_watch.stop) == "function" then
-    pcall(git_watch.stop, bundle.git)
-  end
-  M._handles[cwd] = nil
 end
 
----Stop every fs.watch + git.watch handle this module opened.
----Used by `core.stop` at session teardown.
+---Release every directory `owner` holds.
+function M.unwatch_owner(owner)
+  local paths = {}
+  for path, d in pairs(M._dirs) do if d.owners[owner] then paths[#paths + 1] = path end end
+  for _, path in ipairs(paths) do M.unwatch_dir(path, owner) end
+end
+
+---@param path string
+---@return boolean
+function M.is_dir_watched(path) return M._dirs[path] ~= nil end
+
+---Number of directory watches, all or those `owner` holds.
+function M.dir_watch_count(owner)
+  local n = 0
+  for _, d in pairs(M._dirs) do
+    if owner == nil or d.owners[owner] then n = n + 1 end
+  end
+  return n
+end
+
+---Stop every watcher this module opened. Used by `core.stop` at session teardown.
 function M.close_all()
-  local fs_watch  = _fs_watch_mod()
-  local git_watch = _git_watch_mod()
-  for cwd, bundle in pairs(M._handles) do
-    if fs_watch and bundle.fs and type(fs_watch.stop) == "function" then
-      pcall(fs_watch.stop, bundle.fs)
-    end
-    if git_watch and bundle.git and type(git_watch.stop) == "function" then
-      pcall(git_watch.stop, bundle.git)
-    end
-    M._handles[cwd] = nil
+  local fs_watch = _fs_watch_mod()
+  for path, d in pairs(M._dirs) do
+    if fs_watch then pcall(fs_watch.stop, d.handle) end
+    M._dirs[path] = nil
   end
-  -- The per-watched-worktree set too (ADR-0060 §2.3), so a session teardown
-  -- leaves no live handle behind.
   M.close_watched()
-end
-
----@return string[]  list of cwds currently being watched
-function M.list()
-  local out = {}
-  for cwd in pairs(M._handles) do out[#out + 1] = cwd end
-  return out
 end
 
 -- ── per-WATCHED-WORKTREE live watchers (ADR-0060 §2.3) ────────────────
@@ -177,13 +114,11 @@ end
 --
 -- This reconciler is that opt-in. It is bounded by design: only a few
 -- worktrees are watched, and each costs `git.watch`'s two narrow `.git/`
--- handles plus — for a worktree the files panel is NOT already watching — one
--- recursive working-tree `fs.watch`. Nothing here touches the files-panel
--- `cwd` watcher in `M._handles`.
+-- handles plus one recursive working-tree `fs.watch`.
 --
 -- Repos-owned handle maps, keyed by absolute worktree PATH:
 M._repo_git = {}  -- { [path] = <git.watch handle> }
-M._repo_fs  = {}  -- { [path] = <fs.watch handle> }  (only where cwd isn't already covering it)
+M._repo_fs  = {}  -- { [path] = <fs.watch handle> }
 
 ---The set of currently-watched worktree paths, from worktree.nvim's registry.
 ---Empty (not an error) when worktree.nvim is absent.
@@ -210,9 +145,9 @@ end
 ---translates to a repos refresh, so arming it is all commit / checkout / reset
 ---/ merge need. The working-tree fs watcher exists for the UNCOMMITTED row:
 ---an unstaged edit touches neither `.git/HEAD` nor the index, so only a
----working-tree watch can make that row appear on its own. It is skipped for a
----worktree the files panel is ALREADY watching (`M._handles[path]`), so `cwd`
----is never double-watched.
+---working-tree watch can make that row appear on its own. Every watched
+---worktree gets one; the files slot no longer walks the cwd (ADR-0200), so
+---nothing else covers it.
 function M.reconcile_watched()
   local git_watch = _git_watch_mod()
   local fs_watch  = _fs_watch_mod()
@@ -234,31 +169,14 @@ function M.reconcile_watched()
     end
   end
 
-  -- Working-tree fs.watch: exactly one handle per path, and the files-panel
-  -- `M._handles` map is authoritative when it covers a path (that is the same
-  -- recursive working-tree watch, owned by the cwd lifecycle).
+  -- Working-tree fs.watch: exactly one handle per watched path.
   if fs_watch then
-    -- (a) OWNERSHIP TRANSFER: a path we armed while it was not cwd, that has
-    --     since become cwd, is now covered by the files handle. Retire our
-    --     duplicate rather than run two recursive watchers on one tree (lector
-    --     PR #42 #2). Runs before arming so the arm loop sees a clean state.
-    for path, h in pairs(M._repo_fs) do
-      if M._handles[path] then
-        pcall(fs_watch.stop, h)
-        M._repo_fs[path] = nil
-      end
-    end
-    -- (b) ARM a repos-owned handle only for a wanted path the files panel is
-    --     NOT covering. When a path stops being cwd (its files handle is gone)
-    --     this re-arms it, so a watched worktree is never left without a
-    --     working-tree watch.
     for path in pairs(want) do
-      if not M._repo_fs[path] and not M._handles[path] then
+      if not M._repo_fs[path] then
         local h = fs_watch.start(path, { recursive = true })
         if h then M._repo_fs[path] = h end
       end
     end
-    -- (c) STOP a repos-owned handle for a path no longer watched.
     for path, h in pairs(M._repo_fs) do
       if not want[path] then
         pcall(fs_watch.stop, h)
@@ -299,9 +217,9 @@ function M.watched_worktrees()
 end
 
 ---@param path string
----@return boolean  is a working-tree fs.watch live for `path` (repos-owned OR the files-panel cwd handle)
+---@return boolean  is a working-tree fs.watch live for `path`
 function M.has_worktree_fs_watch(path)
-  return M._repo_fs[path] ~= nil or M._handles[path] ~= nil
+  return M._repo_fs[path] ~= nil
 end
 
 ---Stop every per-worktree watcher (git + working-tree). Folded into
@@ -322,7 +240,7 @@ end
 ---Test-only: clear the handle map without stopping (used to
 ---simulate auto-core bus reset taking the underlying handles).
 function M._reset_for_tests()
-  M._handles = {}
+  M._dirs = {}
   M._repo_git = {}
   M._repo_fs = {}
 end

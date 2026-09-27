@@ -20,9 +20,8 @@
 ---**Phase 6 status: real impl.** Phase 1 shipped this as a
 ---placeholder. Phase 6 wires the autocmd subscriptions through
 ---`core.ensure_started` so the cache stays current across panel
----switches, and publishes the translated topic so view modules
----can subscribe via the new `core_refresh_topic` opt on
----`shared.neotree.build_section`.
+---switches, and publishes the translated topic the buffers view
+---subscribes to while it is shown.
 ---
 ---@module 'auto-finder.core.buffers'
 
@@ -54,8 +53,7 @@ end
 
 ---v0.2.67: only user-visible buffers belong in the cache — the
 ---buffers view renders listed buffers plus terminals and nothing
----else (`neotree/sources/buffers/lib/items.lua` filters on
----`buflisted`). Tracking every buffer meant every scratch/`nofile`
+---else (views/buffers filters on `buflisted`). Tracking every buffer meant every scratch/`nofile`
 ---buffer — notifier toasts, cursor-trail floats, picker previews —
 ---published a `buffers:changed` event on create/delete/enter. That
 ---event spam was the transport of the notification→refresh feedback
@@ -118,8 +116,7 @@ function M.snapshot_now()
   for _, e in pairs(M._cache) do
     list[#list + 1] = e
   end
-  -- Sort by bufnr so consumers get a stable order. neo-tree's
-  -- bundled buffers source orders by bufnr too.
+  -- Sort by bufnr so consumers get a stable order.
   table.sort(list, function(a, b) return a.bufnr < b.bufnr end)
   return { list = list, readiness = M._readiness }
 end
