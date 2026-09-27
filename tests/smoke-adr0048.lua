@@ -2144,6 +2144,29 @@ print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profile
   ok("p52: o fans a profile out, its runtime_env masked",
     prop(debug_view, "pm-prof", "base_env_files") and prop(debug_view, "pm-prof", "runtime_env.TOKEN")
       and not text(db):find("prof-secret-2718", 1, true), text(db))
+  -- Lector #59: a list edit of a TRACKED-only record must make the effective
+  -- list exactly what was entered — no duplicates, and an inherited entry
+  -- can be dropped (the lists append across tiers otherwise).
+  input("${worktree}/.env ${worktree}/.env.b")
+  press(debug_view, dw, db, "e", prop(debug_view, "pm-prof", "base_env_files"))
+  ok("p52: editing a tracked profile's list makes it exactly what was entered",
+    vim.deep_equal(store.get_profile("pm-prof").base_env_files, { "${worktree}/.env", "${worktree}/.env.b" }),
+    vim.inspect(store.get_profile("pm-prof").base_env_files))
+  input("${worktree}/.env.b")
+  press(debug_view, dw, db, "e", prop(debug_view, "pm-prof", "base_env_files"))
+  ok("p52: …including dropping the inherited entry",
+    vim.deep_equal(store.get_profile("pm-prof").base_env_files, { "${worktree}/.env.b" }),
+    vim.inspect(store.get_profile("pm-prof").base_env_files))
+  store.add({ name = "pm-list", kind = "run", runtime = "go", program = "sh", env_files = { "${worktree}/.env" } },
+    { tier = "tracked" })
+  debug_view.on_focus(dw, db)
+  press(debug_view, dw, db, "o", find(debug_view, function(r) return r.kind == "entry" and r.name == "pm-list" end))
+  input("${worktree}/.env.b")
+  press(debug_view, dw, db, "e", prop(debug_view, "pm-list", "env_files"))
+  ok("p52: the same for a tracked entry point's env_files (it routes to overrides.json)",
+    vim.deep_equal((store.get("pm-list") or {}).env_files, { "${worktree}/.env.b" }),
+    vim.inspect((store.get("pm-list") or {}).env_files))
+  pcall(store.remove, "pm-list", { tier = "tracked" })
   input("MODE=dev")
   press(debug_view, dw, db, "e", prop(debug_view, "pm-prof", "runtime_env+"))
   ok("p52: e adds a runtime_env var to the profile", (store.get_profile("pm-prof").runtime_env or {}).MODE == "dev",
