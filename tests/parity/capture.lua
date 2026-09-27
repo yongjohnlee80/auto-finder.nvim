@@ -163,11 +163,23 @@ local function dump(bufnr, winid)
     if a.col ~= b.col then return a.col < b.col end
     return tostring(a.hl) < tostring(b.hl)
   end)
+  -- Window-local look. The fork's BufEnter handler (neotree/setup/init.lua buffer_enter_event) styles
+  -- EVERY filetype=auto-finder buffer's window, not only its own views, so these are part of the panel's
+  -- look for marks/todos/tests/repos too.
+  local win = nil
+  if winid then
+    win = {}
+    for _, o in ipairs({ "cursorline", "cursorlineopt", "wrap", "list", "spell", "number",
+      "relativenumber", "winhighlight", "foldcolumn", "signcolumn" }) do
+      win[o] = vim.api.nvim_get_option_value(o, { win = winid })
+    end
+  end
   return {
     lines = lines,
     spans = spans,
     width = winid and vim.api.nvim_win_get_width(winid) or nil,
     filetype = vim.bo[bufnr].filetype,
+    win = win,
   }
 end
 
@@ -286,7 +298,7 @@ local function scenario_files(name, opts)
   local ok_setup, err = pcall(af.setup, {
     width = { default = 38, min = 25, max = 100 },
     default_section = 1,
-    sections = { "config", "files", "buffers" },
+    sections = { "config", "files", "buffers", "marks" },
     neo_tree = consumer_neo_tree(opts.git),
   })
   if not ok_setup then die("setup: " .. tostring(err)) end
@@ -340,6 +352,24 @@ scenario_files("files-w38-git-marks", { git = true, marks = true })
 scenario_files("files-w70-git", { git = true, width = 70 })
 scenario_buffers("buffers-w38")
 scenario_buffers("buffers-w70", 70)
+
+-- The marks slot has its own renderer; captured for the WINDOW look the fork applies to it (and to every
+-- other filetype=auto-finder view), which must survive the fork's deletion.
+if wanted("marks-w38") then
+  af.reset_width()
+  vim.cmd("edit " .. ROOT .. "/src/main.lua")
+  vim.cmd("normal! ma")
+  af.focus("marks")
+  local bufnr
+  settle(function()
+    bufnr = vim.api.nvim_win_get_buf(af.state.panel_winid)
+    return vim.b[bufnr].auto_finder_view == "marks"
+  end)
+  -- the fork styles on BufEnter of the panel window: enter it as a user does
+  vim.api.nvim_set_current_win(af.state.panel_winid)
+  settle(function() return vim.wo[af.state.panel_winid].cursorline end, 1000)
+  save("marks-w38", dump(bufnr, af.state.panel_winid))
+end
 
 local f = assert(io.open(out_dir .. "/manifest.json", "w"))
 f:write(canon(manifest) .. "\n")
