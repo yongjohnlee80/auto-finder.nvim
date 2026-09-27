@@ -202,7 +202,12 @@ local function has_git_span(bufnr)
   return false
 end
 
-local out_dir = plugin_root .. "/tests/fixtures/parity"
+-- AF_PARITY_OUT redirects the write (a provenance re-run compares against the committed goldens instead
+-- of replacing them); AF_PARITY_ONLY is a comma list of scenario names to run.
+local out_dir = vim.env.AF_PARITY_OUT or (plugin_root .. "/tests/fixtures/parity")
+local ONLY = {}
+for n in (vim.env.AF_PARITY_ONLY or ""):gmatch("[^,]+") do ONLY[n] = true end
+local function wanted(name) return next(ONLY) == nil or ONLY[name] == true end
 vim.fn.mkdir(out_dir, "p")
 local manifest = { captured_from = nil, scenarios = {} }
 do
@@ -257,6 +262,7 @@ local function wipe_scratch()
 end
 
 local function scenario_files(name, opts)
+  if not wanted(name) then return end
   pcall(af.close)
   af.state.user_width = nil
   local ok_setup, err = pcall(af.setup, {
@@ -295,6 +301,7 @@ local function scenario_files(name, opts)
 end
 
 local function scenario_buffers(name, width)
+  if not wanted(name) then return end
   wipe_scratch()
   if width then af.resize(width) else af.reset_width() end
   af.focus("buffers")
