@@ -269,6 +269,7 @@ local function resolve_repo_top(model)
       vim.schedule(function()
         if not rawequal(token, model.token) then return end
         S.repo_top = r.code == 0 and vim.trim(r.stdout or "") or nil
+        model.repo_top_resolved = true
         git_schedule()
       end)
     end)
@@ -377,7 +378,8 @@ function M.resume(panel_winid)
   for _, d in ipairs(dirs) do arm(S.model.nodes[d]) end
   for _, d in ipairs(dirs) do read_then_paint(d, true) end
   compute_diag()
-  resolve_repo_top(S.model)
+  -- the toplevel is a property of the root: resolved once per model, not on every show
+  if S.model.repo_top_resolved then git_schedule() else resolve_repo_top(S.model) end
   M.paint()
 end
 

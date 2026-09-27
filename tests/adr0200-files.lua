@@ -206,10 +206,19 @@ section("[4] a toggle storm costs reads bounded by the expanded set, never a col
   vim.wait(400)
   reset_counts()
   local r0 = reads_done()
+  local spawns = 0
+  local real_system = vim.system
+  vim.system = function(cmd, ...)
+    if type(cmd) == "table" and cmd[1] == "git" then spawns = spawns + 1 end
+    return real_system(cmd, ...)
+  end
   local t0 = vim.uv.now()
   for _ = 1, 20 do af.close(); af.open(true); af.focus(1); vim.wait(80) end
   local dur = vim.uv.now() - t0
   vim.wait(600)
+  vim.system = real_system
+  ok(("20 toggles spawn at most 3 git subprocesses (%d): the toplevel is resolved once per root, and a "
+    .. "status read waits for the pane to settle"):format(spawns), spawns <= 3, spawns)
   local performed = reads_done() - r0
   local bound = E * (math.ceil(dur / scan.MIN_INTERVAL_MS) + 1)
   ok(("20 toggles: performed reads (%d) ≤ E × (ceil(duration / interval) + 1) = %d (E=%d, %dms)")
@@ -396,12 +405,17 @@ section("[9] keymaps: kept keys act, dropped keys are unmapped", function()
   core_files.set_show_hidden(true)
   wait(function() return visible_paths()[ROOT .. "/ignored_dir"] end)
   ok("precondition: the ignored directory is shown while show_hidden", visible_paths()[ROOT .. "/ignored_dir"] == true)
+  -- let the git refresh the file actions above scheduled land first: H must re-filter on its own
+  vim.wait(900)
+  reset_counts()
   fview.ACTIONS.toggle_hidden[1]()
-  wait(function() return not visible_paths()[ROOT .. "/ignored_dir"] end, 2000)
-  ok("H: hides gitignored entries", not visible_paths()[ROOT .. "/ignored_dir"])
+  wait(function() return not visible_paths()[ROOT .. "/ignored_dir"] end, 800)
+  ok("H: hides gitignored entries, without a git read", not visible_paths()[ROOT .. "/ignored_dir"] and #STATUS == 0,
+    vim.inspect(STATUS))
   fview.ACTIONS.toggle_hidden[1]()
-  wait(function() return visible_paths()[ROOT .. "/ignored_dir"] end, 2000)
-  ok("H again: shows them", visible_paths()[ROOT .. "/ignored_dir"] == true)
+  wait(function() return visible_paths()[ROOT .. "/ignored_dir"] end, 800)
+  ok("H again: shows them, without a git read", visible_paths()[ROOT .. "/ignored_dir"] == true and #STATUS == 0,
+    vim.inspect(STATUS))
   -- i: details
   cursor_to(ROOT .. "/top.txt")
   local lines = require("auto-finder.views.files.actions").info(
