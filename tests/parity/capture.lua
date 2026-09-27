@@ -236,8 +236,9 @@ local function decorate_buffers()
   vim.cmd("edit " .. ROOT .. "/Makefile")
 end
 
--- The fork learns a buffer is modified only from BufModifiedSet AFTER its view subscribed, so the edit is
--- made (flag false -> true) once the view is mounted — the steady state of editing with the pane open.
+-- An unsaved edit made AFTER the view mounted (flag false -> true), the steady state of editing with the
+-- pane open. The fork paints no `[+]` for it: its BufModifiedSet handler never fills
+-- state.opened_buffers in panel mode (probed on VM43, 2026-09-27). The goldens freeze that absence.
 local function touch_modified()
   local buf = vim.fn.bufnr(ROOT .. "/docs/readme.md")
   vim.bo[buf].modified = false
