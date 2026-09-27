@@ -2005,7 +2005,7 @@ print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profile
       local i = 0
       for c in (choices .. "\n"):gmatch("([^\n]*)\n") do
         i = i + 1
-        if c:gsub("&", ""):find(choice_label, 1, true) then return i end
+        if c:gsub("&", ""):lower():find(choice_label:lower(), 1, true) then return i end
       end
       return 0
     end
@@ -2073,13 +2073,34 @@ print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profile
   ok("p52: D with both tiers present names both files and offers the local layer alone",
     dmsg:find("shared", 1, true) and dmsg:find("tracked", 1, true) and dmsg:find("local layer", 1, true), dmsg)
   local left = store.files("pm-run")
+  -- (store.get or {}): a defect that deletes BOTH layers must fail this cell,
+  -- not crash the suite on a nil record.
   ok("p52: …removing the local layer reveals the tracked one", left.tracked ~= nil and left.shared == nil
-    and store.get("pm-run").program == "sh", vim.inspect(left))
-  confirms = {}
-  local shim = find(debug_view, function(r) return r.kind == "entry" and r.name == "LJ Only" end)
-  press(debug_view, dw, db, "D", shim)
-  ok("p52: a launch.json entry is not deleted from the store — no confirm, it lives in launch.json",
-    #confirms == 0 and store.get("LJ Only") ~= nil)
+    and (store.get("pm-run") or {}).program == "sh", vim.inspect(left))
+  if not store.get("pm-run") then
+    store.add({ name = "pm-run", kind = "run", runtime = "go", program = "sh" }, { tier = "tracked" })
+  end
+  -- A launch.json entry shows as an entry point only while the repo has NO
+  -- store (read-through) — so that is the fixture for refusing to delete one.
+  do
+    local lj = vim.fn.tempname() .. "-af-lj"
+    vim.fn.mkdir(lj .. "/.vscode", "p")
+    vim.system({ "git", "init", "-q", "-b", "main", lj }, { text = true }):wait()
+    wf(lj .. "/.vscode/launch.json", vim.json.encode({ version = "0.2.0", configurations = {
+      { name = "LJ Only", type = "go", request = "launch", mode = "debug", program = "${workspaceFolder}" } } }))
+    worktree.set_active(lj)
+    require("auto-run.store.paths").invalidate()
+    debug_view.on_focus(dw, db)
+    local shim = find(debug_view, function(r) return r.kind == "entry" and r.name == "LJ Only" end)
+    ok("p52: fixture — a store-less repo lists its launch.json entry", shim ~= nil, text(db))
+    confirms = {}
+    if shim then press(debug_view, dw, db, "D", shim) end
+    ok("p52: D on a launch.json entry deletes nothing and asks nothing — it lives in launch.json",
+      #confirms == 0 and vim.fn.filereadable(lj .. "/.vscode/launch.json") == 1 and store.get("LJ Only") ~= nil)
+    worktree.set_active(repo)
+    require("auto-run.store.paths").invalidate()
+    vim.fn.delete(lj, "rf")
+  end
 
   -- an entry point's profile is a persistent, editable row
   ep = find(debug_view, function(r) return r.kind == "entry" and r.name == "pm-run" end)

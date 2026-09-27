@@ -81,6 +81,7 @@ local FILETYPE = "auto-finder"
 local HL = {
   header_entries     = "AutoFinderDebugHeaderEntries",
   header_env         = "AutoFinderDebugHeaderEnv",
+  header_profiles    = "AutoFinderDebugHeaderProfiles",
   header_sessions    = "AutoFinderDebugHeaderSessions",
   header_breakpoints = "AutoFinderDebugHeaderBreakpoints",
   chevron      = "AutoFinderDebugChevron",
@@ -109,6 +110,7 @@ local function _apply_default_highlights()
   end
   set(HL.header_entries,     "Title")
   set(HL.header_env,         "Type")
+  set(HL.header_profiles,    "Type")
   set(HL.header_sessions,    "Statement")
   set(HL.header_breakpoints, "DiagnosticWarn")
   set(HL.chevron,      "NonText")
@@ -145,10 +147,11 @@ end
 local BUCKETS = {
   entries     = { header = "Entry Points",    hl_header = HL.header_entries     },
   env         = { header = "Env",             hl_header = HL.header_env         },
+  profiles    = { header = "Profiles",        hl_header = HL.header_profiles    },
   sessions    = { header = "Active Sessions", hl_header = HL.header_sessions    },
   breakpoints = { header = "Breakpoints",     hl_header = HL.header_breakpoints },
 }
-local BUCKET_ORDER = { "entries", "env", "sessions", "breakpoints" }
+local BUCKET_ORDER = { "entries", "env", "profiles", "sessions", "breakpoints" }
 
 -- ─── module state ─────────────────────────────────────────────
 
@@ -198,6 +201,9 @@ local log = function() return require("auto-finder.log") end
 -- Shared Env-section renderer/actions (§8.4 r5) — module-private to
 -- the views; the tests view consumes the same helper.
 local env_section = require("auto-finder.views._env_section")
+-- The one property editor for entry points, test configs and profiles
+-- (ADR 0199 §6.5) — rows, in-place editing, masking, and `D`.
+local props = require("auto-finder.views._config_props")
 
 -- Shared Config-section renderer/actions (launch-config selection) —
 -- this view passes kind="debug"; the tests view kind="test".
@@ -433,13 +439,7 @@ end
 ---is masked. Values never reach the buffer, logs, or events.
 ---@param v any
 ---@return string text, boolean masked
-local function _masked_env_value(v)
-  if type(v) == "string" then
-    if v:match("^%${[%w_%.%-]+}$") then return v, false end
-    if v:match("^cmd:") then return v, false end
-  end
-  return "(masked)", true
-end
+local _masked_env_value = props.masked_env_value
 
 -- ─── config file resolution (for `e`) ─────────────────────────
 
@@ -567,54 +567,13 @@ local function _render(bufnr)
     }
   end
 
-  ---Resolved-config expansion for an entry point. Env values are
-  ---MASKED — keys + refs only, never literal values (§8.2).
-  local function emit_entry_details(row_parent, name)
-    local eff, err, meta = nil, nil, nil
-    local okg, geff, gerr, gmeta = pcall(ar.store.get, name)
-    if okg then eff, err, meta = geff, gerr, gmeta end
-    if not eff then
-      emit_detail(row_parent, "error", tostring(err))
-      return
-    end
-    emit_detail(row_parent, "kind",    eff.kind)
-    emit_detail(row_parent, "runtime", eff.runtime or "go")
-    emit_detail(row_parent, "program", eff.program)
-    -- Shown even when unset, so `e` can fill them in place on a fresh entry
-    -- (Lector M5a P2) — rendering only populated fields left no row to add
-    -- one on.
-    emit_detail(row_parent, "args",
-      type(eff.args) == "table" and #eff.args > 0 and table.concat(eff.args, " ") or nil)
-    emit_detail(row_parent, "cwd", eff.cwd)
-    if eff.runtime ~= "rust" then   -- go build flags; rust carries Cargo identity instead
-      emit_detail(row_parent, "build_flags", eff.build_flags)
-    end
-    -- Cargo identity (ADR 0194 §2.3.4): shown for rust entries even when
-    -- unset, so `e` can pin a package or target in place.
-    if eff.runtime == "rust" then
-      emit_detail(row_parent, "cargo_package", eff.cargo_package)
-      emit_detail(row_parent, "cargo_target", eff.cargo_target)
-      emit_detail(row_parent, "cargo_target_kind", eff.cargo_target_kind)
-    end
-    emit_detail(row_parent, "env_files",
-      type(eff.env_files) == "table" and #eff.env_files > 0 and table.concat(eff.env_files, ", ") or nil)
-    if type(eff.env) == "table" and next(eff.env) ~= nil then
-      local keys = {}
-      for k in pairs(eff.env) do keys[#keys + 1] = k end
-      table.sort(keys)
-      for _, k in ipairs(keys) do
-        local text, masked = _masked_env_value(eff.env[k])
-        emit_detail(row_parent, "env." .. k, text, { masked = masked })
-      end
-    end
-    -- The entry owns its whole env (ADR 0199 §6.2): a row to add a variable.
-    emit_detail(row_parent, "env+", "(e adds KEY=VALUE)")
-    emit_detail(row_parent, "origin", eff.origin)
-    if meta and type(meta.layers) == "table" then
-      emit_detail(row_parent, "layers", table.concat(meta.layers, " → "))
-    end
-    local cfg_file = _config_file(name)
-    emit_detail(row_parent, "file", cfg_file, { filepath = cfg_file })
+  ---A record's property rows (entry point / profile) — the shared editor's
+  ---rows, so masking and editing are one implementation (ADR 0199 §6.5).
+  local function emit_props(row_parent)
+    props.emit({
+      lines = lines, rows = rows, mark = mark, parent = row_parent, row_kind = "detail",
+      hl = { label = HL.fm_label, value = HL.fm_value, null = HL.fm_null, masked = HL.fm_masked, path = HL.fm_path },
+    })
   end
 
   -- ── Entry Points ──────────────────────────────────────────────
@@ -655,7 +614,7 @@ local function _render(bufnr)
             local row = { kind = "entry", lnum = lnum0 + 1, name = c.name, cfg = c }
             rows[#rows + 1] = row
             if M._expanded["entry:" .. name] then
-              emit_entry_details(row, name)
+              emit_props(row)
             end
           end
         end
@@ -675,6 +634,33 @@ local function _render(bufnr)
         rows     = rows,
         expanded = M._expanded,
       })
+    end
+  end
+
+  -- ── Profiles (ADR 0199 §6.5) — listed and edited here; CHOOSING one
+  -- is each entry point's `profile` row, so there is no selection marker.
+  do
+    local okp, plist = pcall(ar.store.list_profiles)
+    plist = okp and plist or {}
+    emit_bucket_header("profiles", #plist)
+    if not M._collapsed.profiles then
+      if #plist == 0 then
+        local l = "  (no env profiles — `a` adds one)"
+        lines[#lines + 1] = l
+        mark(#lines - 1, 0, #l, HL.empty)
+      end
+      for _, pr in ipairs(plist) do
+        local pname = tostring(pr.name)
+        local tiers = pr.tiers or pr.layers
+        local ann = type(tiers) == "table" and #tiers > 0 and ("  [" .. table.concat(tiers, "+") .. "]") or ""
+        local line = "  " .. pname .. ann
+        lines[#lines + 1] = line
+        mark(#lines - 1, 2, 2 + #pname, HL.entry_name)
+        if #ann > 0 then mark(#lines - 1, 2 + #pname, #line, HL.annotation) end
+        local prow = { kind = "profile", lnum = #lines, name = pr.name }
+        rows[#rows + 1] = prow
+        if M._expanded["profile:" .. pname] then emit_props(prow) end
+      end
     end
   end
 
@@ -864,6 +850,12 @@ local function _open(row)
     return
   end
 
+  if row.kind == "profile" then
+    local f = props.file("profile", row.name)
+    if f then _open_file(f) end
+    return
+  end
+
   if row.kind == "session" then
     local okd, dap = pcall(require, "dap")
     if okd and row.session then
@@ -907,6 +899,8 @@ local function _toggle_expand(row)
   local key
   if row.kind == "entry" then
     key = "entry:" .. tostring(row.name)
+  elseif row.kind == "profile" then
+    key = "profile:" .. tostring(row.name)
   elseif row.kind == "session" then
     key = "session:" .. tostring(row.session_id)
   elseif row.kind == "breakpoint" then
@@ -982,119 +976,18 @@ local function _errtext(err)
   return tostring(err)
 end
 
--- Fields `e` edits in place, by shape. Anything else (kind, origin, layers,
--- file) keeps the old `e`: open the config's file.
-local SCALAR_FIELDS = {
-  program = true, cwd = true, build_flags = true, runtime = true,
-  cargo_package = true, cargo_target = true, cargo_target_kind = true,
-}
-local LIST_FIELDS = { args = true, env_files = true }
-
----Split one line the way a POSIX shell splits words: whitespace separates,
----'…' is literal, "…" and a bare backslash escape the next character.
----@param line string
----@return string[]
-local function _shell_split(line)
-  local out, cur, i, n, have = {}, {}, 1, #line, false
-  local quote
-  while i <= n do
-    local ch = line:sub(i, i)
-    if quote == "'" then
-      if ch == "'" then quote = nil else cur[#cur + 1] = ch end
-    elseif quote == '"' then
-      if ch == '"' then quote = nil
-      elseif ch == "\\" and i < n then i = i + 1; cur[#cur + 1] = line:sub(i, i)
-      else cur[#cur + 1] = ch end
-    elseif ch == "'" or ch == '"' then quote = ch; have = true
-    elseif ch == "\\" and i < n then i = i + 1; cur[#cur + 1] = line:sub(i, i); have = true
-    elseif ch:match("%s") then
-      if have or #cur > 0 then out[#out + 1] = table.concat(cur); cur, have = {}, false end
-    else cur[#cur + 1] = ch; have = true end
-    i = i + 1
-  end
-  if have or #cur > 0 then out[#out + 1] = table.concat(cur) end
-  return out
-end
-
----Inverse of `_shell_split` for a prefill: quote only what needs it.
----@param list string[]
----@return string
-local function _shell_join(list)
-  local parts = {}
-  for _, a in ipairs(list or {}) do
-    a = tostring(a)
-    if a ~= "" and a:match("^[%w%._/:=@%%+,%-${}]+$") then
-      parts[#parts + 1] = a
-    else
-      parts[#parts + 1] = "'" .. a:gsub("'", [['\'']]) .. "'"
-    end
-  end
-  return table.concat(parts, " ")
-end
-
----`e` on a property row: edit that property in place through `store.update`.
----Returns false when the row is not an editable property (the caller then
----opens the config file, as `e` always did).
----@param row table?
----@return boolean handled
-local function _edit_property(row)
-  if not (row and row.kind == "detail" and row.parent and row.parent.kind == "entry") then
-    return false
-  end
-  local field, name = row.field, row.parent.name
-  local env_key = type(field) == "string" and field:match("^env%.(.+)$") or nil
-  local env_add = field == "env+"
-  if not (SCALAR_FIELDS[field] or LIST_FIELDS[field] or env_key or env_add) then return false end
+---`a` on the Profiles section: create an env profile (a name), then fan it
+---out so `e` can fill it in.
+local function _add_profile()
   local ar = _auto_run()
-  if not ar then return true end
-  local eff, gerr = ar.store.get(name)
-  if not eff then _say(_errtext(gerr), "error"); return true end
-
-  local default, prompt
-  if env_add then
-    default = ""
-    prompt = name .. " · new env var (KEY=VALUE): "
-  elseif env_key then
-    -- Prefill the KEY only: a secret value must never reach the prompt, the
-    -- same boundary as the buffer (§8.2). References (${…}, cmd:) are not
-    -- secrets and are shown, so they prefill too.
-    local text, masked = _masked_env_value((eff.env or {})[env_key])
-    default = env_key .. "=" .. (masked and "" or text)
-    prompt = name .. " · env (KEY=VALUE; empty VALUE removes it): "
-  elseif LIST_FIELDS[field] then
-    default = _shell_join(eff[field])
-    prompt = name .. " · " .. field .. " (shell words; empty clears): "
-  else
-    default = eff[field] ~= nil and tostring(eff[field]) or ""
-    prompt = name .. " · " .. field .. " (empty clears): "
-  end
-
-  vim.ui.input({ prompt = prompt, default = default }, function(answer)
-    if answer == nil then return end   -- cancelled: change nothing
-    local patch
-    if env_add and answer == "" then return end   -- nothing typed: nothing to add
-    if env_key or env_add then
-      local k, v = answer:match("^%s*([%w_%.%-]+)=(.*)$")
-      -- Never echo the answer: a malformed one can still carry the secret
-      -- ("TOKEN my-secret"), and this message reaches a toast and the log
-      -- ring — the masking boundary (§8.2) covers diagnostics too.
-      if not k then return _say("env must be KEY=VALUE — nothing was changed", "warn") end
-      patch = { env = { [k] = v ~= "" and v or vim.NIL } }
-      if env_key and k ~= env_key then patch.env[env_key] = vim.NIL end   -- a renamed key
-    elseif LIST_FIELDS[field] then
-      local list = _shell_split(answer)
-      patch = { [field] = #list > 0 and list or vim.NIL }
-    else
-      patch = { [field] = answer ~= "" and answer or vim.NIL }
-    end
-    local res, uerr = ar.store.update(name, patch)
-    if not res then
-      local msg = _errtext(uerr)
-      if msg:find("launch.json shim", 1, true) then msg = msg .. " — press I to import it" end
-      _say(msg, "error")
-    end
+  if not ar then return end
+  vim.ui.input({ prompt = "New env profile — name: " }, function(name)
+    if not name or name == "" then return end
+    local path, err = ar.store.add({ name = name }, { kind = "profiles" })
+    if not path then return _say(_errtext(err), "error") end
+    M._expanded["profile:" .. name] = true
+    _say("created env profile '" .. name .. "' — e on a row fills it; an entry point's profile row selects it")
   end)
-  return true
 end
 
 ---`a` off the Env rows: add an entry point — kind, runtime, name — through
@@ -1159,7 +1052,12 @@ end
 local function _edit_config(row)
   if not row then return end
   if env_section.edit_var(row) then return end
-  if _edit_property(row) then return end
+  if props.edit(row) then return end
+  if row.kind == "profile" then
+    local f = props.file("profile", row.name)
+    if f then _open_file(f) end
+    return
+  end
   local name = row.kind == "entry" and row.name
     or (row.kind == "detail" and row.parent and row.parent.kind == "entry"
         and row.parent.name)
@@ -1350,9 +1248,21 @@ local function _apply_keymaps(bufnr, panel_winid)
       env_section.add(row.kind == "env-file" and row or nil)
       return
     end
+    if row and (row.kind == "profile" or (row.kind == "bucket-header" and row.section == "profiles")
+        or (row.prop and row.parent and row.parent.kind == "profile")) then
+      return _add_profile()
+    end
     _add_entry()
   end,
-    "auto-finder.debug: env row/header → add KEY=VALUE; elsewhere → add an entry point (kind, runtime, name)")
+    "auto-finder.debug: env row/header → add KEY=VALUE; Profiles → add a profile; elsewhere → add an entry point (kind, runtime, name)")
+  set("D", function()
+      local row = _row_under_cursor(panel_winid)
+      if props.delete(row) then return end
+      env_section.delete_var(row)
+    end,
+    "auto-finder.debug: DELETE — entry point / profile / env var under cursor (asks first; names the file, its tier and git status)")
+  set("n", function() env_section.create_file(_row_under_cursor(panel_winid)) end,
+    "auto-finder.debug: new env file (in the worktree root, .config/ or .vscode/ — where env discovery looks)")
   set("E", function() _export_config(_row_under_cursor(panel_winid)) end,
     "auto-finder.debug: export the entry point under cursor to launch.json (new: <worktree>/.config)")
   set("I", function() _import() end,
