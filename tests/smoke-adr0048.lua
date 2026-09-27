@@ -1351,9 +1351,15 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
       if tostring(it):find(needle, 1, true) then return i end
     end
   end
-  local maps = {}
-  for _, k in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do maps[k.lhs] = k end
-  ok("p49: tests pane maps s, b and c", maps.s and maps.b and maps.c)
+  -- A missing key must read as a red cell, not raise on a nil callback and
+  -- abort the suite (measured: it did), so absent keys become no-ops.
+  local function keymap_table(buf)
+    local t = {}
+    for _, k in ipairs(vim.api.nvim_buf_get_keymap(buf, "n")) do t[k.lhs] = k end
+    return setmetatable(t, { __index = function() return { callback = function() end } end })
+  end
+  local maps = keymap_table(b)
+  ok("p49: tests pane maps s, b and c", rawget(maps, "s") and rawget(maps, "b") and rawget(maps, "c"))
 
   tests_view.on_focus(w, b)
   local _, wrow = row_line(tests_view, b, "state-worktree")
@@ -1406,9 +1412,8 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
   ok("p49: the empty Entry Points hint names what actually creates a config",
     text_of(b2):find("`a` scaffolds one", 1, true) == nil
       and text_of(b2):find("<leader>rc scaffolds one", 1, true) ~= nil, text_of(b2))
-  local dmaps = {}
-  for _, k in ipairs(vim.api.nvim_buf_get_keymap(b2, "n")) do dmaps[k.lhs] = k end
-  ok("p49: debug pane maps s and b", dmaps.s and dmaps.b)
+  local dmaps = keymap_table(b2)
+  ok("p49: debug pane maps s and b", rawget(dmaps, "s") and rawget(dmaps, "b"))
   local _, dwrow = row_line(debug_view, b2, "state-worktree")
   vim.api.nvim_win_set_cursor(w2, { dwrow.lnum, 0 })
   stub_select(function(items) return index_of(items, "hdr.env") end)
@@ -1448,10 +1453,13 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
   local saved = package.loaded["auto-run.context"]
   package.loaded["auto-run.context"] = nil
   package.preload["auto-run.context"] = function() error("hidden for the degrade probe") end
-  tests_view.on_focus(w, b)
+  -- pcall: a header that raises here would otherwise abort the suite
+  -- (measured) instead of failing this cell.
+  local okr, rerr = pcall(tests_view.on_focus, w, b)
   local dt = text_of(b)
   ok("p49: without auto-run.context the header says so and the pane still renders",
-    dt:find("cannot report run state", 1, true) ~= nil and dt:find("Tests —", 1, true) ~= nil, dt)
+    okr and dt:find("cannot report run state", 1, true) ~= nil and dt:find("Tests —", 1, true) ~= nil,
+    tostring(rerr) .. "\n" .. dt)
   package.preload["auto-run.context"] = nil
   package.loaded["auto-run.context"] = saved
 
