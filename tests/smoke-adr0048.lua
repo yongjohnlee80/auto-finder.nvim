@@ -1799,6 +1799,11 @@ print("\n[51] ADR 0199 §6.2 — tests pane Test configs section")
     return find(function(r) return r.kind == "test-config" and r.name == name end)
   end
   local real_input, real_select = vim.ui.input, vim.ui.select
+  -- No real prompt may ever open in the suite: when `s` falls through to a
+  -- chooser (the red state did), a live vim.ui.select waits on stdin.
+  local stray = 0
+  vim.ui.select = function(_, _, cb) stray = stray + 1; cb(nil, nil) end
+  vim.ui.input = function(_, cb) stray = stray + 1; cb(nil) end
 
   ok("p51: the launch.json Config section is gone from the tests pane",
     not text():find("Config (", 1, true), text())
@@ -1836,6 +1841,8 @@ print("\n[51] ADR 0199 §6.2 — tests pane Test configs section")
   ok("p51: s on a generic config picks it for the one discovered runtime", n3 == "tc-any" and s3 == "picked",
     tostring(n3) .. " " .. tostring(s3))
   cfgm.pick("go", nil)
+
+  ok("p51: s on a test config opens no chooser", stray == 0, "stray prompts: " .. stray)
 
   exec.remember_pick("test", other)
   tests_view.on_focus(w, b)
