@@ -2084,10 +2084,17 @@ print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profile
   -- an entry point's profile is a persistent, editable row
   ep = find(debug_view, function(r) return r.kind == "entry" and r.name == "pm-run" end)
   press(debug_view, dw, db, "o", ep)
-  input("pm-prof")
+  -- chosen from the profiles that exist, never typed (a typo would be silent)
+  local offered
+  vim.ui.select = function(items, _, cb)
+    offered = items
+    for i, it in ipairs(items) do if it == "pm-prof" then return cb(it, i) end end
+    cb(nil, nil)
+  end
   press(debug_view, dw, db, "e", prop(debug_view, "pm-run", "profile"))
-  ok("p52: e on an entry point's profile row selects that profile for it", store.get("pm-run").profile == "pm-prof",
-    vim.inspect(store.get("pm-run").profile))
+  ok("p52: e on an entry point's profile row offers the existing profiles and selects one",
+    store.get("pm-run").profile == "pm-prof" and type(offered) == "table" and vim.tbl_contains(offered, "(none)"),
+    vim.inspect(store.get("pm-run").profile) .. vim.inspect(offered))
 
   -- env: `n` creates a file, `D` deletes a variable
   input(".env.local")
