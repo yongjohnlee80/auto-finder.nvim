@@ -105,7 +105,12 @@ vim.cmd.cd(ROOT)
 -- ── auto-finder with the live consumer's options (autovim lua/plugins/auto-finder.lua) ──────────────────
 local function consumer_neo_tree(git_status)
   return {
+    -- Git scenarios switch the fork's filename colouring back on as it was before ADR-0060 §2.8
+    -- (66ffaf4): status fetched with the SYNC path, because the async path calls
+    -- auto-core.git.repo.discover_async, which no auto-core release defines.
     enable_git_status = git_status,
+    git_status_async = false,
+    default_component_configs = { name = { use_git_status_colors = git_status } },
     window = { auto_expand_width = true },
     filesystem = {
       hijack_netrw_behavior = "disabled",
