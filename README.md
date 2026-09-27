@@ -6,8 +6,9 @@ autodb explorer, test/debug runners, and a prompt-style config REPL —
 each reachable with a single keystroke.
 
 Built on top of [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
-(panel + state + event-bus primitives) and a vendored fork of
-neo-tree (filesystem rendering). The internal architecture is
+(panel + state + event-bus primitives, bounded directory reads). The
+files and buffers trees are in-house (ADR-0200); there is no neo-tree
+code or dependency. The internal architecture is
 documented in [`ARCHITECTURE.md`](./ARCHITECTURE.md); this README
 is the user-facing surface.
 
@@ -51,7 +52,7 @@ the moment you install it:
 | # | View | Needs | What it shows · what it solves |
 |--:|---|---|---|
 | 0 | **config** | — | Prompt-style admin REPL. Switch views, resize the panel, toggle file filters, rearrange slots. Tab-completion + clickable winbar throughout. *Solves: no hunting through `opts` for a setting you want to change once.* |
-| 1 | **files** | — | Filesystem tree (neo-tree filesystem source). Live-refresh on filesystem events; git status decorations from the auto-core git layer. Type-to-filter narrows the tree in place. *Solves: the ordinary explorer job, without a second plugin.* |
+| 1 | **files** | — | Filesystem tree. Lazy: a directory is read only when you expand it, watched only while it is expanded, and nothing runs while the panel is hidden. Git status colours on names, diagnostics signs, `/` search. See [Files view](#files-view). *Solves: the ordinary explorer job, without a second plugin — and without its cost on a large workspace.* |
 | 2 | **repos** | [`worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim) | Git repos × worktrees, discovered automatically — no registry, no manual add. Expands to per-worktree changes, commit history and per-commit file lists, with in-panel git actions. See [Repos view](#repos-view). *Solves: juggling several repos and worktrees without leaving the editor.* |
 
 Six more views ship in the box but aren't in the default slot
@@ -60,7 +61,7 @@ list them in `opts.sections`):
 
 | View | Needs | What it shows · what it solves |
 |---|---|---|
-| **buffers** | — | Open-buffer list (neo-tree buffers source). Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. *Solves: `:ls` as a navigable tree.* |
+| **buffers** | — | Open-buffer list as a tree: the cwd, then terminals, then one bucket per outside location. Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. *Solves: `:ls` as a navigable tree.* |
 | **marks** | — | nvim marks browser. *Solves: marks you set and then forgot.* |
 | **todos** | — | The auto-core task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. See [Automation](#automation-todo-listautomated). *Solves: tracking work in the repo instead of a browser tab.* |
 | **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) **≥ v0.3.0** | autodb's database explorer, hosted in the panel — connections, workspaces, notes and script history. See [DBase view](#dbase-view--autodb-inside-the-panel). *Solves: querying a managed database without a second application.* |
@@ -87,29 +88,19 @@ workspace and survive a restart.
 Plus the foundations behind the views, all centralized in
 `lua/auto-finder/core/`:
 
-- **Centralized caches** for the file tree, git status, buffer
-  list, and repos registry. The neo-tree-backed views still render
-  through neo-tree's `manager.refresh` path on receiving a
-  translated event; the cache surface exists so a future phase can
-  flip them to delta-rendering directly from
-  `core.<area>.snapshot_now()` (see
-  [`ARCHITECTURE.md`](./ARCHITECTURE.md) for the
-  implemented-vs-future-work breakdown). What changes today:
-  views subscribe to translated `auto-finder.core.*` topics
-  rather than driving each refresh themselves.
+- **Translated topics** — views subscribe to `auto-finder.core.*`
+  topics, never to auto-core directly; core owns every watch handle
+  and drops events for directories nobody watches.
 - **Re-armable lifecycle** — every subscription survives an
   `auto-core.events` bus reset (e.g. `:Lazy reload`) via
   unconditional dispose-first-then-resubscribe on
   `core.ensure_started`.
 - **Centralized `fs.watch` + `git.watch` handle ownership** —
-  one set of OS-level watchers per cwd, not one set per view.
-  Survives view switches and panel-close.
-- **Event coalescing** — a burst of 100 file events in one
-  window (build output, branch switch, `npm i`) becomes a
-  single refresh call. Bursts that cluster under one parent
-  directory promote to `subtree_stale` invalidation rather
-  than per-file event reassembly (the upstream `fs.watch`
-  can't supply paired rename events anyway).
+  the files view's non-recursive directory watches are refcounted
+  by owner in `core/watchers.lua` and released when the panel hides.
+- **Bounded work** — directory reads go through `auto-core.fs.scan`
+  (single-flight per path, rate-limited, batched with yields), and a
+  burst of file events re-reads each named directory once.
 
 For the full structural picture — directory layout, module
 responsibilities, system + event-flow mermaid diagrams,
@@ -120,29 +111,23 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 - **Neovim ≥ 0.10**
 - [`auto-core.nvim`](https://github.com/yongjohnlee80/auto-core.nvim)
-  `^0.2.0` — foundation library (panel singleton, state
-  namespace, event bus, `fs.watch`, `git.watch`, `git.status`,
-  centralized log, and the `fs.atomic` write primitive that
-  auto-finder's persistence delegates to). **Hard dep.**
-- [`MunifTanjim/nui.nvim`](https://github.com/MunifTanjim/nui.nvim) and
-  [`nvim-lua/plenary.nvim`](https://github.com/nvim-lua/plenary.nvim)
-  — hard deps of the bundled neo-tree fork.
+  — foundation library (panel singleton, state namespace, event bus,
+  `fs.watch`, `fs.scan`, `git.watch`, `git.status`, centralized log,
+  and the `fs.atomic` write primitive that auto-finder's persistence
+  delegates to). **Hard dep**, at a release that carries `fs.scan` and
+  `git.status.get_async` (auto-core PR #53).
 - [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
-  — **optional**, recommended. The fork's health check lists it under
-  "Optional icons" and the default icon provider falls back to a plain
-  glyph without it (the failed require is memoized, so the fallback
-  costs nothing per render).
-- **Do not install upstream `nvim-neo-tree/neo-tree.nvim`
-  alongside** — auto-finder ships its own fork under
-  `lua/auto-finder/neotree/` (since v0.1.3) and the two will
-  collide on the same require path. Disable upstream
-  explicitly if you had it installed: `{ "nvim-neo-tree/neo-tree.nvim", enabled = false }`.
+  (or `mini.icons` with its devicons mock) — **optional**, recommended.
+  Without it, directories and files get plain glyphs.
+- `nui.nvim` and `plenary.nvim` are **no longer needed** — they were
+  dependencies of the retired neo-tree fork. Remove them from your spec
+  unless another plugin uses them. Upstream `neo-tree.nvim` no longer
+  collides with auto-finder either.
 - [`yongjohnlee80/worktree.nvim`](https://github.com/yongjohnlee80/worktree.nvim)
-  `^0.5.0` — powers the **repos** view. From v0.5.0 the view renders
-  worktree.nvim's own explorer (commits, diffs, git actions); the
-  switch is by **availability**, so an older worktree.nvim falls back
-  to the bundled `auto-finder-repos` neo-tree source, and no
-  worktree.nvim at all renders an empty view.
+  `^0.5.0` — powers the **repos** view, which renders worktree.nvim's
+  own explorer (commits, diffs, git actions). **Required for that
+  view**: without it the repos slot reports the missing dependency
+  once, loudly, and stays empty.
 - [`yongjohnlee80/autodb`](https://github.com/yongjohnlee80/autodb)
   **`^0.3.0`** — soft dep for the **dbase** view. When absent, the
   view shows a placeholder explaining the dependency; the rest of
@@ -183,8 +168,6 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   dependencies = {
     "yongjohnlee80/auto-core.nvim",       -- foundation; hard dep
     "yongjohnlee80/worktree.nvim",        -- repos view
-    "MunifTanjim/nui.nvim",               -- bundled neo-tree fork deps
-    "nvim-lua/plenary.nvim",
     "nvim-tree/nvim-web-devicons",        -- optional: icons
     -- autodb and auto-run are NOT listed: the dbase / tests / debug views
     -- probe for them and degrade to a placeholder, so the panel works
@@ -208,11 +191,13 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
     -- Open the panel for `nvim .` style directory invocations.
     hijack_directories = true,
 
-    -- Per-view opts for the neo-tree-backed views. Each is forwarded
-    -- to the underlying neo-tree source's deep-merged config. Use this
-    -- to inject custom keymaps without forking the plugin.
-    files   = { window = { mappings = {} } },
-    buffers = { window = { mappings = {} } },
+    -- The files view (see "Files view" below for every key).
+    files = {
+      follow = true,                           -- reveal the current file
+      never_show = { ".git", "node_modules" }, -- replaces the default list
+      auto_expand_width = true,                -- widen to fit, unless pinned
+      mappings = {},                           -- { [lhs] = action | fn | false }
+    },
   },
   keys = {
     { "<leader>e",  "<cmd>AutoFinder<cr>",        desc = "auto-finder: toggle panel" },
@@ -327,6 +312,47 @@ range.
 keymaps to switch / add / clone / init worktrees. The repos
 view renders what worktree.nvim tracks, and owns only the
 per-row git actions listed below.)
+
+## Files view
+
+The tree reads a directory only when you expand it, and watches it only
+while it is expanded and the panel is shown. Hiding the panel cancels
+in-flight reads and releases every watch; showing it re-reads each
+expanded directory once. Toggling `<leader>e` rapidly costs at most a
+few reads per expanded directory, however fast you press it.
+
+| Key | Action |
+|---|---|
+| `<CR>` / double-click | open the file (in the last editor window) or toggle the directory |
+| `S` / `s` / `t` | open in a split / vertical split / new tab |
+| `a` | add a file; end the name with `/` for a directory (missing parents are created) |
+| `A` | add a directory |
+| `d` | delete (confirmed; the root cannot be deleted) |
+| `r` / `m` | rename / move (open buffers follow the file) |
+| `y` / `x` / `p` | mark for copy / mark for cut / paste the marked items into the directory under the cursor |
+| `/` / `<C-x>` | search as you type (basename glob, at most 50 results, shown as a tree) / clear the search |
+| `H` | toggle gitignored entries (`auto-core.files` show_hidden) |
+| `C` / `z` | collapse the directory / collapse all |
+| `R` | re-read the expanded directories |
+| `i` | file details: name, path, type, size, created, modified, git code |
+| `?` | this list |
+
+Keys the retired neo-tree pane had and this one drops: `P` preview (and
+its `l` / `<C-f>` / `<C-b>`), `w` window picker, `O` expand-all, `o*` sort
+orders, `D` fuzzy directory find, `#` fuzzy sorter, `f` filter-on-submit,
+`.` / `<BS>` / `<` / `>` re-root and source switching, `b` rename
+basename, `c` copy to a typed path, `<C-r>` clear marks, `e` toggle
+auto-expand (now `files.auto_expand_width`). Remap a kept action, or bind
+a function, with `files.mappings`:
+
+```lua
+files = { mappings = { ["<C-s>"] = "open_split", y = false } }
+```
+
+Colours: names take git status colours (added, modified, untracked, …),
+dotfiles are dimmed, and every group is an `AutoFinder*` group that
+links to the `NeoTree*` name colour schemes already style, so your
+theme's file-tree colours keep applying.
 
 ## Repos view
 
@@ -567,10 +593,10 @@ auto-finder is layered:
   every cache + watcher + subscription. Publishes
   `auto-finder.core.*` topics that views consume.
 - **`views/`** — UI renderers (each a directory). Subscribe
-  to translated topics. The files and buffers views render
-  against the bundled neo-tree fork; repos and dbase are pure
-  renderers over `worktree.repos` and autodb's drawer.
-- **`shared/`** — pure helpers (neo-tree mount, debounce,
+  to translated topics. The files and buffers views share one
+  renderer (`views/files/render.lua`, changed lines only); repos and
+  dbase are pure renderers over `worktree.repos` and autodb's drawer.
+- **`shared/`** — pure helpers (help overlay, debounce,
   loading placeholder, window predicates, subscription sets).
 - **`panel/`** — the window host. Implements
   `winfixwidth`/`winfixbuf` protection + the `with_unfixed_buf`
@@ -647,7 +673,8 @@ something that moved underneath it:
 |---|---|---|
 | commit SHA | `actions/checkout` | a tag can be moved to different code under the same name |
 | version **and SHA-256** | Neovim `v0.12.5` | a release asset can be replaced under the same tag and name, so the version alone is not reproducible |
-| commit SHA | `auto-core.nvim`, `worktree.nvim`, `auto-run.nvim`, `plenary.nvim`, `nui.nvim`, `nvim-dap` | reproducibility; the pin's age is reported (see below) |
+| commit SHA | `auto-core.nvim`, `worktree.nvim`, `auto-run.nvim`, `nvim-dap` | reproducibility; the pin's age is reported (see below) |
+| commit SHA | `mini.icons`, `catppuccin` (via `AF_PARITY_DEPS`) | the parity gate compares against goldens captured with exactly these; see `tests/fixtures/parity/manifest.json` |
 
 A runner's Neovim ships tree-sitter parsers for `c`, `lua`, `vim`,
 `vimdoc`, `markdown` and `query` **only** — every other parser is something
