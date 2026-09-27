@@ -114,6 +114,11 @@ local LIST = {
   profile = { base_env_files = true, secret_manifests = true },
 }
 local MAP = { config = "env", profile = "runtime_env" }
+-- List fields whose store merge rule APPENDS across layers. The editor shows
+-- the EFFECTIVE list, so its write must REPLACE the lower layers' entries or
+-- a tracked [A] edited to [A,B] becomes [A,A,B] and an inherited entry can
+-- never be dropped (Lector #59). `args` replaces whole already.
+local APPENDS = { env_files = true, base_env_files = true, secret_manifests = true }
 
 ---The effective record, or nil + err.
 ---@param rec "config"|"profile"
@@ -237,7 +242,11 @@ function M.edit(row)
   local s = store()
   if not s then return true end
   local function update(patch)
-    local res, uerr = s.update(name, patch, rec == "profile" and { kind = "profiles" } or nil)
+    local o = rec == "profile" and { kind = "profiles" } or {}
+    local replace = {}
+    for f in pairs(patch) do if APPENDS[f] then replace[#replace + 1] = f end end
+    if #replace > 0 then o.replace = replace end
+    local res, uerr = s.update(name, patch, next(o) and o or nil)
     if not res then
       local msg = errtext(uerr)
       if msg:find("launch.json shim", 1, true) then msg = msg .. " — press I to import it" end
