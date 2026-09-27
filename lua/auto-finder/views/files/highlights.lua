@@ -4,7 +4,7 @@
 ---Reason: colour schemes (catppuccin, tokyonight, everforest ship it) and autovim's transparency.lua style
 ---the file tree through the `NeoTree*` group NAMES. Johno ruled the alias bridge on 2026-09-27 (task item
 ---14): auto-finder paints only `AutoFinder*` groups, each default-linked to its `NeoTree*` name, so a theme's
----colours keep applying. No neo-tree code, module or dependency is involved; these are group names.
+---colours keep applying. No code, module or dependency of the retired fork is involved; these are group names.
 ---tests/severance.lua holds the exemption's premise (no require here) and liveness cells.
 ---
 ---When a theme does not define a `NeoTree*` group, the fallback below defines it exactly as the retired
@@ -73,8 +73,10 @@ local function get(name)
     underline = h.underline, undercurl = h.undercurl }
 end
 
+-- Truncates, as the retired fork's `string.format("%06x", n)` on a float did under LuaJIT: the faded
+-- groups (indent markers, dim text) must resolve to the same colour, not one step off.
 local function hex(n, pad)
-  return string.format("%0" .. (pad or 6) .. "x", math.floor(n + 0.5))
+  return string.format("%0" .. (pad or 6) .. "x", math.floor(n))
 end
 
 ---Define `name` unless it is already fully defined: link to the first group of `links` that exists (when

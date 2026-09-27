@@ -13,11 +13,12 @@ local M = {}
 
 M.NS = vim.api.nvim_create_namespace("auto-finder.files")
 
+-- Glyphs written as escapes: raw Private Use Area characters do not survive every editor and tool.
 M.ICON = {
-  folder_closed = "",
-  folder_open = "",
-  folder_empty = "󰉖",
-  folder_empty_open = "󰷏",
+  folder_closed = "\u{e5ff}",
+  folder_open = "\u{e5fe}",
+  folder_empty = "\u{f0256}",
+  folder_empty_open = "\u{f0dcf}",
   default = "*",
 }
 
@@ -68,6 +69,9 @@ function M._reset_icon_cache() _devicons = nil end
 ---@field diag string?         -- "Error"|"Warn"|"Info"|"Hint" (already filtered by the caller's rules)
 ---@field mark "cut"|"copy"|nil
 ---@field bufnr integer?       -- buffers slot: shown as " #N"
+---@field name_hl string?      -- overrides the name's group (the buffers slot never dims dotfiles)
+---@field icon { [1]: string, [2]: string }?  -- overrides glyph + group (the buffers slot's TERMINALS root)
+---@field icon_name string?    -- name looked up in the icon provider instead of `name` (terminals)
 
 ---@class AutoFinderRow
 ---@field text string
@@ -96,6 +100,7 @@ function M.diag_sign(severity)
 end
 
 local function icon_for(item)
+  if item.icon then return item.icon[1], item.icon[2] end
   if item.kind == "root" then return M.ICON.folder_open, M.HL.dir_icon end
   if item.kind == "directory" then
     if item.empty then
@@ -105,13 +110,14 @@ local function icon_for(item)
   end
   local d = devicons()
   if d then
-    local glyph, hl = d.get_icon(item.name)
+    local glyph, hl = d.get_icon(item.icon_name or item.name)
     if glyph then return glyph, hl or M.HL.file_icon end
   end
   return M.ICON.default, M.HL.file_icon
 end
 
 local function name_hl(item)
+  if item.name_hl then return item.name_hl end
   if item.kind == "root" then return M.HL.root end
   if item.kind == "file" and item.name:sub(1, 1) == "." then return M.HL.dotfile end
   if item.git and M.GIT_HL[item.git] then return M.GIT_HL[item.git] end

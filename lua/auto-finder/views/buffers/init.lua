@@ -2,9 +2,10 @@
 ---
 ---The listed buffers as a tree under the working directory, with the retired fork's look: an
 ---`OPEN BUFFERS in <cwd>` root row, directory groups whose single-directory chains are merged into one
----row (`src/util`), file rows with a ` #<bufnr>` suffix and a right-aligned diagnostic sign. Buffers outside
----the working directory group under their own absolute directory. Rows come from the files slot's
----renderer (views/files/render.lua), so both slots share one look by construction.
+---row (`src/util`), file rows with a ` #<bufnr>` suffix and a right-aligned diagnostic sign. Terminals
+---under the working directory get a `TERMINALS` root, and buffers outside it are grouped under one
+---`OPEN BUFFERS in <bucket>` root per external bucket (~/<first>, else /<first>). Rows come from the
+---files slot's renderer (views/files/render.lua), so both slots share one look by construction.
 ---
 ---Work happens only while the slot is shown: it repaints on `auto-finder.core.buffers:changed` and
 ---DiagnosticChanged, and both subscriptions are disposed when its buffer is hidden.
@@ -19,6 +20,9 @@ local M = {
 
 local S = { bufnr = nil, winid = nil, rows = nil, items = {}, shown = false, subs = nil, augroup = nil, timer = nil }
 M._state = S
+
+-- The core topic the view repaints from while shown (ADR 0026 Phase 6).
+M._core_refresh_topic = "auto-finder.core.buffers:changed"
 
 local SEV = { "Error", "Warn", "Info", "Hint" }
 
@@ -38,65 +42,111 @@ local function diag_by_buf()
   return out
 end
 
----Visible items: root, then groups (directories) and buffers, sorted like the files tree.
-function M.items()
-  local cwd = vim.fn.getcwd()
-  local tree = { children = {}, dirs = {} }
-  local function dir_node(parent, name, path)
-    local d = parent.dirs[name]
+-- Out-of-cwd buffers are grouped under their "natural external root", as the retired fork's buffers
+-- source did (v0.2.14): the first path segment after $HOME (~/.config, ~/Documents), else the first
+-- absolute segment (/tmp, /etc). Each bucket is its own root row.
+local function bucket_for_external(path)
+  local home = vim.fn.expand("~")
+  if vim.startswith(path, home .. "/") then
+    local first = path:sub(#home + 2):match("^([^/]+)")
+    if first then return home .. "/" .. first end
+  end
+  local first = path:match("^/([^/]+)")
+  if first then return "/" .. first end
+  return nil
+end
+
+local function new_group(name, path)
+  return { name = name, path = path, type = "directory", children = {}, dirs = {} }
+end
+
+local function add_under(root, rel, leaf)
+  local segs = vim.split(rel, "/", { plain = true, trimempty = true })
+  local parent, acc = root, root.path
+  for i = 1, #segs - 1 do
+    acc = acc .. "/" .. segs[i]
+    local d = parent.dirs[segs[i]]
     if not d then
-      d = { name = name, path = path, type = "directory", children = {}, dirs = {} }
-      parent.dirs[name] = d
+      d = new_group(segs[i], acc)
+      parent.dirs[segs[i]] = d
       table.insert(parent.children, d)
     end
-    return d
+    parent = d
   end
+  leaf.name = leaf.name or segs[#segs]
+  table.insert(parent.children, leaf)
+end
+
+-- group_empty_dirs: a group whose only child is a group becomes one "a/b" row; dirs first, then by path.
+local function merge(node)
+  for i, c in ipairs(node.children) do
+    if c.type == "directory" then
+      while #c.children == 1 and c.children[1].type == "directory" do
+        local only = c.children[1]
+        c = { name = c.name .. "/" .. only.name, path = only.path, type = "directory",
+          children = only.children, dirs = only.dirs }
+      end
+      node.children[i] = c
+      merge(c)
+    end
+  end
+  table.sort(node.children, function(a, b)
+    if a.type ~= b.type then return a.type < b.type end
+    return (a.path ~= "" and a.path or a.name) < (b.path ~= "" and b.path or b.name)
+  end)
+end
+
+---Visible items: the cwd root, a TERMINALS root (terminals under cwd), then one root per external
+---bucket — each followed by its groups and buffers.
+function M.items()
+  local cwd = vim.fn.getcwd()
+  local cwd_root = new_group(vim.fn.fnamemodify(cwd, ":~"), cwd)
+  local terminals = {}
+  local buckets = {}
   for _, b in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_valid(b) and vim.bo[b].buflisted
-        and (vim.bo[b].buftype == "" or vim.bo[b].buftype == "terminal") then
+    if vim.api.nvim_buf_is_valid(b) and vim.bo[b].buflisted then
       local name = vim.api.nvim_buf_get_name(b)
-      if name == "" then
-        table.insert(tree.children, { name = "[No Name]", path = "", type = "file", bufnr = b })
-      else
-        local under = vim.startswith(name, cwd .. "/")
-        local rel = under and name:sub(#cwd + 2) or name
-        local segs = vim.split(rel, "/", { plain = true, trimempty = true })
-        local parent, acc = tree, under and cwd or ""
-        for i = 1, #segs - 1 do
-          acc = acc .. "/" .. segs[i]
-          parent = dir_node(parent, segs[i], acc)
+      if vim.startswith(name, "term://") then
+        local dir = vim.fn.fnamemodify(name:match("term://(.*)//.*") or "", ":p")
+        if vim.startswith(dir, cwd .. "/") or dir == cwd or dir == cwd .. "/" then
+          local ok_t, title = pcall(vim.api.nvim_buf_get_var, b, "term_title")
+          table.insert(terminals, { name = ok_t and title or dir, path = name, type = "file", bufnr = b,
+            terminal = true })
         end
-        table.insert(parent.children, { name = segs[#segs], path = name, type = "file", bufnr = b })
+      elseif vim.bo[b].buftype == "" then
+        if name == "" then
+          table.insert(cwd_root.children, { name = "[No Name]", path = "", type = "file", bufnr = b })
+        elseif vim.startswith(name, cwd .. "/") then
+          add_under(cwd_root, name:sub(#cwd + 2), { path = name, type = "file", bufnr = b })
+        else
+          local bucket = bucket_for_external(name)
+          if bucket then
+            buckets[bucket] = buckets[bucket] or new_group(vim.fn.fnamemodify(bucket, ":~"), bucket)
+            add_under(buckets[bucket], name:sub(#bucket + 2), { path = name, type = "file", bufnr = b })
+          end
+        end
       end
     end
   end
-  -- merge single-directory chains: a group whose only child is a group becomes "a/b"
-  local function merge(node)
-    for i, c in ipairs(node.children) do
-      if c.type == "directory" then
-        while #c.children == 1 and c.children[1].type == "directory" do
-          local only = c.children[1]
-          c = { name = c.name .. "/" .. only.name, path = only.path, type = "directory",
-            children = only.children, dirs = only.dirs }
-        end
-        node.children[i] = c
-        merge(c)
-      end
-    end
-    table.sort(node.children, function(a, b)
-      if a.type ~= b.type then return a.type < b.type end
-      return (a.path ~= "" and a.path or a.name) < (b.path ~= "" and b.path or b.name)
-    end)
+  local roots = { { node = cwd_root, label = "OPEN BUFFERS in " .. cwd_root.name } }
+  if #terminals > 0 then
+    roots[#roots + 1] = { node = { children = terminals, dirs = {} }, label = "TERMINALS", terminal = true }
   end
-  merge(tree)
+  local keys = vim.tbl_keys(buckets)
+  table.sort(keys)
+  for _, k in ipairs(keys) do
+    roots[#roots + 1] = { node = buckets[k], label = "OPEN BUFFERS in " .. buckets[k].name }
+  end
+
   local diag = diag_by_buf()
-  local out = { { kind = "root", name = "OPEN BUFFERS in " .. vim.fn.fnamemodify(cwd, ":~"), depth = 0,
-    is_last = true, continues = {} } }
+  local out = {}
   local function walk(node, depth, continues)
     for i, c in ipairs(node.children) do
       local last = i == #node.children
       local it = { kind = c.type, name = c.name, depth = depth, is_last = last, continues = continues,
-        expanded = true, bufnr = c.bufnr, path = c.path }
+        expanded = true, bufnr = c.bufnr, path = c.path, name_hl = "AutoFinderFileName" }
+      if c.type == "directory" then it.name_hl = "AutoFinderDirectoryName" end
+      if c.terminal then it.icon_name = "terminal" end
       if c.bufnr and diag[c.bufnr] then it.diag = SEV[diag[c.bufnr]] end
       out[#out + 1] = it
       if c.type == "directory" then
@@ -106,7 +156,19 @@ function M.items()
       end
     end
   end
-  walk(tree, 1, {})
+  for _, r in ipairs(roots) do
+    local root_item = { kind = "root", name = r.label, depth = 0, is_last = true, continues = {} }
+    if r.terminal then
+      local d = select(2, pcall(require, "nvim-web-devicons"))
+      local glyph, hl
+      if type(d) == "table" then glyph, hl = d.get_icon("terminal") end
+      root_item.icon = { glyph or "*", hl or "AutoFinderFileIcon" }
+    else
+      merge(r.node)
+    end
+    out[#out + 1] = root_item
+    walk(r.node, 1, {})
+  end
   return out
 end
 
@@ -152,10 +214,11 @@ end
 
 function M.resume(panel_winid)
   S.winid = panel_winid
+  -- replace semantics: every focus re-arms what an auto-core bus reset dropped (v0.2.25 B1)
+  S.subs = S.subs or require("auto-finder.shared.view_subs").new()
+  S.subs:replace("buffers", M._core_refresh_topic, schedule_paint)
   if not S.shown then
     S.shown = true
-    S.subs = S.subs or require("auto-finder.shared.view_subs").new()
-    S.subs:replace("buffers", "auto-finder.core.buffers:changed", schedule_paint)
     S.augroup = vim.api.nvim_create_augroup("auto-finder.buffers.view", { clear = true })
     vim.api.nvim_create_autocmd({ "DiagnosticChanged", "BufModifiedSet", "DirChanged" }, {
       group = S.augroup, callback = schedule_paint,
@@ -245,6 +308,9 @@ function M.on_focus(panel_winid, bufnr)
 end
 
 function M.on_close() M.suspend() end
+
+---Repaint now when shown (the view registry's public refresh entry).
+function M.refresh() if S.shown then M.paint() end end
 
 function M._reset_for_tests()
   M.suspend()

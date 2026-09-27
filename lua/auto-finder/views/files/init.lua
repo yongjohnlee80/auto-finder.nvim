@@ -1,8 +1,9 @@
 ---auto-finder.views.files — the files slot (ADR-0200).
 ---
----A lazy tree over the working directory, built on auto-core.fs.scan (reads), auto-core.fs.watch
----(non-recursive, expanded directories only) and auto-core.git.status (filename colours). Nothing here
----reads a collapsed directory, and a hidden pane does no work:
+---A lazy tree over the working directory, built on auto-core.fs.scan (reads), directory watches held
+---through auto-finder.core.watchers (non-recursive, expanded directories only — core owns every handle,
+---ADR-0026 A2) and auto-core.git.status (filename colours). Events arrive as auto-finder.core.* topics
+---core translates (ADR-0026 A1). Nothing here reads a collapsed directory, and a hidden pane does no work:
 ---
 ---  shown  (on_focus)  : new owner token → subscribe → arm a watch on every expanded dir → re-read each
 ---                       expanded dir once (fresh) → git colours → paint
@@ -174,7 +175,8 @@ local function auto_expand(rows)
   if not (win and vim.api.nvim_win_is_valid(win)) then return end
   local af = require("auto-finder")
   if af.state.user_width and af.state.user_width > 0 then return end
-  local _, top = cfg()
+  local c, top = cfg()
+  if c.auto_expand_width == false then return end
   local max = top.width and top.width.max or 100
   local want = 0
   for _, r in ipairs(rows) do if r.width > want then want = r.width end end
@@ -219,7 +221,7 @@ local function apply_hidden()
   local hidden = {}
   for repo, status in pairs(S.git) do
     for path, s in pairs(status) do
-      if s == "!" then hidden[path] = true end
+      if s == "!!" then hidden[path] = true end
     end
     local _ = repo
   end
@@ -248,6 +250,15 @@ end
 
 local function git_schedule() after("git", 300, M.git_refresh) end
 
+---A directory read showed a `.git` entry the colours have no status for yet (a nested repo just expanded
+---or revealed): schedule the read that covers it.
+local function note_repos(model)
+  for _, d in ipairs(model_mod.expanded_dirs(model)) do
+    local n = model.nodes[d]
+    if n and n.repo_root and S.git[d] == nil and d ~= S.repo_top then return git_schedule() end
+  end
+end
+
 local function resolve_repo_top(model)
   local token = model.token
   vim.system({ "git", "--no-optional-locks", "-C", model.root, "rev-parse", "--show-toplevel" }, { text = true },
@@ -263,12 +274,12 @@ end
 -- ── watches ────────────────────────────────────────────────────────────────────────────────────────
 local function arm(node)
   if node.watch or node.type ~= "directory" or not S.shown then return end
-  node.watch = require("auto-core.fs.watch").start(node.path, { recursive = false, self_extend = false })
+  node.watch = require("auto-finder.core.watchers").watch_dir(node.path, model_mod.WATCH_OWNER) or nil
 end
 
 local function disarm(node)
   if node.watch then
-    pcall(require("auto-core.fs.watch").stop, node.watch)
+    require("auto-finder.core.watchers").unwatch_dir(node.path, model_mod.WATCH_OWNER)
     node.watch = nil
   end
 end
@@ -278,13 +289,9 @@ local function disarm_all(model)
   for _, n in pairs(model.nodes) do disarm(n) end
 end
 
----Number of watch handles the view holds (tests, benchmark).
+---Number of directory watches the view holds (tests, benchmark).
 function M.watch_count()
-  local n = 0
-  if S.model then
-    for _, node in pairs(S.model.nodes) do if node.watch then n = n + 1 end end
-  end
-  return n
+  return require("auto-finder.core.watchers").dir_watch_count(model_mod.WATCH_OWNER)
 end
 
 -- ── reads ──────────────────────────────────────────────────────────────────────────────────────────
@@ -295,6 +302,7 @@ local function read_then_paint(path, fresh, cb)
       -- newly listed children may be expanded directories (re-root restores nothing; a read of a known
       -- dir keeps its children's expansion), so arm whatever is expanded and shown
       for _, d in ipairs(model_mod.expanded_dirs(model)) do arm(model.nodes[d]) end
+      note_repos(model)
       M.paint()
     end
     if cb then cb(changed) end
@@ -333,6 +341,7 @@ function M.suspend()
   end
   if S.search then require("auto-finder.views.files.search").cancel() end
   disarm_all(S.model)
+  require("auto-finder.core.watchers").unwatch_owner(model_mod.WATCH_OWNER)
   if S.subs then pcall(function() S.subs:dispose_all() end) end
   if S.augroup then pcall(vim.api.nvim_del_augroup_by_id, S.augroup); S.augroup = nil end
   stop_timers()
@@ -342,11 +351,16 @@ end
 ---Resume on show: token, subscriptions, watches, then a re-read of every expanded directory.
 function M.resume(panel_winid)
   S.winid = panel_winid
+  if S.shown then
+    -- replace semantics: a re-focus re-arms what an auto-core bus reset dropped (v0.2.25 B1)
+    subscribe()
+    if S.model and S.model.root ~= vim.fn.getcwd() then M.reroot(vim.fn.getcwd()) end
+    return
+  end
   if not S.model or S.model.root ~= vim.fn.getcwd() then
     if S.model then disarm_all(S.model) end
     new_model(vim.fn.getcwd())
   end
-  if S.shown then return end
   S.shown = true
   S.model.token = {}
   subscribe()
@@ -361,7 +375,10 @@ end
 ---Re-root at `root` (worktree switch, :cd).
 function M.reroot(root)
   if S.model and S.model.root == root then return end
-  if S.model and S.model.token then require("auto-core.fs.scan").cancel(S.model.token) end
+  if S.model and S.model.token then
+    require("auto-core.fs.scan").cancel(S.model.token)
+    S.model.token = nil
+  end
   disarm_all(S.model)
   new_model(root)
   if S.shown then
@@ -397,6 +414,7 @@ local function follow(buf)
   model_mod.reveal(S.model, path, function(found)
     if seq ~= S.follow_seq or not found then return end
     for _, d in ipairs(model_mod.expanded_dirs(S.model)) do arm(S.model.nodes[d]) end
+    note_repos(S.model)
     M.paint()
     set_cursor_to(path)
   end)
@@ -406,30 +424,27 @@ end
 subscribe = function()
   local view_subs = require("auto-finder.shared.view_subs")
   S.subs = S.subs or view_subs.new()
-  S.subs:replace("files-fs", "core.file:*", function(payload)
-    if type(payload) ~= "table" or type(payload.path) ~= "string" or not S.model then return end
-    local parent = vim.fs.dirname(payload.path)
-    local dir = S.model.nodes[parent]
+  -- core translates core.file:* / core.fs.dir:dirty for the directories this view watches
+  S.subs:replace("files-fs", "auto-finder.core.files:changed", function(payload)
+    if type(payload) ~= "table" or type(payload.dir) ~= "string" or not S.model then return end
+    local dir = S.model.nodes[payload.dir]
     if not dir then return end
-    if payload.change == "modified" and S.model.nodes[payload.path] then
+    if payload.kind == "modified" and S.model.nodes[payload.path] then
       git_schedule()
       return
     end
     if dir.expanded and dir.children then
-      schedule_read(parent)
+      schedule_read(payload.dir)
     elseif dir.children then
       dir.stale = true
     end
     git_schedule()
   end)
-  S.subs:replace("files-dirty", "core.fs.dir:dirty", function(payload)
-    if type(payload) ~= "table" or not S.model then return end
-    local dir = S.model.nodes[payload.path]
-    if dir and dir.expanded and dir.children then schedule_read(payload.path) end
-  end)
-  S.subs:replace("files-git", "core.git.state:changed", function() git_schedule() end)
-  S.subs:replace("files-worktree", "worktree:switched", function()
-    vim.schedule(function() M.reroot(vim.fn.getcwd()) end)
+  S.subs:replace("files-git", "auto-finder.core.git:changed", function() git_schedule() end)
+  S.subs:replace("files-worktree", "auto-finder.core.repos:changed", function(payload)
+    if type(payload) == "table" and payload.kind == "worktree_switched" then
+      vim.schedule(function() M.reroot(vim.fn.getcwd()) end)
+    end
   end)
   local ok, core = pcall(require, "auto-core")
   if ok and core.files then
@@ -499,7 +514,7 @@ local function toggle(node)
     M.paint()
   else
     model_mod.expand(model, node.path, function()
-      if model == S.model then arm(node) end
+      if model == S.model then arm(node); note_repos(model) end
       M.paint()
     end)
     M.paint()
@@ -740,6 +755,13 @@ end
 
 function M.on_close()
   M.suspend()
+end
+
+---Drop the model (kept across hides) so the next show builds it from the current config. `M.reload`.
+function M.reset()
+  M.suspend()
+  disarm_all(S.model)
+  S.model, S.rows, S.git, S.repo_top, S.search = nil, nil, {}, nil, nil
 end
 
 ---Test-only: forget everything, including the buffer.

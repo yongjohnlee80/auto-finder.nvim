@@ -20,7 +20,7 @@ M.NEVER_SHOW = { ".git", "node_modules" }
 ---@field expanded  boolean
 ---@field repo_root boolean?    -- held a `.git` entry (dir or gitfile) at its last read
 ---@field stale     boolean?    -- changed while collapsed; re-read on the next expand
----@field watch     table?      -- auto-core.fs.watch handle, only while expanded and shown
+---@field watch     boolean?    -- a core.watchers directory watch is held for it (expanded and shown)
 
 ---@class AutoFinderFilesModel
 ---@field root  string
@@ -107,13 +107,16 @@ function M.apply_scan(model, res)
   return before ~= table.concat(children, "\0")
 end
 
----Drop `path` and everything under it (watch handles are released by the caller's disarm pass first).
+-- The core.watchers owner the files view registers directory watches under.
+M.WATCH_OWNER = "views.files"
+
+---Drop `path` and everything under it, releasing any directory watch it held.
 function M.forget(model, path)
   local node = model.nodes[path]
   if not node then return end
   for _, c in ipairs(node.children or {}) do M.forget(model, c) end
   if node.watch then
-    pcall(require("auto-core.fs.watch").stop, node.watch)
+    require("auto-finder.core.watchers").unwatch_dir(node.path, M.WATCH_OWNER)
     node.watch = nil
   end
   model.nodes[path] = nil

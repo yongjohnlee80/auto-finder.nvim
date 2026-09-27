@@ -9,8 +9,11 @@
 ---    D → deleted, anything else → added;
 ---  * a directory takes the highest-priority code among its descendants, by `U?MADTRC.` (a record's
 ---    priority is the stronger of its two sides); ignored records are exact-path only and never bubble;
----  * a path with no record of its own inherits `?` / `!` from its nearest recorded ancestor (a
----    `?? dir/` / `!! dir/` record stands for the whole subtree).
+---  * a path with no record of its own inherits untracked / ignored from its nearest ancestor that has a
+---    `?? dir/` / `!! dir/` RECORD (the record stands for the whole subtree). Records are stored as "??" /
+---    "!!" and a bubbled directory code as one character, so a clean file never inherits the `?` that
+---    bubbled up from an untracked sibling. The retired fork stored both as "?" and did — a clean file
+---    next to a new one showed as untracked (ADR-0200 rationale §R11).
 ---@module 'auto-finder.views.files.git'
 
 local M = {}
@@ -33,8 +36,8 @@ end
 ---@return string?
 function M.code(status)
   if not status then return nil end
-  if status == "?" then return "untracked" end
-  if status == "!" then return "ignored" end
+  if status == "?" or status == "??" then return "untracked" end
+  if status == "!" or status == "!!" then return "ignored" end
   local x, y = status:sub(1, 1), status:sub(2, 2)
   if not is_conflict(x, y) and y ~= "" and y ~= "." then return side(y) end
   if x ~= "" and x ~= "." then return side(x) end
@@ -60,7 +63,7 @@ function M.build(entries, repo_root)
     if x == "!" then
       ignored[#ignored + 1] = abs
     elseif x == "?" then
-      status[abs] = "?"
+      status[abs] = "??"
       records[#records + 1] = { abs, "?" }
     else
       status[abs] = x .. y
@@ -87,8 +90,11 @@ function M.build(entries, repo_root)
       end
     end
   end
-  for parent, s in pairs(parents) do status[parent] = s end
-  for _, abs in ipairs(ignored) do status[abs] = "!" end
+  -- a directory's own record outranks a code bubbled into it
+  for parent, s in pairs(parents) do
+    if status[parent] == nil then status[parent] = s end
+  end
+  for _, abs in ipairs(ignored) do status[abs] = "!!" end
   return status
 end
 
@@ -104,7 +110,7 @@ function M.lookup(status, repo_root, path)
   while parent and #parent >= #repo_root do
     s = status[parent]
     if s then
-      if s == "!" or s == "?" then return M.code(s) end
+      if s == "!!" or s == "??" then return M.code(s) end
       return nil
     end
     parent = dirname(parent)
