@@ -1243,9 +1243,15 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.debug: on a property row: edit it in place (env values masked); on an entry: open its config file; on an env var: edit its value")
   set("a", function()
     local row = _row_under_cursor(panel_winid)
-    if row and (row.kind == "env-file"
-        or (row.kind == "bucket-header" and row.section == "env")) then
-      env_section.add(row.kind == "env-file" and row or nil)
+    -- In the Env section `a` adds KEY=VALUE — to the file under the cursor
+    -- (its header, a variable or an error line), or on the header the
+    -- selected one. A variable row fell through to "new entry point".
+    if row and (row.kind == "env-file" or row.kind == "env-var" or row.kind == "env-error") then
+      env_section.add({ kind = "env-file", path = row.path })
+      return
+    end
+    if row and row.kind == "bucket-header" and row.section == "env" then
+      env_section.add(nil)
       return
     end
     if row and (row.kind == "profile" or (row.kind == "bucket-header" and row.section == "profiles")

@@ -212,7 +212,7 @@ function M.emit(ctx)
     return
   end
   if #ctx.list == 0 then
-    local l = INDENT .. "(no env files — none referenced by configs or discovered)"
+    local l = INDENT .. "(no env files — `n` creates one)"
     lines[#lines + 1] = l
     mark(#lines - 1, 0, #l, HL.empty)
     return
@@ -449,10 +449,13 @@ function M.create_file(_row)
   end
   local dirs = require("auto-run.store").resolve_run_dirs()
   local root = dirs.root or dirs.anchor
+  -- Default: next to the store's configs, in .auto-run/ — tracked with the
+  -- repo (Johno's choice), so secrets there get committed. The root, .config/
+  -- and .vscode/ work too.
   vim.ui.input({
     prompt = "New env file (in " .. vim.fn.fnamemodify(root, ":~")
-      .. "; .config/NAME or .vscode/NAME also work): ",
-    default = ".env.local",
+      .. "; tracked with the repo; NAME, .config/NAME or .vscode/NAME also work): ",
+    default = ".auto-run/.env",
   }, function(name)
     if not name or name == "" then return end
     local path = name:sub(1, 1) == "/" and name or (root .. "/" .. name)

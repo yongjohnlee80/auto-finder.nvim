@@ -1121,12 +1121,19 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.tests: new env file (in the worktree root, .config/ or .vscode/ — where env discovery looks)")
   set("a", function()
     local row = _row_under_cursor(panel_winid)
-    if test_configs.add(row) then return end
-    if row and (row.kind == "env-file" or row.kind == "env-header") then
-      env_section.add(row.kind == "env-file" and row or nil)
+    -- In the Env section `a` adds KEY=VALUE — to the file under the cursor, or
+    -- (on the header) the selected one.
+    if row and (row.kind == "env-file" or row.kind == "env-var" or row.kind == "env-error") then
+      return env_section.add({ kind = "env-file", path = row.path })
     end
+    if row and row.kind == "env-header" then return env_section.add(nil) end
+    -- Anywhere else — a Test configs row, the section's own hint line (no
+    -- row), a test position — it creates a test config, as the debug pane's
+    -- `a` creates an entry point from any row. It needed the cursor ON the
+    -- section before, while the hint below the header said "`a` creates one".
+    test_configs.create()
   end,
-    "auto-finder.tests: Test configs → create a test config; env file/header → add KEY=VALUE")
+    "auto-finder.tests: create a test config; in the Env section → add KEY=VALUE")
 
   require("auto-finder.shared.help").install_help_keymap("tests", bufnr)
 end

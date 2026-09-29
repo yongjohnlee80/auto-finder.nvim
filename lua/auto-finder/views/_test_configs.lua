@@ -191,19 +191,13 @@ function M.select(row)
   return true
 end
 
----`a` on the section: create a test config through auto-run's scaffold API.
----Returns true when the row was this section's.
----@param row table?
----@return boolean handled
-function M.add(row)
-  if not row or (row.kind ~= "test-configs-header" and row.kind ~= "test-config"
-      and row.kind ~= "test-shared-pick") then
-    return false
-  end
+---Create a test config through auto-run's scaffold API: runtime, then name.
+---The tests pane's `a` calls this from any row outside the Env section.
+function M.create()
   local okr, reg = pcall(require, "auto-run.adapters")
   if not okr or type(reg.scaffold) ~= "function" then
     say("this auto-run.nvim cannot scaffold configs — update it", "warn")
-    return true
+    return
   end
   vim.ui.select(reg.scaffold_runtimes(), { prompt = "New test config — runtime" }, function(rt)
     if not rt then return end
@@ -211,9 +205,21 @@ function M.add(row)
       if not name or name == "" then return end
       local path, err = reg.scaffold("test", name, rt)
       if not path then return say(errtext(err), "error") end
-      say("created test config '" .. name .. "' (" .. rt .. ") — s picks it")
+      say("created test config '" .. name .. "' (" .. rt .. ") — s picks it, o shows its fields")
     end)
   end)
+end
+
+---`a` on the section: create a test config. Returns true when the row was
+---this section's.
+---@param row table?
+---@return boolean handled
+function M.add(row)
+  if not row or (row.kind ~= "test-configs-header" and row.kind ~= "test-config"
+      and row.kind ~= "test-shared-pick") then
+    return false
+  end
+  M.create()
   return true
 end
 

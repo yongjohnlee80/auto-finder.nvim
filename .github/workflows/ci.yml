@@ -122,7 +122,7 @@ jobs:
           # BUMPED to v0.1.16 (ADR 0199 §6.5): delete / test-config editing /
           # env files / profiles call env.create_file, env.remove_var,
           # store.files and store.update's kind + replace options.
-          AUTO_RUN_REF:  "836c32e39ea4e9138624ef7f409b0c243911478e"  # main @ v0.1.17
+          AUTO_RUN_REF:  "688857d72393027a10ce071691345b9d2d60911d"  # feat/field-help-and-folder-scaffolds @ v0.1.18 (repin to the merge commit)
           # The parity goldens' icon provider and colour scheme (tests/fixtures/parity/manifest.json).
           MINI_ICONS_REF: "f642e3ba8c12afbc8f32f6d77ef6597eac56786f"
           CATPPUCCIN_REF: "edefef779ab08ce1a4a404713e3012b0d202bd35"
@@ -287,7 +287,7 @@ jobs:
           # BUMPED to v0.1.16 (ADR 0199 §6.5): delete / test-config editing /
           # env files / profiles call env.create_file, env.remove_var,
           # store.files and store.update's kind + replace options.
-          AUTO_RUN_REF:  "836c32e39ea4e9138624ef7f409b0c243911478e"  # main @ v0.1.17
+          AUTO_RUN_REF:  "688857d72393027a10ce071691345b9d2d60911d"  # feat/field-help-and-folder-scaffolds @ v0.1.18 (repin to the merge commit)
           # The parity goldens' icon provider and colour scheme (tests/fixtures/parity/manifest.json).
           MINI_ICONS_REF: "f642e3ba8c12afbc8f32f6d77ef6597eac56786f"
           CATPPUCCIN_REF: "edefef779ab08ce1a4a404713e3012b0d202bd35"
