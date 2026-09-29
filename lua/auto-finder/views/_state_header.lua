@@ -42,7 +42,10 @@ function M.values(st)
   do
     local text
     if w.is_repo then
-      text = tostring(w.label) .. (w.branch and ("  (" .. w.branch .. ")") or "")
+      -- A chosen folder inside the repo (auto-run's working directory) reads
+      -- as <repo>/<folder>.
+      text = tostring(w.label) .. (w.folder and ("/" .. w.folder) or "")
+        .. (w.branch and ("  (" .. w.branch .. ")") or "")
     else
       text = tostring(w.label) .. " — not a repository · w to choose one"
     end
@@ -198,48 +201,18 @@ function M.choose_env()
   end)
 end
 
----`w` — choose the Active worktree: every worktree under the workspace, as
----`<repo> (<branch>) — <relative path>`. Sets auto-core's active worktree —
----the one owner (ADR 0199 §7.2) — and never changes the cwd, so the editor
----stays where it is while every auto-core consumer follows the choice (the
----same as a worktree.nvim switch, minus the `cd`).
+---`w` — choose the Active worktree, the directory auto-run works in: a
+---worktree from the same list `<leader>gw` shows, then its root, one of its
+---project folders or a typed directory. auto-core's `choose_active` is the
+---one implementation (auto-run's `<leader>rw` calls it too); it sets the
+---active worktree and never changes the cwd (ADR 0199 §7.2).
 function M.choose_worktree()
   local okw, wt = pcall(require, "auto-core.git.worktree")
-  if not okw or type(wt.collect) ~= "function" or type(wt.set_active) ~= "function" then
-    return notify("this auto-core.nvim cannot list worktrees", "warn")
+  if not okw or type(wt.choose_active) ~= "function" then
+    return notify("choosing the working directory needs auto-core.nvim >= 0.2.32", "warn")
   end
-  local fs_path = require("auto-core.fs.path")
-  local root = fs_path.normalize(wt.get_workspace_root() or vim.fn.getcwd())
-  local entries, seen = {}, {}
-  local function add(list)
-    for _, e in ipairs(list or {}) do
-      local p = e.path and fs_path.normalize(e.path)
-      if p and not e.bare and not seen[p] then
-        seen[p] = true
-        entries[#entries + 1] = { path = p, branch = e.branch, detached = e.detached }
-      end
-    end
-  end
-  -- The workspace root is itself a repo when nvim was opened inside one
-  -- (collect walks only its children).
-  if fs_path.exists(root .. "/.git") then add((wt.list(root))) end
-  add((wt.collect(root)))
-  if #entries == 0 then return notify("no worktrees found under " .. vim.fn.fnamemodify(root, ":~")) end
-  table.sort(entries, function(a, b) return a.path < b.path end)
-
-  local active = wt.get_active()
-  active = active and fs_path.normalize(active) or nil
-  local labels = {}
-  for i, e in ipairs(entries) do
-    local rel = e.path == root and "." or (e.path:sub(1, #root + 1) == root .. "/" and e.path:sub(#root + 2) or e.path)
-    local repo = rel == "." and vim.fn.fnamemodify(root, ":t") or rel:match("^[^/]+")
-    local branch = e.branch or (e.detached and "detached") or "?"
-    labels[i] = (e.path == active and "* " or "  ") .. repo .. " (" .. branch .. ") — " .. rel
-  end
-  vim.ui.select(labels, { prompt = "Active worktree (auto-core — shared by every plugin)" }, function(_, idx)
-    if not idx then return end
-    wt.set_active(entries[idx].path)
-  end)
+  local ok, err = wt.choose_active()
+  if not ok then notify(err) end
 end
 
 ---`b` — choose (or clear) the shared base, merged under every launch.

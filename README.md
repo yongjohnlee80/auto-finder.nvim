@@ -525,7 +525,7 @@ answers a run resolves, so the header cannot disagree with what executes):
 
 | Row | Shows | Key |
 |---|---|---|
-| Active worktree | auto-core's active worktree and branch; "not a repository" when it is not one | `w` choose (sets auto-core's active worktree — every plugin follows it; the cwd never changes) |
+| Active worktree | the directory auto-run works in, as `<repo>/<folder>` when a folder inside the repo was chosen, and its branch; "not a repository" when it is not one | `w` choose: the `<leader>gw` worktree list, then the worktree root, a project folder or a typed directory (auto-core's `choose_active`, also auto-run's `<leader>rw`; the cwd never changes) |
 | Env | the env file applied to every launch; "(process env only)"; "— MISSING" | `s` choose |
 | Base | the launch config merged under every run, debug and test; "(none)" | `b` choose |
 | Test config *(tests pane)* | per runtime: the config that applies and why — `(picked)`, `(shared pick)`, `(first)` — and any remembered pick that does not apply | `c` choose |
