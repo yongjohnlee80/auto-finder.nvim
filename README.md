@@ -532,7 +532,7 @@ answers a run resolves, so the header cannot disagree with what executes):
 
 Below it, an **Env** section lists the candidate `.env` files (referenced by
 configs, or discovered under the worktree root and the bare-repo container at
-`.`, `.config/`, `.vscode/`); a `*` marks the selection.
+`.`, `.config/`, `.vscode/`, `.auto-run/`); a `*` marks the selection.
 
 ### tests
 
@@ -558,7 +558,7 @@ structured cap report when a bounded full scan aborts.
 | `a` | create a test config (runtime, name) — from any row outside the Env section; in the Env section → add KEY=VALUE to the file under the cursor (the selected file on the header) |
 | `e` | property row → edit it in place (env values masked); env var → edit its value; test config → open its file |
 | `D` | **delete** the test config or env variable under cursor — asks first, naming the file, its tier and whether git tracks it |
-| `n` | new env file (worktree root, `.config/` or `.vscode/`) |
+| `n` | new env file — defaults to `.auto-run/.env` (tracked with the repo); the worktree root, `.config/` or `.vscode/` also work |
 | `S` | full worktree scan (bounded; `S` again cancels) |
 | `x` | stop running test jobs |
 | `?` | help overlay |
@@ -594,7 +594,7 @@ nvim-dap directly (sign column / API); config files via the files panel.
 | `O` | toggle ALL sections open/closed |
 | `e` | property row → edit in place; entry point / profile → open its file; env var → edit its value |
 | `D` | **delete** the entry point, profile or env variable under cursor — asks first, naming each file, its tier and whether git tracks it; with a local layer over a tracked one you choose the local layer alone (the tracked one applies again) or both |
-| `n` | new env file (worktree root, `.config/` or `.vscode/`) |
+| `n` | new env file — defaults to `.auto-run/.env` (tracked with the repo); the worktree root, `.config/` or `.vscode/` also work |
 | `a` | add an entry point (kind, runtime, name — auto-run scaffolds it); Profiles → add a profile; in the Env section → add KEY=VALUE to the file under the cursor (the selected file on the header) |
 | `E` | export the entry point to `launch.json` (nearest reachable, else `<worktree>/.config/launch.json`) |
 | `I` | import `launch.json` configurations into the store (one, or all; conflicts skipped and reported) |
