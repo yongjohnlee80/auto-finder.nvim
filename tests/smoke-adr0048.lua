@@ -2400,6 +2400,87 @@ print("\n[53b] a closed dap session leaves the Active Sessions list")
   pcall(vim.api.nvim_win_close, w, true)
 end)()
 
+-- ── [53c] a session's pid, port and journal; the sections' key hints ───
+-- Johno, 2026-09-29: "display the port number and pid … including how to
+-- journal the logs, with commands", and "under Entry Points let's have 'd' to
+-- debug 'r' to run help text just like we have 'a' adds one".
+print("\n[53c] session pid / port / journal rows; Entry Points and Sessions key hints")
+;(function()
+  local debug_view = require("auto-finder.views.debug")
+  local ard = require("auto-run.dap")
+  local store = require("auto-run.store")
+  local worktree = require("auto-core.git.worktree")
+  debug_view._reset_for_tests()
+  local log = vim.fn.tempname() .. "-journal.log"
+  vim.fn.writefile({ "listening on :8081" }, log)
+  local real_info = ard.session_info
+  ard.session_info = function()
+    return { pid = 4321, port = 8081, port_source = "listening", log = log,
+      commands = { tail = "tail -f " .. log, kill = "kill 4321" } }
+  end
+  local had_dap, real_dap = package.loaded.dap ~= nil, package.loaded.dap
+  local sess = { id = 93, closed = false, config = { name = "go-srv" } }
+  package.loaded.dap = setmetatable({ sessions = function() return { [93] = sess } end,
+    set_session = function() end }, { __index = real_dap or {} })
+
+  local repo = vim.fn.tempname() .. "-af-53c"
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s", "commit", "-q", "--allow-empty", "-m", "i" },
+    { text = true }):wait()
+  local prev = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  store.add({ name = "c53-run", kind = "run", runtime = "go", program = "sh" }, { tier = "tracked" })
+
+  vim.cmd("topleft 90vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function find(pred) for _, r in ipairs(debug_view._rows or {}) do if pred(r) then return r end end end
+  local function key(k)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do if m.lhs == k then return m.callback end end
+    return function() end
+  end
+  ok("p53c: Entry Points names its keys", text():find("r run · d debug · o fields · e edit · a add · D delete", 1, true) ~= nil,
+    text())
+  ok("p53c: Active Sessions names its keys", text():find("o details · <CR> focus · x terminate", 1, true) ~= nil, text())
+
+  local srow = find(function(r) return r.kind == "session" end)
+  if srow then vim.api.nvim_win_set_cursor(w, { srow.lnum, 0 }); key("o")(); debug_view.on_focus(w, b) end
+  local function detail(field) return find(function(r) return r.kind == "detail" and r.field == field end) end
+  local function dline(field) local r = detail(field); return r and vim.api.nvim_buf_get_lines(b, r.lnum - 1, r.lnum, false)[1] or "" end
+  ok("p53c: the session shows the program's pid", dline("pid"):find("4321", 1, true) ~= nil, dline("pid"))
+  ok("p53c: ... its port and where it came from", dline("port"):find("8081  (listening)", 1, true) ~= nil, dline("port"))
+  ok("p53c: ... the journal", dline("log"):find(vim.fn.fnamemodify(log, ":t"), 1, true) ~= nil, dline("log"))
+  ok("p53c: ... and the commands to follow and stop it",
+    dline("follow"):find("$ tail -f ", 1, true) ~= nil and dline("stop"):find("$ kill 4321", 1, true) ~= nil,
+    dline("follow") .. " | " .. dline("stop"))
+
+  vim.fn.setreg('"', "")
+  local fr = detail("follow")
+  if fr then vim.api.nvim_win_set_cursor(w, { fr.lnum, 0 }); key("<CR>")() end
+  ok("p53c: <CR> on a command copies it", vim.fn.getreg('"') == "tail -f " .. log, vim.fn.getreg('"'))
+  local lr = detail("log")
+  if lr then vim.api.nvim_win_set_cursor(w, { lr.lnum, 0 }); key("<CR>")() end
+  local opened = false
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)) == vim.fn.fnamemodify(log, ":p") then opened = true end
+  end
+  ok("p53c: <CR> on the log opens the journal", opened)
+
+  ard.session_info = real_info
+  package.loaded.dap = had_dap and real_dap or nil
+  pcall(store.remove, "c53-run")
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  worktree.set_active(prev)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf"); os.remove(log)
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then

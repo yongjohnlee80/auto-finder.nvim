@@ -23,6 +23,14 @@ Patch. Needs auto-run.nvim v0.1.18 for the field help and `.auto-run/` env files
   delve's build stayed listed as "running": the pane ignored nvim-dap's
   `closed` flag and nothing re-rendered it. It skips closed sessions, and
   auto-run's new `state = "closed"` announcement refreshes it.
+- **An expanded session shows what it is running** (auto-run v0.1.18's
+  `dap.session_info`): the program's `pid`, its `port` (listening, else the
+  `PORT` in its env), the `log` journal of its output, and `$ tail -f …` /
+  `$ kill …`. `<CR>` on the log opens it; on a command, copies it.
+- **Entry Points and Active Sessions name their keys** under the header
+  (`r run · d debug · o fields · e edit · a add · D delete`; `o details ·
+  <CR> focus · x terminate · p pause / continue`), like the sections' empty
+  lines already did.
 - **`n` creates env files in `.auto-run/` by default** (`.auto-run/.env`),
   tracked with the repo. The empty Env line now says "`n` creates one".
 

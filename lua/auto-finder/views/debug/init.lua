@@ -568,7 +568,15 @@ local function _render(bufnr)
       parent   = parent,
       field    = label,
       filepath = opts.filepath,
+      command  = opts.command,
     }
+  end
+
+  ---A dim line naming the section's keys (the "`a` adds one" lines' kin).
+  local function emit_hint(text)
+    local l = "  " .. text
+    lines[#lines + 1] = l
+    mark(#lines - 1, 0, #l, HL.empty)
   end
 
   ---A record's property rows (entry point / profile) — the shared editor's
@@ -591,6 +599,8 @@ local function _render(bufnr)
         local l = "  (no debug/run configs — `a` adds one, `I` imports launch.json)"
         lines[#lines + 1] = l
         mark(#lines - 1, 0, #l, HL.empty)
+      else
+        emit_hint("r run · d debug · o fields · e edit · a add · D delete")
       end
       for _, cfg_kind in ipairs(kind_order) do
         local group = by_kind[cfg_kind]
@@ -676,6 +686,8 @@ local function _render(bufnr)
         local l = "  (no active dap sessions)"
         lines[#lines + 1] = l
         mark(#lines - 1, 0, #l, HL.empty)
+      else
+        emit_hint("o details · <CR> focus · x terminate · p pause / continue")
       end
       for _, s in ipairs(sessions) do
         local id_part = "#" .. s.id
@@ -697,6 +709,24 @@ local function _render(bufnr)
           emit_detail(row, "state",  s.state)
           emit_detail(row, "stopped_thread",
             s.session.stopped_thread_id and tostring(s.session.stopped_thread_id) or nil)
+          -- What the session is running (auto-run's dap.sessions): the
+          -- program's pid and port, and the journal of its output.
+          local okr, ard = pcall(require, "auto-run.dap")
+          local info = okr and type(ard.session_info) == "function" and ard.session_info(s.session) or nil
+          if info then
+            emit_detail(row, "pid", info.pid and tostring(info.pid) or nil)
+            local port = info.port and (tostring(info.port)
+              .. (info.port_source == "env" and "  (PORT in its env)" or "  (listening)")) or nil
+            emit_detail(row, "port", port)
+            emit_detail(row, "log", info.log and vim.fn.fnamemodify(info.log, ":~") or nil,
+              { filepath = info.log })
+            if info.commands.tail then
+              emit_detail(row, "follow", "$ " .. info.commands.tail, { command = info.commands.tail })
+            end
+            if info.commands.kill then
+              emit_detail(row, "stop", "$ " .. info.commands.kill, { command = info.commands.kill })
+            end
+          end
         end
       end
     end
@@ -866,6 +896,17 @@ local function _open(row)
       pcall(dap.set_session, row.session)
       local okv, dv = pcall(require, "dap-view")
       if okv then pcall(dv.open) end
+    end
+    return
+  end
+
+  if row.kind == "detail" and row.parent and row.parent.kind == "session" then
+    if row.command then
+      vim.fn.setreg('"', row.command)
+      pcall(vim.fn.setreg, "+", row.command)
+      require("auto-finder.log").notify("copied: " .. row.command, { component = "view.debug", level = "info", notify = true })
+    elseif row.filepath then
+      _open_file(row.filepath)
     end
     return
   end
