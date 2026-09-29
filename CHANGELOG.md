@@ -19,6 +19,10 @@ Patch. Needs auto-run.nvim v0.1.18 for the field help and `.auto-run/` env files
   fixed set chooses instead of typing: `kind` (run | test | debug),
   `cargo_target_kind`, `runtime` (the adapters) and `extends` (the other
   configs).
+- **A closed debug session leaves Active Sessions.** A launch that died in
+  delve's build stayed listed as "running": the pane ignored nvim-dap's
+  `closed` flag and nothing re-rendered it. It skips closed sessions, and
+  auto-run's new `state = "closed"` announcement refreshes it.
 - **`n` creates env files in `.auto-run/` by default** (`.auto-run/.env`),
   tracked with the repo. The empty Env line now says "`n` creates one".
 

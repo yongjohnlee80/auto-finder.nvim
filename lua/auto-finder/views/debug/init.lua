@@ -299,15 +299,19 @@ local function _collect_sessions()
   local oks, sessions = pcall(dap.sessions)
   if not oks or type(sessions) ~= "table" then return out end
   for _, s in pairs(sessions) do
-    local id = tostring(s.id or "?")
-    local state = M._session_states[id]
-      or (s.stopped_thread_id and "stopped" or "running")
-    out[#out + 1] = {
-      session = s,
-      id      = id,
-      config  = type(s.config) == "table" and s.config.name or nil,
-      state   = state,
-    }
+    -- A closed session is not active, whether or not nvim-dap still holds it
+    -- (a launch that died in delve's build lingered as "running").
+    if not s.closed then
+      local id = tostring(s.id or "?")
+      local state = M._session_states[id]
+        or (s.stopped_thread_id and "stopped" or "running")
+      out[#out + 1] = {
+        session = s,
+        id      = id,
+        config  = type(s.config) == "table" and s.config.name or nil,
+        state   = state,
+      }
+    end
   end
   table.sort(out, function(a, b) return a.id < b.id end)
   return out
@@ -1321,7 +1325,7 @@ local function _ensure_subscriptions()
   M._subs = {
     ev.subscribe("run.session:changed", function(payload)
       if type(payload) == "table" and payload.id then
-        if payload.state == "terminated" or payload.state == "exited" then
+        if payload.state == "terminated" or payload.state == "exited" or payload.state == "closed" then
           M._session_states[tostring(payload.id)] = nil
         else
           M._session_states[tostring(payload.id)] = payload.state

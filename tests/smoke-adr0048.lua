@@ -2363,6 +2363,43 @@ print("\n[53] tests pane a from any row; field help and choosers; n into .auto-r
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ── [53b] a closed dap session leaves the Active Sessions list ─────────
+-- Johno, 2026-09-29: a launch that died in delve's build stayed in the debug
+-- pane as "running" — the collector ignored `closed`, and no event re-rendered
+-- the pane (auto-run v0.1.18 announces state = "closed" for such a drop).
+print("\n[53b] a closed dap session leaves the Active Sessions list")
+;(function()
+  local debug_view = require("auto-finder.views.debug")
+  debug_view._reset_for_tests()
+  local had_dap, real_dap = package.loaded.dap ~= nil, package.loaded.dap
+  local live = { id = 91, closed = false, config = { name = "live-one" } }
+  local dead = { id = 92, closed = true, config = { name = "dead-one" } }
+  local held = { [91] = live, [92] = dead }
+  local fake = setmetatable({ sessions = function() return held end }, { __index = real_dap or {} })
+  package.loaded.dap = fake
+
+  vim.cmd("topleft 80vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  ok("p53b: a live session is listed", text():find("live-one", 1, true) ~= nil, text())
+  ok("p53b: a session nvim-dap still holds but has closed is not", text():find("dead-one", 1, true) == nil, text())
+
+  -- The live one closes: auto-run's `closed` announcement re-renders the pane.
+  live.closed = true
+  require("auto-core.events").publish("run.session:changed", { id = "91", config = "live-one", state = "closed" })
+  vim.wait(500, function() return text():find("live-one", 1, true) == nil end)
+  ok("p53b: a `closed` announcement re-renders the pane without the session",
+    text():find("live-one", 1, true) == nil and text():find("no active dap sessions", 1, true) ~= nil, text())
+
+  package.loaded.dap = had_dap and real_dap or nil
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
