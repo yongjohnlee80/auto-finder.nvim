@@ -2,6 +2,20 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.4] — 2026-09-29 — `w` shows the `<leader>gw` list and can choose a folder
+
+Patch. Needs auto-core.nvim v0.2.32 and auto-run.nvim v0.1.17.
+
+`w` in the debug and tests panes crashed ("attempt to concatenate local
+'repo'") whenever the workspace listed a worktree outside its root, which two
+deleted `/tmp` worktrees did. It no longer builds its own list: it calls
+auto-core's `choose_active`, the same worktree list `<leader>gw` shows (dead
+worktrees left out), then a directory in the chosen worktree: its root, a
+project folder (`go.mod`, `Cargo.toml`, `package.json` …) or a typed path. A
+repo holding several projects can so have one of its folders as auto-run's
+working directory; the Active worktree row reads `<repo>/<folder>` then. The
+cwd never changes.
+
 ## [v0.5.3] — 2026-09-27 — delete, edit test configs, create env files, manage profiles — in the panes (ADR 0199 §6.5)
 
 Patch. Needs **auto-run v0.1.16**. Reviewed by Lector (design + two rounds).

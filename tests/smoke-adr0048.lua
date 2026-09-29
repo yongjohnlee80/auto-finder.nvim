@@ -1473,22 +1473,46 @@ print("\n[49] ADR 0199 §5.2 — state header (tests + debug panes)")
     ok("p49w: the Active worktree row names its key [w]", wl:find("[w]", 1, true) ~= nil, wl)
     maps = keymap_table(b)
     ok("p49w: tests pane maps w", rawget(maps, "w") ~= nil)
-    local offered
-    stub_select(function(items)
-      offered = items
-      return index_of(items, "beta/feat")
-    end)
+    -- `w` is auto-core's choose_active: the <leader>gw worktree list, then a
+    -- directory in the chosen worktree. Both prompts are answered by label.
+    vim.fn.mkdir(ws .. "/alpha/svc", "p")
+    local f = assert(io.open(ws .. "/alpha/svc/go.mod", "w")); f:write("module example.com/svc\n"); f:close()
+    local prompts, lists, answers = {}, {}, {}
+    vim.ui.select = function(items, o, cb)
+      local labels = vim.tbl_map(o.format_item or tostring, items)
+      prompts[#prompts + 1] = o.prompt
+      lists[#lists + 1] = labels
+      local want = table.remove(answers, 1)
+      local idx = want and index_of(labels, want) or nil
+      cb(idx and items[idx] or nil, idx)
+    end
+    local norm = require("auto-core.fs.path").normalize
+    answers = { "beta/feat", ". (worktree root)" }
     maps.w.callback()
-    local labels = vim.tbl_map(tostring, offered or {})
-    ok("p49w: w lists every worktree under the workspace as <repo> (<branch>) — <path>",
-      index_of(labels, "alpha (main) — alpha") ~= nil
-        and index_of(labels, "beta (feat) — beta/feat") ~= nil, vim.inspect(labels))
-    ok("p49w: …and marks the current one",
-      index_of(labels, "* alpha (main)") ~= nil, vim.inspect(labels))
-    ok("p49w: choosing sets auto-core's active worktree",
-      worktree.get_active() == require("auto-core.fs.path").normalize(ws .. "/beta/feat"),
-      tostring(worktree.get_active()))
+    local labels = lists[1] or {}
+    ok("p49w: w offers the <leader>gw worktree list (auto-core's select), live worktrees only",
+      #labels == 2 and index_of(labels, "alpha") ~= nil and index_of(labels, "beta/feat") ~= nil, vim.inspect(labels))
+    ok("p49w: …and marks the active one", (labels[1] or ""):match("^● alpha") ~= nil, vim.inspect(labels))
+    ok("p49w: then asks for a directory in the chosen worktree",
+      prompts[2] == "Working directory in feat:" and index_of(lists[2] or {}, "Custom directory") ~= nil,
+      vim.inspect({ prompts, lists[2] }))
+    ok("p49w: choosing the root sets auto-core's active worktree",
+      worktree.get_active() == norm(ws .. "/beta/feat"), tostring(worktree.get_active()))
     ok("p49w: …and never changes the cwd", vim.fn.getcwd() == cwd_before, vim.fn.getcwd())
+
+    -- A project folder inside a repo: the working directory, named in the row.
+    lists, prompts = {}, {}
+    answers = { "alpha", "svc" }
+    maps.w.callback()
+    ok("p49w: the folder step offers the repo's project folders",
+      index_of(lists[2] or {}, "svc") ~= nil and index_of(lists[2] or {}, "go.mod") ~= nil, vim.inspect(lists[2]))
+    ok("p49w: choosing a folder makes it the working directory",
+      worktree.get_active() == norm(ws .. "/alpha/svc"), tostring(worktree.get_active()))
+    require("auto-run.store.paths").invalidate()
+    require("auto-run.context").invalidate()
+    tests_view.on_focus(w, b)
+    local fl = row_line(tests_view, b, "state-worktree") or ""
+    ok("p49w: the row names the folder inside the repo", fl:find("alpha/svc", 1, true) ~= nil, fl)
     dmaps = keymap_table(b2)
     ok("p49w: debug pane maps w", rawget(dmaps, "w") ~= nil)
     vim.ui.select = real_select
