@@ -2,6 +2,38 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.5] — 2026-09-29 — `a` from anywhere in the tests pane; field help; env files in .auto-run/
+
+Patch. Needs auto-run.nvim v0.1.18 for the field help and `.auto-run/` env files.
+
+- **`a` in the tests pane creates a test config from any row** outside the
+  Env section, as the debug pane's `a` creates an entry point. It acted only
+  on the Test configs rows, so pressing it on the hint below "Test configs
+  (0)", which says "`a` creates one", did nothing.
+- **In the Env section `a` adds KEY=VALUE to the file under the cursor**:
+  its variable and error rows too, in both panes. On a variable row it did
+  nothing (tests) or created an entry point (debug).
+- **An expanded config shows every field's help.** An unset field reads
+  `(none)` followed by what it is for and the values it takes (auto-run's
+  `store.schema.FIELD_DOCS`). `extends` is now a row. `e` on a field with a
+  fixed set chooses instead of typing: `kind` (run | test | debug),
+  `cargo_target_kind`, `runtime` (the adapters) and `extends` (the other
+  configs).
+- **A closed debug session leaves Active Sessions.** A launch that died in
+  delve's build stayed listed as "running": the pane ignored nvim-dap's
+  `closed` flag and nothing re-rendered it. It skips closed sessions, and
+  auto-run's new `state = "closed"` announcement refreshes it.
+- **An expanded session shows what it is running** (auto-run v0.1.18's
+  `dap.session_info`): the program's `pid`, its `port` (listening, else the
+  `PORT` in its env), the `log` journal of its output, and `$ tail -f …` /
+  `$ kill …`. `<CR>` on the log opens it; on a command, copies it.
+- **Entry Points and Active Sessions name their keys** under the header
+  (`r run · d debug · o fields · e edit · a add · D delete`; `o details ·
+  <CR> focus · x terminate · p pause / continue`), like the sections' empty
+  lines already did.
+- **`n` creates env files in `.auto-run/` by default** (`.auto-run/.env`),
+  tracked with the repo. The empty Env line now says "`n` creates one".
+
 ## [v0.5.4] — 2026-09-29 — `w` shows the `<leader>gw` list and can choose a folder
 
 Patch. Needs auto-core.nvim v0.2.32 and auto-run.nvim v0.1.17.

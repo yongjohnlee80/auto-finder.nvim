@@ -143,6 +143,32 @@ function M.file(rec, name)
   return ok and path or nil
 end
 
+-- ─── field documentation (auto-run owns it) ───────────────────────
+
+---auto-run's documentation for `field` of `rec`, or nil (older auto-run, or
+---a row that is not a field). A map's add row (`env+`) documents its map.
+---@param rec "config"|"profile"
+---@param field string
+local function field_doc(rec, field)
+  local ok, schema = pcall(require, "auto-run.store.schema")
+  if not ok or type(schema.field_doc) ~= "function" then return nil end
+  return schema.field_doc(rec, (tostring(field):gsub("%+$", "")))
+end
+
+---The hint shown beside an unset field: its help, then the allowed values, or
+---that `e` chooses from a set auto-run resolves.
+---@param doc table
+---@return string
+function M.help_text(doc)
+  local t = doc.help
+  if doc.values then
+    t = t .. "  [" .. table.concat(doc.values, " | ") .. "]"
+  elseif doc.values_from then
+    t = t .. "  (e chooses)"
+  end
+  return t
+end
+
 -- ─── rendering ──────────────────────────────────────────────────
 
 ---Emit `parent`'s properties as rows under it.
@@ -157,6 +183,11 @@ function M.emit(ctx)
     opts = opts or {}
     local is_null = raw_value == nil or raw_value == ""
     local v_text = is_null and "(none)" or tostring(raw_value)
+    -- An unset field says what it is for and what it takes, so a fresh
+    -- record shows everything it can hold (the store is strict JSON, so the
+    -- file itself cannot carry comments).
+    local doc = is_null and field_doc(rec, label) or nil
+    if doc then v_text = v_text .. "  " .. M.help_text(doc) end
     local line = indent .. string.format("%-" .. label_w .. "s", label .. ":") .. v_text
     lines[#lines + 1] = line
     local l0 = #lines - 1
@@ -200,6 +231,7 @@ function M.emit(ctx)
 
   row("kind", eff.kind)
   row("runtime", eff.runtime or "go")
+  row("extends", eff.extends)
   row("program", eff.program)
   -- Shown even when unset, so `e` can fill them in place on a fresh record
   -- (Lector M5a P2).
@@ -266,6 +298,34 @@ function M.edit(row)
     vim.ui.select(items, { prompt = name .. " · profile" }, function(choice)
       if not choice then return end
       update({ profile = choice ~= "(none)" and choice or vim.NIL })
+    end)
+    return true
+  end
+
+  -- A field with a fixed set (kind, cargo_target_kind) or a set auto-run
+  -- resolves (runtime, extends): chosen, never typed.
+  local fdoc = field_doc(rec, field)
+  if fdoc and not map_key and not map_add and (fdoc.values or fdoc.values_from) then
+    local items = {}
+    if fdoc.values then
+      items = vim.deepcopy(fdoc.values)
+    elseif fdoc.values_from == "runtimes" then
+      local okr, reg = pcall(require, "auto-run.adapters")
+      for _, a in ipairs(okr and reg.list() or {}) do items[#items + 1] = a.name end
+    elseif fdoc.values_from == "configs" then
+      for _, c in ipairs(s.list()) do
+        if not c.error and c.name ~= name then items[#items + 1] = c.name end
+      end
+    end
+    local required = rec == "config" and field == "kind"
+    if #items == 0 then
+      say("nothing to choose for " .. field .. " yet")
+      return true
+    end
+    if not required then table.insert(items, 1, "(none)") end
+    vim.ui.select(items, { prompt = name .. " · " .. field .. " — " .. fdoc.help }, function(choice)
+      if not choice then return end
+      update({ [field] = choice ~= "(none)" and choice or vim.NIL })
     end)
     return true
   end

@@ -299,15 +299,19 @@ local function _collect_sessions()
   local oks, sessions = pcall(dap.sessions)
   if not oks or type(sessions) ~= "table" then return out end
   for _, s in pairs(sessions) do
-    local id = tostring(s.id or "?")
-    local state = M._session_states[id]
-      or (s.stopped_thread_id and "stopped" or "running")
-    out[#out + 1] = {
-      session = s,
-      id      = id,
-      config  = type(s.config) == "table" and s.config.name or nil,
-      state   = state,
-    }
+    -- A closed session is not active, whether or not nvim-dap still holds it
+    -- (a launch that died in delve's build lingered as "running").
+    if not s.closed then
+      local id = tostring(s.id or "?")
+      local state = M._session_states[id]
+        or (s.stopped_thread_id and "stopped" or "running")
+      out[#out + 1] = {
+        session = s,
+        id      = id,
+        config  = type(s.config) == "table" and s.config.name or nil,
+        state   = state,
+      }
+    end
   end
   table.sort(out, function(a, b) return a.id < b.id end)
   return out
@@ -564,7 +568,15 @@ local function _render(bufnr)
       parent   = parent,
       field    = label,
       filepath = opts.filepath,
+      command  = opts.command,
     }
+  end
+
+  ---A dim line naming the section's keys (the "`a` adds one" lines' kin).
+  local function emit_hint(text)
+    local l = "  " .. text
+    lines[#lines + 1] = l
+    mark(#lines - 1, 0, #l, HL.empty)
   end
 
   ---A record's property rows (entry point / profile) — the shared editor's
@@ -587,6 +599,8 @@ local function _render(bufnr)
         local l = "  (no debug/run configs — `a` adds one, `I` imports launch.json)"
         lines[#lines + 1] = l
         mark(#lines - 1, 0, #l, HL.empty)
+      else
+        emit_hint("r run · d debug · o fields · e edit · a add · D delete")
       end
       for _, cfg_kind in ipairs(kind_order) do
         local group = by_kind[cfg_kind]
@@ -672,6 +686,8 @@ local function _render(bufnr)
         local l = "  (no active dap sessions)"
         lines[#lines + 1] = l
         mark(#lines - 1, 0, #l, HL.empty)
+      else
+        emit_hint("o details · <CR> focus · x terminate · p pause / continue")
       end
       for _, s in ipairs(sessions) do
         local id_part = "#" .. s.id
@@ -693,6 +709,24 @@ local function _render(bufnr)
           emit_detail(row, "state",  s.state)
           emit_detail(row, "stopped_thread",
             s.session.stopped_thread_id and tostring(s.session.stopped_thread_id) or nil)
+          -- What the session is running (auto-run's dap.sessions): the
+          -- program's pid and port, and the journal of its output.
+          local okr, ard = pcall(require, "auto-run.dap")
+          local info = okr and type(ard.session_info) == "function" and ard.session_info(s.session) or nil
+          if info then
+            emit_detail(row, "pid", info.pid and tostring(info.pid) or nil)
+            local port = info.port and (tostring(info.port)
+              .. (info.port_source == "env" and "  (PORT in its env)" or "  (listening)")) or nil
+            emit_detail(row, "port", port)
+            emit_detail(row, "log", info.log and vim.fn.fnamemodify(info.log, ":~") or nil,
+              { filepath = info.log })
+            if info.commands.tail then
+              emit_detail(row, "follow", "$ " .. info.commands.tail, { command = info.commands.tail })
+            end
+            if info.commands.kill then
+              emit_detail(row, "stop", "$ " .. info.commands.kill, { command = info.commands.kill })
+            end
+          end
         end
       end
     end
@@ -862,6 +896,17 @@ local function _open(row)
       pcall(dap.set_session, row.session)
       local okv, dv = pcall(require, "dap-view")
       if okv then pcall(dv.open) end
+    end
+    return
+  end
+
+  if row.kind == "detail" and row.parent and row.parent.kind == "session" then
+    if row.command then
+      vim.fn.setreg('"', row.command)
+      pcall(vim.fn.setreg, "+", row.command)
+      require("auto-finder.log").notify("copied: " .. row.command, { component = "view.debug", level = "info", notify = true })
+    elseif row.filepath then
+      _open_file(row.filepath)
     end
     return
   end
@@ -1243,9 +1288,15 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.debug: on a property row: edit it in place (env values masked); on an entry: open its config file; on an env var: edit its value")
   set("a", function()
     local row = _row_under_cursor(panel_winid)
-    if row and (row.kind == "env-file"
-        or (row.kind == "bucket-header" and row.section == "env")) then
-      env_section.add(row.kind == "env-file" and row or nil)
+    -- In the Env section `a` adds KEY=VALUE — to the file under the cursor
+    -- (its header, a variable or an error line), or on the header the
+    -- selected one. A variable row fell through to "new entry point".
+    if row and (row.kind == "env-file" or row.kind == "env-var" or row.kind == "env-error") then
+      env_section.add({ kind = "env-file", path = row.path })
+      return
+    end
+    if row and row.kind == "bucket-header" and row.section == "env" then
+      env_section.add(nil)
       return
     end
     if row and (row.kind == "profile" or (row.kind == "bucket-header" and row.section == "profiles")
@@ -1315,7 +1366,7 @@ local function _ensure_subscriptions()
   M._subs = {
     ev.subscribe("run.session:changed", function(payload)
       if type(payload) == "table" and payload.id then
-        if payload.state == "terminated" or payload.state == "exited" then
+        if payload.state == "terminated" or payload.state == "exited" or payload.state == "closed" then
           M._session_states[tostring(payload.id)] = nil
         else
           M._session_states[tostring(payload.id)] = payload.state

@@ -2227,6 +2227,260 @@ print("\n[52] ADR 0199 §6.5 — delete, test-config editing, env files, profile
   vim.fn.delete(repo, "rf")
 end)()
 
+-- ── [53] the tests pane's `a` from any row; field help; Env's `n` ──────
+-- Johno, 2026-09-29: "Test Config (0) then says a creates one" — `a` pressed
+-- on that hint line did nothing (it only acted ON the section's rows); the
+-- scaffolded config said nothing about the fields it could hold; and a new
+-- env file should go in .auto-run/.
+print("\n[53] tests pane a from any row; field help and choosers; n into .auto-run/")
+;(function()
+  local tests_view = require("auto-finder.views.tests")
+  local store = require("auto-run.store")
+  local discovery = require("auto-run.discovery")
+  local worktree = require("auto-core.git.worktree")
+  local okschema, schema = pcall(require, "auto-run.store.schema")
+  ok("p53: this auto-run documents its fields (>= v0.1.18)", okschema and type(schema.field_doc) == "function")
+  if not (okschema and type(schema.field_doc) == "function") then return end
+  tests_view._reset_for_tests()
+
+  local repo = vim.fn.tempname() .. "-af-53"
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s", "commit", "-q", "--allow-empty", "-m", "i" },
+    { text = true }):wait()
+  local function wf(p, t) vim.fn.mkdir(vim.fn.fnamemodify(p, ":h"), "p"); local f = assert(io.open(p, "w")); f:write(t); f:close() end
+  wf(repo .. "/go.mod", "module example.com/p53\n\ngo 1.21\n")
+  wf(repo .. "/a_test.go", "package p53\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {}\n")
+  local prev = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  discovery._reset_for_tests()
+  discovery.parse_file(repo .. "/a_test.go", require("auto-run.adapters").get("go"))
+
+  local real_input, real_select = vim.ui.input, vim.ui.select
+  vim.cmd("topleft 90vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = tests_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  tests_view.on_focus(w, b)
+  local function lines() return vim.api.nvim_buf_get_lines(b, 0, -1, false) end
+  local function line_of(needle)
+    for i, l in ipairs(lines()) do if l:find(needle, 1, true) then return i end end
+  end
+  local function key(k)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do if m.lhs == k then return m.callback end end
+    return function() end
+  end
+  local function at(lnum) if lnum then vim.api.nvim_win_set_cursor(w, { lnum, 0 }) end end
+  local function find(pred) for _, r in ipairs(tests_view._rows or {}) do if pred(r) then return r end end end
+  local function scaffold_answers(name)
+    vim.ui.select = function(items, _, cb)
+      for _, it in ipairs(items) do if tostring(it) == "go" then return cb(it) end end
+      cb(nil)
+    end
+    vim.ui.input = function(_, cb) cb(name) end
+  end
+
+  -- `a` on the hint line under "Test configs (0)" — not a row.
+  local hint = line_of("no test configs")
+  ok("p53: fixture: the Test configs hint line is shown", hint ~= nil, table.concat(lines(), "\n"))
+  scaffold_answers("from-hint")
+  at(hint); key("a")()
+  ok("p53: a on the hint line creates a test config", store.get("from-hint") ~= nil)
+  tests_view.on_focus(w, b)
+
+  -- `a` on a test position.
+  local pos = find(function(r) return r.kind ~= nil and tostring(r.kind):match("position") or r.kind == "test" end)
+  local pos_l = line_of("TestA")
+  scaffold_answers("from-position")
+  at(pos_l); key("a")()
+  ok("p53: a on a test position creates a test config", store.get("from-position") ~= nil, tostring(pos_l))
+  tests_view.on_focus(w, b)
+
+  -- Env: the empty line names `n`; `n` defaults into .auto-run/.
+  ok("p53: the empty Env line says `n` creates one", line_of("`n` creates one") ~= nil, table.concat(lines(), "\n"))
+  local seen_default
+  vim.ui.input = function(o, cb) seen_default = o.default; cb(o.default) end
+  at(line_of("Env")); key("n")()
+  ok("p53: n offers .auto-run/.env", seen_default == ".auto-run/.env", tostring(seen_default))
+  ok("p53: ... and creates it there", vim.fn.filereadable(repo .. "/.auto-run/.env") == 1)
+  tests_view.on_focus(w, b)
+
+  -- `a` on a variable row adds to THAT file (it did nothing there before).
+  wf(repo .. "/.auto-run/.env", "FIRST=1\n")
+  tests_view._expanded = tests_view._expanded or {}
+  tests_view.on_focus(w, b)
+  local file_row = find(function(r) return r.kind == "env-file" end)
+  if file_row then at(file_row.lnum); key("o")(); tests_view.on_focus(w, b) end
+  local var_row = find(function(r) return r.kind == "env-var" end)
+  local answers = { "SECOND", "2" }   -- the add flow asks for the key, then the value
+  vim.ui.input = function(_, cb) cb(table.remove(answers, 1)) end
+  if var_row then at(var_row.lnum); key("a")() end
+  local body = table.concat(vim.fn.readfile(repo .. "/.auto-run/.env"), "\n")
+  ok("p53: a on an env variable row adds KEY=VALUE to that file", var_row ~= nil and body:find("SECOND=2", 1, true) ~= nil,
+    vim.inspect({ var = var_row ~= nil, body = body }))
+
+  -- Field help on the expanded test config, and choosers for fixed sets.
+  tests_view.on_focus(w, b)
+  local tc = find(function(r) return r.kind == "test-config" and r.name == "from-hint" end)
+  if tc then at(tc.lnum); key("o")(); tests_view.on_focus(w, b) end
+  local function prop(field)
+    return find(function(r) return r.prop and r.field == field and r.parent and r.parent.name == "from-hint" end)
+  end
+  local function prop_line(field) local r = prop(field); return r and lines()[r.lnum] or "" end
+  ok("p53: an unset field shows its help", prop_line("build_flags"):find("go build / test flags", 1, true) ~= nil,
+    prop_line("build_flags"))
+  ok("p53: a set field shows its value, not help", prop_line("program"):find("package directory", 1, true) == nil
+    and prop_line("program"):find("${worktree}", 1, true) ~= nil, prop_line("program"))
+  ok("p53: extends is listed, and says e chooses", prop_line("extends"):find("(e chooses)", 1, true) ~= nil,
+    prop_line("extends"))
+
+  local offered
+  vim.ui.select = function(items, _, cb) offered = items; for _, it in ipairs(items) do if it == "debug" then return cb(it) end end cb(nil) end
+  at(prop("kind") and prop("kind").lnum); key("e")()
+  ok("p53: e on kind chooses from run | test | debug (no none: it is required)",
+    vim.deep_equal(offered, { "run", "test", "debug" }), vim.inspect(offered))
+  ok("p53: ... and writes the choice", (store.get("from-hint") or {}).kind == "debug", vim.inspect(store.get("from-hint")))
+  tests_view.on_focus(w, b)
+
+  local tc2 = find(function(r) return r.kind == "test-config" and r.name == "from-position" end)
+  if tc2 then at(tc2.lnum); key("o")(); tests_view.on_focus(w, b) end
+  local ext = find(function(r) return r.prop and r.field == "extends" and r.parent and r.parent.name == "from-position" end)
+  vim.ui.select = function(items, _, cb) offered = items; cb(items[2]) end
+  at(ext and ext.lnum); key("e")()
+  ok("p53: e on extends offers (none) and the other configs, not itself",
+    offered and offered[1] == "(none)" and vim.tbl_contains(offered, "from-hint") and not vim.tbl_contains(offered, "from-position"),
+    vim.inspect(offered))
+  ok("p53: ... and writes it", (store.get("from-position") or {}).extends == "from-hint", vim.inspect(store.get("from-position")))
+
+  vim.ui.input, vim.ui.select = real_input, real_select
+  for _, n in ipairs({ "from-position", "from-hint" }) do pcall(store.remove, n) end
+  tests_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  discovery._reset_for_tests()
+  worktree.set_active(prev)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
+-- ── [53b] a closed dap session leaves the Active Sessions list ─────────
+-- Johno, 2026-09-29: a launch that died in delve's build stayed in the debug
+-- pane as "running" — the collector ignored `closed`, and no event re-rendered
+-- the pane (auto-run v0.1.18 announces state = "closed" for such a drop).
+print("\n[53b] a closed dap session leaves the Active Sessions list")
+;(function()
+  local debug_view = require("auto-finder.views.debug")
+  debug_view._reset_for_tests()
+  local had_dap, real_dap = package.loaded.dap ~= nil, package.loaded.dap
+  local live = { id = 91, closed = false, config = { name = "live-one" } }
+  local dead = { id = 92, closed = true, config = { name = "dead-one" } }
+  local held = { [91] = live, [92] = dead }
+  local fake = setmetatable({ sessions = function() return held end }, { __index = real_dap or {} })
+  package.loaded.dap = fake
+
+  vim.cmd("topleft 80vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  ok("p53b: a live session is listed", text():find("live-one", 1, true) ~= nil, text())
+  ok("p53b: a session nvim-dap still holds but has closed is not", text():find("dead-one", 1, true) == nil, text())
+
+  -- The live one closes: auto-run's `closed` announcement re-renders the pane.
+  live.closed = true
+  require("auto-core.events").publish("run.session:changed", { id = "91", config = "live-one", state = "closed" })
+  vim.wait(500, function() return text():find("live-one", 1, true) == nil end)
+  ok("p53b: a `closed` announcement re-renders the pane without the session",
+    text():find("live-one", 1, true) == nil and text():find("no active dap sessions", 1, true) ~= nil, text())
+
+  package.loaded.dap = had_dap and real_dap or nil
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+end)()
+
+-- ── [53c] a session's pid, port and journal; the sections' key hints ───
+-- Johno, 2026-09-29: "display the port number and pid … including how to
+-- journal the logs, with commands", and "under Entry Points let's have 'd' to
+-- debug 'r' to run help text just like we have 'a' adds one".
+print("\n[53c] session pid / port / journal rows; Entry Points and Sessions key hints")
+;(function()
+  local debug_view = require("auto-finder.views.debug")
+  local ard = require("auto-run.dap")
+  local store = require("auto-run.store")
+  local worktree = require("auto-core.git.worktree")
+  debug_view._reset_for_tests()
+  local log = vim.fn.tempname() .. "-journal.log"
+  vim.fn.writefile({ "listening on :8081" }, log)
+  local real_info = ard.session_info
+  ard.session_info = function()
+    return { pid = 4321, port = 8081, port_source = "listening", log = log,
+      commands = { tail = "tail -f " .. log, kill = "kill 4321" } }
+  end
+  local had_dap, real_dap = package.loaded.dap ~= nil, package.loaded.dap
+  local sess = { id = 93, closed = false, config = { name = "go-srv" } }
+  package.loaded.dap = setmetatable({ sessions = function() return { [93] = sess } end,
+    set_session = function() end }, { __index = real_dap or {} })
+
+  local repo = vim.fn.tempname() .. "-af-53c"
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s", "commit", "-q", "--allow-empty", "-m", "i" },
+    { text = true }):wait()
+  local prev = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  store.add({ name = "c53-run", kind = "run", runtime = "go", program = "sh" }, { tier = "tracked" })
+
+  vim.cmd("topleft 90vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function text() return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n") end
+  local function find(pred) for _, r in ipairs(debug_view._rows or {}) do if pred(r) then return r end end end
+  local function key(k)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do if m.lhs == k then return m.callback end end
+    return function() end
+  end
+  ok("p53c: Entry Points names its keys", text():find("r run · d debug · o fields · e edit · a add · D delete", 1, true) ~= nil,
+    text())
+  ok("p53c: Active Sessions names its keys", text():find("o details · <CR> focus · x terminate", 1, true) ~= nil, text())
+
+  local srow = find(function(r) return r.kind == "session" end)
+  if srow then vim.api.nvim_win_set_cursor(w, { srow.lnum, 0 }); key("o")(); debug_view.on_focus(w, b) end
+  local function detail(field) return find(function(r) return r.kind == "detail" and r.field == field end) end
+  local function dline(field) local r = detail(field); return r and vim.api.nvim_buf_get_lines(b, r.lnum - 1, r.lnum, false)[1] or "" end
+  ok("p53c: the session shows the program's pid", dline("pid"):find("4321", 1, true) ~= nil, dline("pid"))
+  ok("p53c: ... its port and where it came from", dline("port"):find("8081  (listening)", 1, true) ~= nil, dline("port"))
+  ok("p53c: ... the journal", dline("log"):find(vim.fn.fnamemodify(log, ":t"), 1, true) ~= nil, dline("log"))
+  ok("p53c: ... and the commands to follow and stop it",
+    dline("follow"):find("$ tail -f ", 1, true) ~= nil and dline("stop"):find("$ kill 4321", 1, true) ~= nil,
+    dline("follow") .. " | " .. dline("stop"))
+
+  vim.fn.setreg('"', "")
+  local fr = detail("follow")
+  if fr then vim.api.nvim_win_set_cursor(w, { fr.lnum, 0 }); key("<CR>")() end
+  ok("p53c: <CR> on a command copies it", vim.fn.getreg('"') == "tail -f " .. log, vim.fn.getreg('"'))
+  local lr = detail("log")
+  if lr then vim.api.nvim_win_set_cursor(w, { lr.lnum, 0 }); key("<CR>")() end
+  local opened = false
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_buf_get_name(vim.api.nvim_win_get_buf(win)) == vim.fn.fnamemodify(log, ":p") then opened = true end
+  end
+  ok("p53c: <CR> on the log opens the journal", opened)
+
+  ard.session_info = real_info
+  package.loaded.dap = had_dap and real_dap or nil
+  pcall(store.remove, "c53-run")
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  worktree.set_active(prev)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf"); os.remove(log)
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
