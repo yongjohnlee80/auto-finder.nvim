@@ -2,6 +2,27 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.6] — 2026-10-03 — each runtime's own fields, from auto-run's docs
+
+Patch. Needs auto-run.nvim v0.1.19 for node, dart and the field shapes; with an
+older auto-run the panes behave as before.
+
+- **An expanded config shows its runtime's own fields**, taken from auto-run's
+  field docs (`FIELD_DOCS[...].runtimes`):
+  - go `build_flags`;
+  - rust's `cargo_package` / `cargo_target` / `cargo_target_kind`;
+  - node's `script`;
+  - dart's `dart_sdk` and `device`.
+
+  `build_flags` was shown for every non-rust runtime (jest, node, dart included)
+  and nothing else was, so a node config's `script` could not be seen or set
+  from the pane. A runtime auto-run adds now shows its fields with no change
+  here.
+- **`e` edits any plain-string field** auto-run's schema declares
+  (`schema.field_kind`), so `script` is editable in place. Fields with a fixed
+  set still choose: `device` offers linux / macos / windows and `dart_sdk`
+  offers dart / flutter.
+
 ## [v0.5.5] — 2026-09-29 — `a` from anywhere in the tests pane; field help; env files in .auto-run/
 
 Patch. Needs auto-run.nvim v0.1.18 for the field help and `.auto-run/` env files.
