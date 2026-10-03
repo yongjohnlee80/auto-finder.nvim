@@ -109,6 +109,19 @@ local SCALAR = {
               cargo_package = true, cargo_target = true, cargo_target_kind = true },
   profile = {},
 }
+
+---Is `field` a plain-string field `e` edits in place? The table above, or —
+---with auto-run >= 0.1.19 — any field auto-run's schema declares a plain
+---string, so a new string field (node's `script`) is editable without this
+---list having to learn it.
+---@param rec "config"|"profile"
+---@param field string
+---@return boolean
+local function is_scalar(rec, field)
+  if SCALAR[rec][field] then return true end
+  local ok, schema = pcall(require, "auto-run.store.schema")
+  return ok and type(schema.field_kind) == "function" and schema.field_kind(rec, field) == "string"
+end
 local LIST = {
   config  = { args = true, env_files = true },
   profile = { base_env_files = true, secret_manifests = true },
@@ -153,6 +166,28 @@ local function field_doc(rec, field)
   local ok, schema = pcall(require, "auto-run.store.schema")
   if not ok or type(schema.field_doc) ~= "function" then return nil end
   return schema.field_doc(rec, (tostring(field):gsub("%+$", "")))
+end
+
+---The config fields that belong to `runtime` (auto-run's field docs mark
+---them with `runtimes`), in a stable order; nil when auto-run is too old to
+---say (the caller keeps its built-in rows).
+---@param runtime string
+---@return string[]?
+local function runtime_fields(runtime)
+  local ok, schema = pcall(require, "auto-run.store.schema")
+  if not ok or type(schema.field_names) ~= "function" or type(schema.field_doc) ~= "function" then return nil end
+  local order = { build_flags = 1, cargo_package = 2, cargo_target = 3, cargo_target_kind = 4 }
+  local out = {}
+  for _, f in ipairs(schema.field_names("config")) do
+    local d = schema.field_doc("config", f)
+    if d and type(d.runtimes) == "table" and vim.tbl_contains(d.runtimes, runtime) then out[#out + 1] = f end
+  end
+  table.sort(out, function(a, b)
+    local ka, kb = order[a] or 99, order[b] or 99
+    if ka ~= kb then return ka < kb end
+    return a < b
+  end)
+  return out
 end
 
 ---The hint shown beside an unset field: its help, then the allowed values, or
@@ -237,7 +272,13 @@ function M.emit(ctx)
   -- (Lector M5a P2).
   row("args", type(eff.args) == "table" and #eff.args > 0 and table.concat(eff.args, " ") or nil)
   row("cwd", eff.cwd)
-  if eff.runtime ~= "rust" then   -- go build flags; rust carries Cargo identity instead
+  -- The runtime's own fields — go build flags, rust's Cargo identity, node's
+  -- script, dart's SDK and device — from auto-run's field docs, so a runtime
+  -- auto-run adds shows its fields without this view learning them.
+  local rf = runtime_fields(eff.runtime or "go")
+  if rf then
+    for _, f in ipairs(rf) do row(f, eff[f]) end
+  elseif eff.runtime ~= "rust" then   -- older auto-run: go build flags; rust carries Cargo identity instead
     row("build_flags", eff.build_flags)
   else
     row("cargo_package", eff.cargo_package)
@@ -330,7 +371,7 @@ function M.edit(row)
     return true
   end
 
-  if not (SCALAR[rec][field] or LIST[rec][field] or map_key or map_add) then
+  if not (is_scalar(rec, field) or LIST[rec][field] or map_key or map_add) then
     if rec == "profile" and (field == "command_env" or field == "file") then
       local f = M.file("profile", name)
       if f then vim.cmd.edit(vim.fn.fnameescape(f)) end

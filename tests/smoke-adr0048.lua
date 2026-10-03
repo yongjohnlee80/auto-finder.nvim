@@ -2481,6 +2481,78 @@ print("\n[53c] session pid / port / journal rows; Entry Points and Sessions key 
   vim.fn.delete(repo, "rf"); os.remove(log)
 end)()
 
+-- ── [54] runtime fields come from auto-run's docs (node, dart) ─────
+-- auto-run v0.1.19 adds node's `script` and dart's `dart_sdk` / `device`
+-- (ADR 0213 / ADR 0196 r3). The property rows show each runtime's own fields
+-- from auto-run's field docs, and `e` edits any plain-string field, so a
+-- runtime auto-run adds needs no change here.
+print("\n[54] runtime fields from auto-run's docs: node script, dart device")
+;(function()
+  local okschema, schema = pcall(require, "auto-run.store.schema")
+  ok("p54: this auto-run declares field shapes (>= v0.1.19)", okschema and type(schema.field_kind) == "function")
+  if not (okschema and type(schema.field_kind) == "function") then return end
+  local debug_view = require("auto-finder.views.debug")
+  local store = require("auto-run.store")
+  local worktree = require("auto-core.git.worktree")
+  debug_view._reset_for_tests()
+  local repo = vim.fn.tempname() .. "-af-54"
+  vim.system({ "git", "init", "-q", "-b", "main", repo }, { text = true }):wait()
+  vim.system({ "git", "-C", repo, "-c", "user.email=s@t", "-c", "user.name=s", "commit", "-q", "--allow-empty", "-m", "i" },
+    { text = true }):wait()
+  local prev = worktree.get_active()
+  worktree.set_active(repo)
+  require("auto-run.store.paths").invalidate()
+  store.add({ name = "web54", kind = "run", runtime = "node", script = "dev" }, { tier = "tracked" })
+  store.add({ name = "app54", kind = "debug", runtime = "dart", program = "${worktree}/lib/main.dart" }, { tier = "tracked" })
+
+  local real_input, real_select = vim.ui.input, vim.ui.select
+  vim.cmd("topleft 90vnew")
+  local w = vim.api.nvim_get_current_win()
+  vim.wo[w].winfixbuf = false
+  local b = debug_view.get_buffer(w)
+  vim.api.nvim_win_set_buf(w, b)
+  debug_view.on_focus(w, b)
+  local function find(pred) for _, r in ipairs(debug_view._rows or {}) do if pred(r) then return r end end end
+  local function key(k)
+    for _, m in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do if m.lhs == k then return m.callback end end
+    return function() end
+  end
+  local function expand(name)
+    local r = find(function(x) return x.kind == "entry" and x.name == name end)
+    if r then vim.api.nvim_win_set_cursor(w, { r.lnum, 0 }); key("o")(); debug_view.on_focus(w, b) end
+    return r ~= nil
+  end
+  local function prop(name, field)
+    return find(function(r) return r.prop and r.field == field and r.parent and r.parent.name == name end)
+  end
+  ok("p54: both entries are listed", expand("web54") and expand("app54"))
+  ok("p54: a node entry shows `script`, and no go build_flags",
+    prop("web54", "script") ~= nil and prop("web54", "build_flags") == nil)
+  ok("p54: a dart entry shows dart_sdk and device", prop("app54", "dart_sdk") ~= nil and prop("app54", "device") ~= nil)
+
+  vim.ui.input = function(_, cb) cb("start") end
+  local r = prop("web54", "script")
+  if r then vim.api.nvim_win_set_cursor(w, { r.lnum, 0 }); key("e")() end
+  ok("p54: e edits node's script in place", (store.get("web54") or {}).script == "start", vim.inspect(store.get("web54")))
+  debug_view.on_focus(w, b)
+  local offered
+  vim.ui.select = function(items, _, cb) offered = items; cb("linux") end
+  r = prop("app54", "device")
+  if r then vim.api.nvim_win_set_cursor(w, { r.lnum, 0 }); key("e")() end
+  ok("p54: e on device chooses from the desktop devices", offered and vim.tbl_contains(offered, "linux")
+    and vim.tbl_contains(offered, "macos") and not vim.tbl_contains(offered, "android"), vim.inspect(offered))
+  ok("p54: ... and writes it", (store.get("app54") or {}).device == "linux")
+
+  vim.ui.input, vim.ui.select = real_input, real_select
+  pcall(store.remove, "web54")
+  pcall(store.remove, "app54")
+  debug_view.on_close()
+  pcall(vim.api.nvim_win_close, w, true)
+  worktree.set_active(prev)
+  require("auto-run.store.paths").invalidate()
+  vim.fn.delete(repo, "rf")
+end)()
+
 -- ───────────────────────── summary ────────────────────────
 print(string.format("\n%d passed, %d failed", pass_count, fail_count))
 if fail_count > 0 then
