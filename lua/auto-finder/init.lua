@@ -175,6 +175,7 @@ function M.setup(user_opts)
     end
   end
   M._sync_dbase_host()
+  M._sync_kb_host()
 
   -- v0.2.0 step 2/4: panel.user_width and panel.last_section now live
   -- in auto-core.state.namespace("auto-finder") with json persist —
@@ -792,6 +793,22 @@ function M._sync_dbase_host()
   end
 end
 
+---_sync_kb_host is _sync_dbase_host for AutoDoc's KB drawer and the `kb`
+---section: edge-triggered, with the "am I registered" half read from
+---AutoDoc's host registry, for the same reasons.
+function M._sync_kb_host()
+  local ok, kb_section = pcall(require, "auto-finder.views.kb")
+  if not ok or type(kb_section.register) ~= "function" then return end
+  local present = require("auto-finder.views")._by_name["kb"] ~= nil
+  local registered = kb_section.is_registered()
+  if present == registered then return end
+  if present then
+    kb_section.register()
+  else
+    kb_section.unregister()
+  end
+end
+
 function M._rebuild_section_registry(new_sections, opts)
   opts = opts or {}
   local cfg = M.state and M.state.config
@@ -843,6 +860,7 @@ function M._rebuild_section_registry(new_sections, opts)
   -- A dbase that just ARRIVED (slot add / workspace change) advertises
   -- itself now, without waiting to be focused.
   M._sync_dbase_host()
+  M._sync_kb_host()
 
   local sections_list = require("auto-finder.views").enabled()
   local section_defs  = {}
