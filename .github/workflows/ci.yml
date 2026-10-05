@@ -107,14 +107,18 @@ jobs:
           # to the change under test cannot distinguish a new failure from the
           # standing one.
           # ADR-0200: fs.scan, core.fs.dir:dirty, git.status get_async + porcelain v2 -z.
-          AUTO_CORE_REF: "132d27a465c221db2eec8d09dec8981228e1e7bc"  # main @ v0.2.32
+          # BUMPED for KB v2 (ADR 1791209946): the review draft's v2 frontmatter and
+          # auto-core.kb arrived with auto-core.nvim#56 (merged, the v0.3.0 line).
+          AUTO_CORE_REF: "df53d8d663d664f9b3e46991de4133f6d1f8a300"  # main @ #56 merge (auto-core.kb, v2 review frontmatter)
           # BUMPED for ADR-0083 r11: `p` and `d` call
           # `review.amend_pr_association`, which the previous pin predated.
           # Briefly pointed at PR #34's head while that PR was open; now on
           # main, where a pin belongs. The branch has since been deleted, so
           # the old value named a commit reachable only as refs/pull/34/head —
           # still resolvable, but not a thing to leave a gating job resting on.
-          WORKTREE_REF:  "9a5542e57561329ef9706588c23985fc95157dd4"  # main, carries amend_pr_association
+          # BUMPED for KB v2: reviews under reviews/<reviewer>/, PR records under prs/<slug>/
+          # (worktree.nvim#38, merged).
+          WORKTREE_REF:  "767d1e27841ab4d87789242bef4ded4ab06866d0"  # main @ #38 merge (KB v2 paths)
           # BUMPED 2026-09-27 from 11f2cd8 to v0.1.15 (ADR 0199): the tests and
           # debug panes' state header, Test configs section and entry-point
           # editing read auto-run.context, per-runtime picks, adapters.scaffold
@@ -179,7 +183,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # Kept in step with the install pin above — the guard below asserts it.
-          AUTO_CORE_REF: "132d27a465c221db2eec8d09dec8981228e1e7bc"
+          AUTO_CORE_REF: "df53d8d663d664f9b3e46991de4133f6d1f8a300"
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.
@@ -279,7 +283,9 @@ jobs:
           # main, where a pin belongs. The branch has since been deleted, so
           # the old value named a commit reachable only as refs/pull/34/head —
           # still resolvable, but not a thing to leave a gating job resting on.
-          WORKTREE_REF:  "9a5542e57561329ef9706588c23985fc95157dd4"  # main, carries amend_pr_association
+          # BUMPED for KB v2: reviews under reviews/<reviewer>/, PR records under prs/<slug>/
+          # (worktree.nvim#38, merged).
+          WORKTREE_REF:  "767d1e27841ab4d87789242bef4ded4ab06866d0"  # main @ #38 merge (KB v2 paths)
           # BUMPED 2026-09-27 from 11f2cd8 to v0.1.15 (ADR 0199): the tests and
           # debug panes' state header, Test configs section and entry-point
           # editing read auto-run.context, per-runtime picks, adapters.scaffold
