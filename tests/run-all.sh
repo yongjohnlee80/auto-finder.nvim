@@ -197,6 +197,9 @@ SUITES=(
   # dependencies outside the two named exemptions, each checked for
   # premise and liveness.
   "severance|tests/severance.lua"
+  # ADR 1791209945 §7 — the kb section: a facade over AutoDoc's KB drawer, the no-backend
+  # placeholder, the host provider against a stub registry, and the edge-triggered host sync.
+  "kb-section|tests/kb-section.lua"
   "adr0060-repos|tests/adr0060-repos-render.lua"
   "adr0060-git-actions|tests/adr0060-git-actions.lua"
   # ADR-0065 P3 — review authoring: draft, identity slug, interim submit.
