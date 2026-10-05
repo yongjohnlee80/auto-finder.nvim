@@ -334,25 +334,19 @@ end
 
 -- ─── path resolvers (used by the inline-expansion + <CR>) ──────
 
----Resolve the KB root for KB-relative reference fields (adr / review).
----Mirrors auto-core.todo's internal logic so the panel computes the
----same path the validator does.
----@return string?  absolute KB root, or nil if no KB env is set
+---Resolve the KB root for KB-relative reference fields (adr / review),
+---through auto-core's one resolver (`$KB_ROOT`, which is `auto-core.kb`'s
+---root from auto-core v0.3.0), so the panel computes the same path the
+---validator does. A private copy here read the env vars in another order
+---(WRITE first, the order auto-core dropped for producing `shared/shared`
+---paths) and could disagree with it.
+---@return string?  absolute KB root, or nil when none resolves
 local function _kb_root()
-  local w = vim.env.AUTO_AGENTS_KB_WRITE
-  if w and w ~= "" then return vim.fn.fnamemodify(vim.fn.expand(w), ":p"):gsub("/$", "") end
-  local r = vim.env.AUTO_AGENTS_KB_READ
-  if r and r ~= "" then
-    local first = r:match("^([^:]+)")
-    if first and first ~= "" then
-      return vim.fn.fnamemodify(vim.fn.expand(first), ":p"):gsub("/$", "")
-    end
-  end
-  local legacy = vim.env.AUTO_AGENTS_KB_ROOT
-  if legacy and legacy ~= "" then
-    return vim.fn.fnamemodify(vim.fn.expand(legacy), ":p"):gsub("/$", "")
-  end
-  return nil
+  local ok, vars = pcall(require, "auto-core.todo.vars")
+  if not ok then return nil end
+  local okv, root = pcall(vars.get, "KB_ROOT")
+  if not okv or type(root) ~= "string" or root == "" then return nil end
+  return (vim.fn.fnamemodify(vim.fn.expand(root), ":p"):gsub("/$", ""))
 end
 
 ---Build the absolute path for a `blocked[i]` task id by looking up
