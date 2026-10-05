@@ -3772,8 +3772,8 @@ section(function()
   local _kb_test_dir = vim.fn.tempname()
   vim.fn.mkdir(_kb_test_dir .. "/shared/adrs", "p")
   vim.fn.writefile({ "# adr" }, _kb_test_dir .. "/shared/adrs/0099-fix.md")
-  local saved_kb = vim.env.AUTO_AGENTS_KB_WRITE
-  vim.env.AUTO_AGENTS_KB_WRITE = _kb_test_dir
+  local saved_kb = vim.env.AUTO_AGENTS_KB_ROOT
+  vim.env.AUTO_AGENTS_KB_ROOT = _kb_test_dir
 
   local id_with_adr = todo.add({
     id    = "2026-05-25-with-adr",
@@ -3948,7 +3948,7 @@ section(function()
     adr_ne_row and tostring(adr_ne_row.filepath))
 
   -- Cleanup KB fixture
-  vim.env.AUTO_AGENTS_KB_WRITE = saved_kb
+  vim.env.AUTO_AGENTS_KB_ROOT = saved_kb
   vim.fn.delete(_kb_test_dir, "rf")
 
   -- ── event-driven re-render works when buffer is visible ────
