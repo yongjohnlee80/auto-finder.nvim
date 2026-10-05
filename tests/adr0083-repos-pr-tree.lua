@@ -39,7 +39,7 @@ vim.o.columns, vim.o.lines = 200, 60
 
 local sb = vim.fn.tempname() .. "-adr0083-pr"
 dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h") .. "/_sandbox.lua")("adr0083-pr")
--- The review fixtures below put their documents under `sb/agents/<slug>/reviews/`,
+-- The review fixtures below put their documents under `sb/reviews/<slug>/`,
 -- which is only a legible pair if $KB_ROOT names `sb`. Nothing checked the pair
 -- before r11, so this was never needed; `p` re-validates it, because attaching
 -- a PR is what makes a review postable.
@@ -145,7 +145,7 @@ ok("creds: HELP does not print a token-looking literal",
 
 ok("assoc: HELP gives BOTH ways a worktree becomes PR #N",
   help_text:find("branch is named pr-<N>", 1, true) ~= nil
-    and help_text:find("shared/prs/<slug>/pr-<N>.md", 1, true) ~= nil)
+    and help_text:find("primary KB>/prs/<slug>/pr-<N>.md", 1, true) ~= nil)
 ok("assoc: HELP says G and N write that document",
   help_text:find("G and N both write it", 1, true) ~= nil)
 -- r11: the help used to end at "S can never submit it", which was true when
@@ -242,10 +242,10 @@ require("worktree.credentials").set_profile(mock_repo.slug,
 local mock_pr = {
   number = 42, title = "Add PR feature", state = "open", draft = false,
   branch = "pr-42", base = "main", author = "alice",
-  kb_doc = sb .. "/shared/prs/test-repo/pr-42.md",
+  kb_doc = sb .. "/prs/test-repo/pr-42.md",
 }
 -- Review JSON lives in the worktree review store (`reviews/<slug>/<file>`);
--- the Markdown document lives in the KB under `agents/<slug>/reviews/`. The
+-- the Markdown document lives in the KB under `reviews/<slug>/`. The
 -- fixture used to put BOTH in the KB dir, which no code path noticed until
 -- `p` began requiring the canonical store layout before attaching a PR.
 local _wt_store = require("worktree.store")
@@ -254,7 +254,7 @@ vim.fn.mkdir(REVIEW_DIR, "p")
 local mock_review = {
   name = "test-repo@c1a2b3c.r1.review.json",
   path = REVIEW_DIR .. "/test-repo@c1a2b3c.r1.review.json",
-  document = sb .. "/agents/reviewer/reviews/2026-09-05-test-repo-c1a2b3c-r1-review.md",
+  document = sb .. "/reviews/reviewer/2026-09-05-test-repo-c1a2b3c-r1-review.md",
   commit = "c1a2b3c000000000000000000000000000000000",
   revision = 1, pr = 42, worst = "must-fix", severities = { ["must-fix"] = 1 },
 }
@@ -416,7 +416,7 @@ local prev_input = vim.ui.input
 local nopr = {
   name = "test-repo@d4e5f60.r1.review.json",
   path = REVIEW_DIR .. "/test-repo@d4e5f60.r1.review.json",
-  document = sb .. "/agents/reviewer/reviews/2026-09-05-test-repo-d4e5f60-r1-review.md",
+  document = sb .. "/reviews/reviewer/2026-09-05-test-repo-d4e5f60-r1-review.md",
   commit = "d4e5f60000000000000000000000000000000000",
   revision = 1,
 }

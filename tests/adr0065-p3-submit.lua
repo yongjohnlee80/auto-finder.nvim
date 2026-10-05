@@ -133,7 +133,7 @@ local mp = review.canonical_document({
   kb_root = vim.env.AUTO_AGENTS_KB_ROOT, reviewer_slug = "john-lee",
   slug = repo.slug, topic = A.topic(repo, SHA), revision = 1 })
 ok("*** the store's path is under the reviewer's own directory ***",
-  mp and mp:find(tmp .. "/kb/agents/john-lee/reviews/", 1, true) == 1, tostring(mp))
+  mp and mp:find(tmp .. "/kb/reviews/john-lee/", 1, true) == 1, tostring(mp))
 ok("and carries the revision in the name", mp and mp:find("-r1-review.md", 1, true) ~= nil, tostring(mp))
 local _, why = review.canonical_document({
   kb_root = vim.env.AUTO_AGENTS_KB_ROOT, reviewer_slug = nil,
@@ -208,11 +208,11 @@ end
 -- boundary -- two wrappers on one path is how a restore puts back the wrong
 -- function.
 _restore_create()
-ok("*** the Markdown carries KB_RULES R2 frontmatter ***",
+ok("*** the Markdown carries the KB's review frontmatter (ADR 1791209946 §4) ***",
   md:find("^%-%-%-\ntype: review\n") ~= nil, md:sub(1, 80))
-ok("and the inline Tags/Abstract preview lines",
-  md:find("\n%*%*Tags:%*%* `type:review`") ~= nil
-  and md:find("\n%*%*Abstract:%*%* ") ~= nil, md:sub(1, 400))
+ok("with the review type's required fields, the abstract among them",
+  md:find("\nabstract: \"") ~= nil and md:find("\nreviewer: \"") ~= nil
+  and md:find("\nsubject: \"") ~= nil and md:find("\nstatus: in%-progress\n") ~= nil, md:sub(1, 600))
 ok("the anchored finding appears in the prose with its path:line",
   md:find("foo.lua:3", 1, true) ~= nil, md)
 -- What A4 actually buys. The interim wrote both artifacts but nothing linked

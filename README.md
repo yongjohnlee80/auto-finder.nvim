@@ -449,9 +449,9 @@ really is GitHub. Command providers are allowlisted (`pass`, `op`, `gh`,
 
 **2. An association.** The `[#N]` badge, `O`'s range diff and a review's `→ #N`
 tag all read from one fact: a worktree is PR #N when its branch is named
-`pr-<N>`, **or** when `$AUTO_AGENTS_KB_ROOT/shared/prs/<slug>/pr-<N>.md` says
-`branch: <that branch>`. `G` and `N` both write that document, so the ordinary
-flows need no manual step.
+`pr-<N>`, **or** when `prs/<slug>/pr-<N>.md` in the project's primary KB
+(auto-core.kb) says `branch: <that branch>`. `G` and `N` both write that
+document, so the ordinary flows need no manual step.
 
 The ordering matters once: **a review inherits its PR from the worktree at
 draft time.** Open the diff on a worktree that is not yet associated and the

@@ -2857,7 +2857,7 @@ M.HELP = {
   "",
   "  PR ASSOCIATION — what puts the [#N] on a worktree. It is PR #N when",
   "  its branch is named pr-<N>, OR when the document",
-  "    $AUTO_AGENTS_KB_ROOT/shared/prs/<slug>/pr-<N>.md",
+  "    <the project's primary KB>/prs/<slug>/pr-<N>.md",
   "  says `branch: <this worktree's branch>`. G and N both write it, so",
   "  the ordinary flows need no manual step.",
   "  A review inherits its PR from the worktree AT DRAFT TIME, so a review",

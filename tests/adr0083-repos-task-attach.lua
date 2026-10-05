@@ -160,7 +160,7 @@ end
 notes = {}
 tree.attach_review_to_task({
   kind = "review",
-  review = { path = "/tmp/repo@abc.r1.review.json", document = "/tmp/kb/agents/wanda/review.md" },
+  review = { path = "/tmp/repo@abc.r1.review.json", document = "/tmp/kb/reviews/wanda/review.md" },
 })
 
 ok("ADR-0083: vim.ui.select received candidate tasks",
