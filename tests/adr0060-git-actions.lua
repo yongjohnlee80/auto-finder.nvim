@@ -301,7 +301,7 @@ end)()
     available = function() return true end,
     remove_review = function(repo, path)
       removed[#removed + 1] = { repo = repo, path = path }
-      return true, nil, { path = path, document = "/kb/agents/lector/reviews/doc-r1-review.md",
+      return true, nil, { path = path, document = "/kb/reviews/lector/doc-r1-review.md",
         document_removed = true, tombstoned = true }
     end,
   }
@@ -414,7 +414,7 @@ end)()
       remove_review = function(repo, path)
         rmd[#rmd + 1] = { repo = repo, path = path }
         return true, nil, { path = path, document_removed = true,
-          document = "/kb/agents/lector/reviews/doc-r1-review.md", tombstoned = true }
+          document = "/kb/reviews/lector/doc-r1-review.md", tombstoned = true }
       end,
     }
     local prev = logger.notify
@@ -426,7 +426,7 @@ end)()
       repo = { label = "myrepo", slug = "own__myrepo", common_dir = "/x/.git" },
       review = { name = "own__myrepo@1cfe731.r1.review.json",
                  path = "/store/reviews/own__myrepo/own__myrepo@1cfe731.r1.review.json",
-                 document = "/kb/agents/lector/reviews/doc-r1-review.md",
+                 document = "/kb/reviews/lector/doc-r1-review.md",
                  short = "1cfe731", revision = 1, severities = {} },
     }
     tree.delete_review(rrow)
