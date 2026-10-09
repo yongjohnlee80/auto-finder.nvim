@@ -2,6 +2,37 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.5.8] — 2026-10-09 — the todos panel opens at once
+
+Patch. Needs auto-core.nvim at the #58 merge (`3c1a8b0`) or later for the
+cooperative `todo.scan_async`; with an older auto-core the panel falls back to
+the synchronous scan and behaves as before.
+
+- **The todos panel mounts immediately** with a loading placeholder, then
+  fills in as auto-core's cooperative scan delivers tasks, active ones before
+  archives. Archived tasks are decoded in bounded batches, so a large archive
+  no longer holds the panel for seconds.
+- **Switching the todo location clears the old rows at once.** Rows remember
+  the directory they came from, and `d`, `s` and assignment refuse a row from
+  another store, including from a prompt left open across the switch. Before,
+  a task with the same id in both stores could be changed in the wrong one.
+- Stale scan results are dropped, and scans are cancelled when superseded.
+
+## [v0.5.7] — 2026-10-06 — the kb section hosts AutoDoc's drawer; KB v2 paths
+
+Patch. Ships with the global KB's v2 migration (auto-core.nvim v0.3.0,
+worktree.nvim at its KB v2 merge).
+
+- **The `kb` section** hosts AutoDoc's KB drawer: a facade over
+  `autodoc.views.drawer`, mirroring the dbase section, registered as the
+  drawer's host at priority 100. With AutoDoc absent it shows a placeholder
+  naming AutoDoc.
+- **The todos panel's KB root comes from auto-core's one resolver**
+  (`auto-core.todo.vars`), not a private copy that read
+  `AUTO_AGENTS_KB_WRITE` first.
+- **The repos help and the README follow the KB v2 paths:** PR records under
+  `prs/<slug>/` in the primary KB, reviews under `reviews/<reviewer>/`.
+
 ## [v0.5.6] — 2026-10-03 — each runtime's own fields, from auto-run's docs
 
 Patch. Needs auto-run.nvim v0.1.19 for node, dart and the field shapes; with an
