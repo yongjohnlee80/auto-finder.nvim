@@ -95,11 +95,71 @@ if type(todo.scan_async) == "function" then
 
   local other_dir = sandbox .. "/other-tasks"
   todo.set_todo_dir(other_dir)
-  todo.add({ title = "Different location" })
+  local shared = assert(todo.add({ title = "Active task" }))
+  check("two stores share the same task id", shared == active)
+  assert(todo.update(shared, { title = "Different location" }))
   todo.set_todo_dir(dir)
   b = view.get_buffer(0)
+  vim.api.nvim_win_set_buf(0, b)
+  check("old location renders before switch", vim.wait(3000, function()
+    return not view._loading
+  end, 5))
+  local function select_active()
+    for _, row in ipairs(view._rows) do
+      if row.task and row.task.id == active then
+        vim.api.nvim_win_set_cursor(0, { row.lnum, 0 })
+        return true
+      end
+    end
+    return false
+  end
+  local function press(key)
+    for _, map in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+      if map.lhs == key then map.callback(); return end
+    end
+    error("missing keymap " .. key)
+  end
+  check("old task is actionable before switch", select_active())
+  local confirm, select = vim.fn.confirm, vim.ui.select
+  local confirmations, selections, status_callback = 0, 0
+  vim.fn.confirm = function() todo.set_todo_dir(other_dir); return 1 end
+  press("d")
+  check("delete confirmation cannot follow a store switch", todo.get(shared) ~= nil)
+  todo.set_todo_dir(dir)
+  local agents, input = package.loaded["auto-agents"], vim.ui.input
+  local assignment_callback
+  package.loaded["auto-agents"] = {
+    spawned_agents = function() return { { name = "loading-test", slot = 1 } } end,
+  }
+  vim.ui.select = function(items, _, callback) callback(items[1]) end
+  vim.ui.input = function(_, callback) assignment_callback = callback end
+  press("A")
+  check("assignment prompt opens on old task", assignment_callback ~= nil)
+  package.loaded["auto-agents"], vim.ui.input = agents, input
+  vim.fn.confirm = function() confirmations = confirmations + 1; return 1 end
+  vim.ui.select = function(_, _, callback)
+    selections = selections + 1
+    status_callback = callback
+  end
+  press("s")
+  check("status picker opens on old task", status_callback ~= nil)
   todo.set_todo_dir(other_dir)
+  check("row lookup rejects a switch before focus", view._row_under_cursor(0) == nil)
+  status_callback("completed")
+  check("pending status choice cannot mutate the new store", todo.get(shared).status == "open")
+  assignment_callback("Start this task")
+  check("pending assignment cannot mutate the new store",
+    todo.get(shared).assignee == nil and todo.get(shared).status == "open")
+  confirmations, selections = 0, 0
   view.on_focus(0, b)
+  check("location switch immediately clears action rows", #view._rows == 0)
+  check("location switch immediately replaces old text with loading",
+    table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n"):find("Loading", 1, true) ~= nil)
+  press("d")
+  press("s")
+  check("loading rows cannot open delete or status prompts", confirmations == 0 and selections == 0)
+  check("loading actions leave same-id task untouched", todo.get(shared) and todo.get(shared).status == "open")
+  vim.fn.confirm, vim.ui.select = confirm, select
   check("location switch finishes", vim.wait(3000, function() return not view._loading end, 5))
   local text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   check("stale location cannot overwrite current tasks",
@@ -156,6 +216,23 @@ if type(todo.scan_async) == "function" then
   check("older-core fallback eventually renders", vim.wait(3000, function()
     local content = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
     return not view._loading and content:find("Different location", 1, true) ~= nil
+  end, 5))
+  vim.api.nvim_win_set_buf(0, b)
+  check("older-core fallback has an actionable task", select_active())
+  todo.set_todo_dir(dir)
+  view.on_focus(0, b)
+  check("older-core fallback clears old rows before deferred scan", #view._rows == 0)
+  confirmations, selections = 0, 0
+  vim.fn.confirm = function() confirmations = confirmations + 1; return 1 end
+  vim.ui.select = function() selections = selections + 1 end
+  press("d")
+  press("s")
+  check("older-core loading actions leave the new store untouched",
+    confirmations == 0 and selections == 0 and todo.get(active).status == "open")
+  vim.fn.confirm, vim.ui.select = confirm, select
+  check("older-core location switch eventually renders", vim.wait(3000, function()
+    local content = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+    return not view._loading and content:find("Active task", 1, true) ~= nil
   end, 5))
   todo.scan_async = async_scan
   md.decode = decode
