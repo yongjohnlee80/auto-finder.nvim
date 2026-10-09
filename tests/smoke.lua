@@ -91,6 +91,11 @@ end
 
 local function eq(a, b) return a == b, string.format("expected %s, got %s", tostring(b), tostring(a)) end
 
+local function await_todos(view)
+  ok("asynchronous todos load completes",
+    vim.wait(3000, function() return not view._loading end, 5))
+end
+
 -- ── silent-truncation guard (KB todo 2026-08-23) ──────────────────
 -- Before this guard, an uncaught error in a section body aborted the
 -- WHOLE main chunk. Because the final "N passed, M failed" summary is
@@ -3641,6 +3646,7 @@ section(function()
 
   -- ── empty workspace: render shows the empty-state UX ───────
   local b = view.get_buffer(nil)
+  await_todos(view)
   ok("get_buffer returns a valid bufnr",
     type(b) == "number" and vim.api.nvim_buf_is_valid(b))
   ok("buffer filetype is 'auto-finder'", vim.bo[b].filetype == "auto-finder")
@@ -3699,6 +3705,7 @@ section(function()
     completed_at = "2026-05-21T10:00:00-07:00" })
 
   view.on_focus(nil, b)
+  await_todos(view)
   local lines_pop = vim.api.nvim_buf_get_lines(b, 0, -1, false)
   local raw_pop = table.concat(lines_pop, "\n")
 
@@ -3784,6 +3791,7 @@ section(function()
   -- Pre-expansion: rows are task-only, no frontmatter-field rows
   view._expanded = {}  -- start clean
   view.on_focus(nil, b)
+  await_todos(view)
   local pre_count = 0
   for _, r in ipairs(view._rows) do
     if r.kind == "frontmatter-field" then pre_count = pre_count + 1 end
@@ -3794,6 +3802,7 @@ section(function()
   -- Expand id_with_adr → frontmatter rows should appear
   view._expanded[id_with_adr] = true
   view.on_focus(nil, b)
+  await_todos(view)
   local adr_item_row
   local post_count = 0
   for _, r in ipairs(view._rows) do
@@ -3813,6 +3822,7 @@ section(function()
   -- Collapse → frontmatter rows go away again
   view._expanded[id_with_adr] = nil
   view.on_focus(nil, b)
+  await_todos(view)
   local collapsed_count = 0
   for _, r in ipairs(view._rows) do
     if r.kind == "frontmatter-field" then
@@ -3838,6 +3848,7 @@ section(function()
   local id_for_cursor = id_with_adr
   view._expanded = {}
   view.on_focus(_cursor_w, b)
+  await_todos(view)
   local task_lnum
   for _, r in ipairs(view._rows) do
     if r.kind == "task" and r.id == id_for_cursor then
@@ -3850,6 +3861,7 @@ section(function()
   -- Toggle expand — should NOT move cursor off the task row.
   view._expanded[id_for_cursor] = true
   view.on_focus(_cursor_w, b)
+  await_todos(view)
   local pos_expanded = vim.api.nvim_win_get_cursor(_cursor_w)
   ok("cursor stays on task lnum after expand",
     pos_expanded[1] == task_lnum,
@@ -3857,6 +3869,7 @@ section(function()
   -- Toggle collapse — should also stay put.
   view._expanded[id_for_cursor] = nil
   view.on_focus(_cursor_w, b)
+  await_todos(view)
   local pos_collapsed = vim.api.nvim_win_get_cursor(_cursor_w)
   ok("cursor stays on task lnum after collapse",
     pos_collapsed[1] == task_lnum,
@@ -3878,6 +3891,7 @@ section(function()
   })
   view._expanded[id_abs] = true
   view.on_focus(nil, b)
+  await_todos(view)
   local adr_abs_row
   for _, r in ipairs(view._rows) do
     if r.kind == "frontmatter-field" and r.task and r.task.id == id_abs
@@ -3912,6 +3926,7 @@ section(function()
   })
   view._expanded[id_ws] = true
   view.on_focus(nil, b)
+  await_todos(view)
   local adr_ws_row
   for _, r in ipairs(view._rows) do
     if r.kind == "frontmatter-field" and r.task and r.task.id == id_ws
@@ -3936,6 +3951,7 @@ section(function()
   })
   view._expanded[id_ne] = true
   view.on_focus(nil, b)
+  await_todos(view)
   local adr_ne_row
   for _, r in ipairs(view._rows) do
     if r.kind == "frontmatter-field" and r.task and r.task.id == id_ne
@@ -3990,6 +4006,7 @@ section(function()
   -- on_focus picks up the changes made during the hidden period
   vim.api.nvim_win_set_buf(w, b)
   view.on_focus(w, b)
+  await_todos(view)
   local after_focus = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   ok("on_focus catches up: 'Added while hidden' now visible",
     after_focus:find("Added while hidden") ~= nil)
@@ -4042,6 +4059,7 @@ section(function()
   fh2:close()
 
   local b = view.get_buffer(vim.api.nvim_get_current_win())
+  await_todos(view)
   ok("get_buffer returned a buffer", b and vim.api.nvim_buf_is_valid(b),
     "got " .. tostring(b))
   local lines = vim.api.nvim_buf_get_lines(b, 0, -1, false)
@@ -4091,6 +4109,7 @@ section(function()
   fh3:close()
 
   local b2 = view.get_buffer(vim.api.nvim_get_current_win())
+  await_todos(view)
   local lines2 = vim.api.nvim_buf_get_lines(b2, 0, -1, false)
   local text2  = table.concat(lines2, "\n")
   ok("empty-state copy suppressed when only malformed entries exist",
@@ -4131,6 +4150,7 @@ section(function()
   local panel_win = vim.api.nvim_get_current_win()
   local b = view.get_buffer(panel_win)
   vim.api.nvim_win_set_buf(panel_win, b)
+  await_todos(view)
   ok("get_buffer returned a buffer", b and vim.api.nvim_buf_is_valid(b))
 
   local lines = vim.api.nvim_buf_get_lines(b, 0, -1, false)
@@ -4319,6 +4339,7 @@ section(function()
   local panel_win = vim.api.nvim_get_current_win()
   local b = view.get_buffer(panel_win)
   vim.api.nvim_win_set_buf(panel_win, b)
+  await_todos(view)
 
   local function panel_text()
     return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")

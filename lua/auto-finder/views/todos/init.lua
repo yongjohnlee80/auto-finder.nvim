@@ -471,7 +471,7 @@ local LEADER_WIDTH  = 6  -- `  NN. ` for OPEN; `      ` (6 spaces) for others
 ---callers just won't see malformed files until they upgrade.
 ---@return table<string, table[]> grouped  bucket → list of tasks
 ---@return table[] malformed                list of { file_path, bucket, filename, err }
-local function _collect_grouped()
+local function _collect_grouped(snapshot)
   -- ADR-0035 Phase 1: six buckets total. Keep the initializer
   -- aligned with BUCKETS / BUCKET_ORDER so a future bucket addition
   -- only requires updating one source of truth — the BUCKETS table —
@@ -483,7 +483,10 @@ local function _collect_grouped()
   if not todo_ok then return grouped, malformed end
 
   local tasks
-  if type(todo.scan) == "function" then
+  if snapshot then
+    tasks = snapshot.tasks
+    malformed = snapshot.malformed or {}
+  elseif type(todo.scan) == "function" then
     local scan_ok, result = pcall(todo.scan)
     if scan_ok and type(result) == "table" then
       tasks     = result.tasks
@@ -546,7 +549,7 @@ end
 ---entry per visible task row so the keymap layer can resolve "what
 ---task is under the cursor."
 ---@param bufnr integer
-local function _render(bufnr)
+local function _render(bufnr, snapshot)
   if not (bufnr and vim.api.nvim_buf_is_valid(bufnr)) then return end
 
   -- v0.2.37: preserve cursor across re-renders. Pre-render, snapshot
@@ -568,7 +571,7 @@ local function _render(bufnr)
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
 
-  local grouped, malformed = _collect_grouped()
+  local grouped, malformed = _collect_grouped(snapshot)
   local rows    = {}     -- accumulating M._rows
   local lines   = {}     -- text lines we'll buf_set after the loop
   local marks   = {}     -- deferred extmarks { lnum0, col_s, col_e, hl }
@@ -975,8 +978,8 @@ local function _render(bufnr)
     -- the only section on an empty panel was Vars, and `a` on a Vars
     -- row adds a *variable* (the friction this closes). The other
     -- buckets stay hidden until they actually hold tasks.
-    if #bucket > 0 or name == "open" then
-      emit_header(name, #bucket)
+    if #bucket > 0 or name == "open" or (name == "archived" and M._loading) then
+      emit_header(name, name == "archived" and M._loading and "loading…" or #bucket)
       local collapsed = M._collapsed[name] == true
       if not collapsed then
         if name == "archived" then
@@ -2339,6 +2342,66 @@ end
 
 -- ─── auto-refresh subscriptions ───────────────────────────────
 
+local _load_generation = 0
+local _cancel_load
+local _event_pending = false
+
+local function _cancel_pending_load()
+  _load_generation = _load_generation + 1
+  if _cancel_load then _cancel_load() end
+  _cancel_load = nil
+  M._loading = false
+  M._loading_dir = nil
+end
+
+local function _load(bufnr)
+  _cancel_pending_load()
+  local generation = _load_generation
+  M._loading = true
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  local directory = ok_todo and todo.get_todo_dir()
+  M._loading_dir = directory
+  local function current()
+    return generation == _load_generation and M._bufnr == bufnr
+      and vim.api.nvim_buf_is_valid(bufnr)
+      and (not ok_todo or todo.get_todo_dir() == directory)
+  end
+  local function finish(result, done, err)
+    if not current() then
+      if generation == _load_generation then
+        _cancel_pending_load()
+        if M._bufnr == bufnr and vim.api.nvim_buf_is_valid(bufnr)
+            and #vim.fn.win_findbuf(bufnr) > 0 then _load(bufnr) end
+      end
+      return
+    end
+    if done then M._loading = false; _cancel_load = nil end
+    if not err then
+      local rendered, render_err = pcall(_render, bufnr, result)
+      if rendered then return end
+      err = render_err
+    end
+    if err then
+      _cancel_pending_load()
+      require("auto-finder.log").error("view.todos", "load failed: " .. tostring(err))
+      vim.bo[bufnr].modifiable = true
+      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "Todos loading failed — press R to retry" })
+      vim.bo[bufnr].modifiable = false
+      M._rows = {}
+      return
+    end
+  end
+  if ok_todo and type(todo.scan_async) == "function" then
+    _cancel_load = todo.scan_async(finish)
+  else
+    -- Compatibility with older auto-core: still let the panel appear
+    -- before the synchronous scan, but only the newer API yields in chunks.
+    vim.defer_fn(function()
+      finish(nil, true)
+    end, 1)
+  end
+end
+
 -- Captured auto-core.events handles for our two subscriptions:
 --   core.todo.status:changed
 --   core.todo:refreshed
@@ -2367,12 +2430,16 @@ local function _on_event(reason)
   if not (M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr)) then return end
   local wins = vim.fn.win_findbuf(M._bufnr)
   if #wins == 0 then return end
+  if _event_pending then return end
+  _event_pending = true
   -- Re-render on the next tick. Event publishers are often inside
   -- atomic write paths; defer so the render observes the final
   -- on-disk state and doesn't recurse into the publish chain.
   vim.schedule(function()
-    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-      pcall(_render, M._bufnr)
+    _event_pending = false
+    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr)
+        and #vim.fn.win_findbuf(M._bufnr) > 0 then
+      _load(M._bufnr)
     end
   end)
 end
@@ -2427,21 +2494,28 @@ function M.get_buffer(panel_winid)
   vim.bo[b].filetype  = FILETYPE
   vim.b[b].auto_finder_view = "todos"
   pcall(vim.api.nvim_buf_set_name, b, "auto-finder://todos")
-  _render(b)
+  vim.api.nvim_buf_set_lines(b, 0, -1, false, { "Loading todos…" })
+  vim.bo[b].modifiable = false
+  M._rows = {}
   _apply_keymaps(b, panel_winid)
   M._bufnr = b
   _ensure_subscriptions()
+  _load(b)
   return b
 end
 
 function M.on_focus(panel_winid, bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
-  _render(bufnr)
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  if not M._loading or (ok_todo and M._loading_dir ~= todo.get_todo_dir()) then
+    _load(bufnr)
+  end
   _apply_keymaps(bufnr, panel_winid)
   _ensure_subscriptions()
 end
 
 function M.on_close()
+  _cancel_pending_load()
   _dispose_subscriptions()
   if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
     pcall(vim.api.nvim_buf_delete, M._bufnr, { force = true })

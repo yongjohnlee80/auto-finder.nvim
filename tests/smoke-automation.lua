@@ -547,6 +547,8 @@ print("\n[42] ADR-0035 post-ship — scaffold on `automated` promotion via `s` m
   vim.wo[panel_win].winfixbuf = false
   local bufnr = view.get_buffer(panel_win)
   vim.api.nvim_win_set_buf(panel_win, bufnr)
+  ok("p42: asynchronous todos load completes",
+    vim.wait(3000, function() return not view._loading end, 5))
 
   -- Find the row + cursor onto it.
   local task_lnum

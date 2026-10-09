@@ -182,6 +182,7 @@ SUITES=(
   # The isolated runner also preserves natural headless geometry because
   # synthetic columns/lines independently provoke the core defect.
   "smoke_automation|tests/smoke-automation.lua"
+  "todos-loading|tests/todos-loading.lua"
   # [45] (ADR-0044 worktree:switched) — extracted from smoke.lua; needs
   # a freshly-materialised panel window, which only happens early.
   "smoke_adr0044|tests/smoke-adr0044.lua"
