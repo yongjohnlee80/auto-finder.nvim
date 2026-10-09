@@ -324,6 +324,8 @@ local function _row_under_cursor(panel_winid)
   if not (M._rows and panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return nil
   end
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  if ok_todo and M._rows_dir ~= todo.get_todo_dir() then return nil end
   local pos = vim.api.nvim_win_get_cursor(panel_winid)
   local lnum = pos[1]
   for _, row in ipairs(M._rows) do
@@ -1145,6 +1147,8 @@ local function _render(bufnr, snapshot)
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].modified   = false
   M._rows = rows
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  M._rows_dir = ok_todo and todo.get_todo_dir() or nil
 
   -- Restore cursors (clamped to the new line count). Skip lnum 0 to
   -- satisfy nvim_win_set_cursor's 1-based contract.
@@ -1585,10 +1589,11 @@ local function _remove_task(row)
   if not row.task then return end
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return end
+  local directory = todo.get_todo_dir()
   local choice = vim.fn.confirm(
     "Remove task '" .. (row.task.title or row.task.id or "?") .. "'?",
     "&Yes\n&No", 2)
-  if choice ~= 1 then return end
+  if choice ~= 1 or todo.get_todo_dir() ~= directory then return end
   -- ADR-0040 C3: `todo.remove` returns `(ok_bool, err_string?)` —
   -- pcall wraps that into `(success, ret1, ret2)`. The prior
   -- `local ok, err = pcall(...)` put the API's ok-flag into `err`,
@@ -1844,6 +1849,7 @@ local function _set_status(row)
   if not row or not row.task then return end
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return end
+  local directory = todo.get_todo_dir()
 
   local current = row.task.status
   vim.ui.select(STATUS_CHOICES, {
@@ -1854,7 +1860,7 @@ local function _set_status(row)
       return item
     end,
   }, function(choice)
-    if not choice or choice == current then return end
+    if not choice or choice == current or todo.get_todo_dir() ~= directory then return end
     -- ADR-0035 post-ship Lector finding (2026-05-31): `todo.status`
     -- returns `(task | nil, err_string?)` — pcall wraps that into
     -- `(success_bool, ret1, ret2)`. The prior `local ok, err =
@@ -1939,6 +1945,9 @@ end
 ---@param row table?
 local function _assign_task(row)
   if not row or not row.task or not row.task.id then return end
+  local ok_todo, todo = pcall(require, "auto-core.todo")
+  if not ok_todo then return end
+  local directory = todo.get_todo_dir()
 
   -- Try the auto-agents Lua API first; it returns only ALIVE
   -- bootstrap slots, which is the natural "agents available right
@@ -1996,7 +2005,7 @@ local function _assign_task(row)
       local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
       local ok_todo, todo = pcall(require, "auto-core.todo")
-      if not ok_todo then return end
+      if not ok_todo or todo.get_todo_dir() ~= directory then return end
       local _, err = todo.assign(row.task.id, choice.mailbox_id, reason)
       if err then
         require("auto-finder.log").error("view.todos",
@@ -2361,6 +2370,14 @@ local function _load(bufnr)
   local ok_todo, todo = pcall(require, "auto-core.todo")
   local directory = ok_todo and todo.get_todo_dir()
   M._loading_dir = directory
+  if M._rows_dir ~= directory then
+    M._rows = {}
+    vim.bo[bufnr].modifiable = true
+    vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
+    vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "Loading todos…" })
+    vim.bo[bufnr].modifiable = false
+    vim.bo[bufnr].modified = false
+  end
   local function current()
     return generation == _load_generation and M._bufnr == bufnr
       and vim.api.nvim_buf_is_valid(bufnr)
@@ -2522,6 +2539,7 @@ function M.on_close()
   end
   M._bufnr = nil
   M._rows  = nil
+  M._rows_dir = nil
 end
 
 -- Test-only — production code never calls this.
