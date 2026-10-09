@@ -109,7 +109,8 @@ jobs:
           # ADR-0200: fs.scan, core.fs.dir:dirty, git.status get_async + porcelain v2 -z.
           # BUMPED for KB v2 (ADR 1791209946): the review draft's v2 frontmatter and
           # auto-core.kb arrived with auto-core.nvim#56 (merged, the v0.3.0 line).
-          AUTO_CORE_REF: "df53d8d663d664f9b3e46991de4133f6d1f8a300"  # main @ #56 merge (auto-core.kb, v2 review frontmatter)
+          # BUMPED for todos loading: cooperative scan_async arrived with #58.
+          AUTO_CORE_REF: "3c1a8b0dcb0da005361c3f88923889cefe1eefcb"  # main @ #58 merge (active-first todo scanning)
           # BUMPED for ADR-0083 r11: `p` and `d` call
           # `review.amend_pr_association`, which the previous pin predated.
           # Briefly pointed at PR #34's head while that PR was open; now on
@@ -183,7 +184,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # Kept in step with the install pin above — the guard below asserts it.
-          AUTO_CORE_REF: "df53d8d663d664f9b3e46991de4133f6d1f8a300"
+          AUTO_CORE_REF: "3c1a8b0dcb0da005361c3f88923889cefe1eefcb"
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.
