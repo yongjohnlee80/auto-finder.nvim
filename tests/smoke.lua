@@ -3267,7 +3267,10 @@ local trigger, cancel = debounce.coalesce(function(a, b)
 end, 80)
 
 for i = 1, 4 do trigger("call-" .. i, i) end
-vim.wait(150, function() return fires > 0 end)
+-- Allow a busy CI event loop to schedule the callback; the debounce
+-- window remains 80ms and the exact count/latest-args assertions remain.
+vim.wait(1000, function() return fires > 0 end)
+vim.wait(150)
 ok("4 rapid triggers within 80ms window → exactly 1 fire",
   fires == 1, "fires=" .. fires)
 ok("debounce fires fn with the LAST call's args (latest-wins)",
