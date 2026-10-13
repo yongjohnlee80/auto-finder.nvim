@@ -5,7 +5,7 @@ All notable changes to `auto-finder.nvim` are documented here.
 ## [Unreleased] — the todo cutover: the panel writes nothing under .todo-list
 
 Released as v0.5.9 in the cutover set (ADR 1791532020 §3 step 3). **Requires
-auto-core v0.3.4** (the forwarding shim) and AutoDoc; do not ship it alone.
+auto-core v0.4.0** (the forwarding shim) and AutoDoc; do not ship it alone.
 
 - **No direct writes.** Every write under a `.todo-list/` now goes through
   auto-core.todo to AutoDoc's daemon:
@@ -18,7 +18,7 @@ auto-core v0.3.4** (the forwarding shim) and AutoDoc; do not ship it alone.
     directory that does not exist, is refused: the panel creates no directories;
   - the promote-to-automated scaffold (an `fs.atomic.write` of the task file) is
     gone with automation.
-  With an auto-core older than v0.3.4 these say "update auto-core" and write
+  With an auto-core older than v0.4.0 these say "update auto-core" and write
   nothing.
 - **Automation removed** (ADR 1791532020 §2.2): the `automated` bucket and
   status choice, the `[bash:disabled]` marker, the scaffold and its

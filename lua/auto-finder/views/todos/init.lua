@@ -5,7 +5,7 @@
 ---surface for data + lifecycle; the panel never edits YAML
 ---frontmatter directly, and it writes nothing under a `.todo-list/`:
 ---AutoDoc's daemon owns every todo write (ADR 1791532020), reached through
----auto-core.todo (v0.3.4+).
+---auto-core.todo (v0.4.0+).
 ---
 ---Layout:
 ---  - One section per status bucket, in fixed order:
@@ -48,7 +48,7 @@ local M = {
 
 -- What the panel says when auto-core predates the todo cutover: it never
 -- falls back to writing a task file itself (ADR 1791532020 §3 step 3).
-M.NEEDS_AUTOCORE = "auto-finder.todos: this needs auto-core v0.3.4 or later (AutoDoc owns "
+M.NEEDS_AUTOCORE = "auto-finder.todos: this needs auto-core v0.4.0 or later (AutoDoc owns "
   .. "the todo store; AutoDoc required): update auto-core"
 
 local FILETYPE = "auto-finder"

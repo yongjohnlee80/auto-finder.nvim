@@ -63,7 +63,7 @@ list them in `opts.sections`):
 |---|---|---|
 | **buffers** | — | Open-buffer list as a tree: the cwd, then terminals, then one bucket per outside location. Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. *Solves: `:ls` as a navigable tree.* |
 | **marks** | — | nvim marks browser. *Solves: marks you set and then forgot.* |
-| **todos** | auto-core **≥ v0.3.4** and [AutoDoc](https://github.com/yongjohnlee80/autodoc) | The task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. AutoDoc's daemon owns every write; see [Todos view](#todos-view--a-view-over-autodocs-todo-store). *Solves: tracking work in the repo instead of a browser tab.* |
+| **todos** | auto-core **≥ v0.4.0** and [AutoDoc](https://github.com/yongjohnlee80/autodoc) | The task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. AutoDoc's daemon owns every write; see [Todos view](#todos-view--a-view-over-autodocs-todo-store). *Solves: tracking work in the repo instead of a browser tab.* |
 | **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) **≥ v0.3.0** | autodb's database explorer, hosted in the panel — connections, workspaces, notes and script history. See [DBase view](#dbase-view--autodb-inside-the-panel). *Solves: querying a managed database without a second application.* |
 | **tests** / **debug** | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | The ADR-0048 pair: a discovered test tree with per-row status glyphs, and a debug view over entry points (edited in place; `launch.json` imports into them), live dap sessions and persisted breakpoints — both headed by the state a run will use (active worktree, env file, base, test config). See [Tests & Debug views](#tests--debug-views-auto-run). *Solves: running and debugging without a terminal round-trip.* |
 
@@ -115,7 +115,8 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   `fs.watch`, `fs.scan`, `git.watch`, `git.status`, centralized log,
   and the `fs.atomic` write primitive that auto-finder's persistence
   delegates to). **Hard dep**, `^0.2.30` (the release that carries
-  `fs.scan` and `git.status.get_async`).
+  `fs.scan` and `git.status.get_async`). The **todos** view needs
+  **v0.4.0** or later (the shim that forwards to AutoDoc), so pin `^0.4.0`.
 - [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
   (or `mini.icons` with its devicons mock) — **optional**, recommended.
   Without it, directories and files get plain glyphs.
@@ -645,7 +646,7 @@ work — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
 AutoDoc's daemon owns the todo system: the task format, its rules and every
 write (ADR 1791532020). The panel reads and changes tasks through
-`auto-core.todo` (**v0.3.4 or later**, which forwards to the daemon) and writes
+`auto-core.todo` (**v0.4.0 or later**, which forwards to the daemon) and writes
 nothing under a `.todo-list/` itself.
 
 | Key | Does |
@@ -661,7 +662,7 @@ Automation (`automated` templates, the `condition:` / `execute:` fields, cron
 firing) was **removed**. AutoDoc lists a file that still uses it as malformed,
 with the reason, and never deletes it.
 
-With an auto-core older than v0.3.4, the malformed-file delete and `M` say
+With an auto-core older than v0.4.0, the malformed-file delete and `M` say
 "update auto-core". They never fall back to writing files themselves.
 
 ## Development

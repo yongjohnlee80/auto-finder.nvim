@@ -120,8 +120,8 @@ jobs:
           # BUMPED for the todo cutover (ADR 1791532020 §3 step 3): the panel calls
           # remove_malformed / move_store and every todo cell runs through the
           # forwarding shim. Pointed at auto-core.nvim#4's head while that PR is
-          # open; re-point it at the v0.3.4 tag when it is cut.
-          AUTO_CORE_REF: "4e69dba2125ce9fd43860bc7a2c1121f64f95a62"  # auto-core#4 head (the v0.3.4 shim)
+          # open; re-point it at the v0.4.0 tag when it is cut.
+          AUTO_CORE_REF: "4e69dba2125ce9fd43860bc7a2c1121f64f95a62"  # auto-core#4 head (the shim, released as v0.4.0); re-point at v0.4.0
           # The daemon the shim forwards to: v0.1.40, protocol 21 (todos.* since 20).
           AUTODOC_REF:   "a857dd9472854b1dd606b02b4a3e0257315acc4d"  # autodoc v0.1.40
           # BUMPED for ADR-0083 r11: `p` and `d` call
