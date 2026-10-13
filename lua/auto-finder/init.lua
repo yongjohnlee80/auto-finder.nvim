@@ -124,30 +124,9 @@ function M.setup(user_opts)
   -- arbitrary require paths; see `config.lua` for the shape.
   require("auto-finder.views").setup(cfg.sections, cfg.view_modules or cfg.section_modules)
 
-  -- ADR-0035 Phase 3: install the buffer-attach diagnostic
-  -- validator for `.todo-list/automated/*.md` files. The validator
-  -- runs on BufRead/BufNewFile/BufEnter and revalidates on
-  -- BufWritePost + TextChanged* (debounced 200ms). Does NOT require
-  -- the auto-finder panel to be open — it's a buffer-level
-  -- attachment, decoupled from the panel surface (same model as
-  -- the cron engine itself starting on auto-agents load).
-  pcall(function()
-    require("auto-finder.views.todos.automation_diagnostics").install()
-  end)
-
-  -- ADR-0035 post-ship (2026-06-01): install the universal
-  -- promote-to-automated default-populator. Subscribes to
-  -- core.todo.status:changed (panel-independent — fires for the
-  -- mailbox-verb path too, not just the panel `s` modal). When a
-  -- task transitions INTO automated with no condition/execute, it
-  -- populates working defaults so the new template doesn't trip
-  -- auto-core's "empty condition/execute = malformed" rule. The
-  -- panel `s` modal additionally appends the instructional body +
-  -- opens the file; this subscriber is the frontmatter-only floor
-  -- that every todo.status-driven promote gets.
-  pcall(function()
-    require("auto-finder.views.todos").install_automated_default_hook()
-  end)
+  -- ADR-0035's automation diagnostics and the promote-to-automated
+  -- default hook are gone: automation was removed (ADR 1791532020), and
+  -- the hook wrote task files directly, which only AutoDoc may now do.
 
   -- v0.2.70: a follow toggle made via the admin DSL (`files follow
   -- on|off`) persists in the auto-finder state namespace and overrides

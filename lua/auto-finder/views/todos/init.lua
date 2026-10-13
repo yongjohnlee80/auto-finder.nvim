@@ -63,8 +63,6 @@ local HL = {
   help_key        = "AutoFinderTodosHelpKey",     -- the `a` / `d` snippets
   header_open        = "AutoFinderTodosHeaderOpen",
   header_in_progress = "AutoFinderTodosHeaderInProgress", -- ADR-0035 Phase 1
-  header_automated   = "AutoFinderTodosHeaderAutomated",  -- ADR-0035 Phase 1
-  bash_disabled      = "AutoFinderTodosBashDisabled",     -- ADR-0035 Phase 3
   header_deferred    = "AutoFinderTodosHeaderDeferred",
   header_completed   = "AutoFinderTodosHeaderCompleted",
   header_archived    = "AutoFinderTodosHeaderArchived",
@@ -117,17 +115,9 @@ local function _apply_default_highlights()
   -- /catppuccin/everforest) without colliding with the OK/Warn/Error
   -- semantic palette the other buckets use.
   vim.api.nvim_set_hl(0, HL.header_in_progress,  { link = "Statement",      default = true })
-  -- ADR-0035 Phase 1: automated reads as "special — not normal task" —
-  -- `Special` is the universal "this is structurally different" group.
-  vim.api.nvim_set_hl(0, HL.header_automated,    { link = "Special",        default = true })
   vim.api.nvim_set_hl(0, HL.header_deferred,     { link = "DiagnosticWarn", default = true })
   vim.api.nvim_set_hl(0, HL.header_completed,    { link = "DiagnosticOk",   default = true })
   vim.api.nvim_set_hl(0, HL.header_archived,     { link = "NonText",        default = true })
-  -- ADR-0035 Phase 3: bash-disabled indicator on automated rows.
-  -- `WarningMsg` reads as "this template won't fully run" without
-  -- being as loud as `DiagnosticError` (an automated template can
-  -- still partially execute its non-bash steps).
-  vim.api.nvim_set_hl(0, HL.bash_disabled,       { link = "WarningMsg",     default = true })
   vim.api.nvim_set_hl(0, HL.header_malformed,  { link = "DiagnosticError",default = true })
   vim.api.nvim_set_hl(0, HL.malformed_filename,{ link = "Directory",      default = true })
   vim.api.nvim_set_hl(0, HL.malformed_err,     { link = "Comment",        default = true })
@@ -166,12 +156,12 @@ end
 -- Maps the schema status enum to {header label, header highlight}.
 -- v0.2.36 (Phase 2 polish): per-row `[XXXXX]` status prefix was
 -- removed because the section header already groups tasks by status.
--- ADR-0035 Phase 1: `in-progress` and `automated` join the enum;
--- panel ordering anchors them at the top per ADR §9.
+-- ADR-0035 Phase 1: `in-progress` joins the enum. `automated` went with
+-- automation (ADR 1791532020): AutoDoc lists a file that still uses it as
+-- malformed.
 local BUCKETS = {
   open            = { header = "Open",        hl_header = HL.header_open         },
   ["in-progress"] = { header = "In Progress", hl_header = HL.header_in_progress  },
-  automated       = { header = "Automated",   hl_header = HL.header_automated    },
   deferred        = { header = "Deferred",    hl_header = HL.header_deferred     },
   completed       = { header = "Completed",   hl_header = HL.header_completed    },
   archived        = { header = "Archived",    hl_header = HL.header_archived     },
@@ -179,9 +169,9 @@ local BUCKETS = {
 
 -- Bucket render order — open at the top so OPEN tasks (the
 -- numbered ones) are immediately visible without scrolling.
--- ADR-0035 §9: `In Progress` directly below `Open`, then `Automated`
--- (templates), then the existing deferred/completed/archived tail.
-local BUCKET_ORDER = { "open", "in-progress", "automated", "deferred", "completed", "archived" }
+-- ADR-0035 §9: `In Progress` directly below `Open`, then the
+-- deferred/completed/archived tail.
+local BUCKET_ORDER = { "open", "in-progress", "deferred", "completed", "archived" }
 
 -- Per-buffer row metadata: array of one of these shapes, in render order:
 --   { kind="task",              id, status, errors_count, lnum, task }
@@ -233,7 +223,6 @@ local DEFAULT_ARCHIVE_PERIOD_COLLAPSED = true
 local DEFAULT_COLLAPSED = {
   open            = false,
   ["in-progress"] = false,  -- ADR-0035: active work — keep visible
-  automated       = false,  -- ADR-0035: templates — keep visible (Phase 2 fires them)
   deferred        = false,
   completed       = false,
   archived        = true,   -- collapsed by default — see policy note above
@@ -637,38 +626,6 @@ local function _render(bufnr, snapshot)
       parts[#parts + 1] = "  due:" .. task.due
     end
 
-    -- 3.5. ADR-0035 Phase 3: bash-disabled indicator. Automated
-    -- templates whose `execute:` list contains any bash form
-    -- (`bash …` / `bash:<sec> …` / `bash -t=<N> …`) light up an
-    -- inline `[bash:disabled]` marker when the workspace's
-    -- `bash_enabled` trust flag is false. Tells the user at a
-    -- glance "this template's bash steps will refuse to run until
-    -- you `:AutoAgentsTodosAutomationEnable`". Only computed for
-    -- the `automated` bucket — non-template tasks don't have
-    -- execute[] and the check is wasted work.
-    local bash_disabled_indicator = false
-    if bucket_name == "automated" and type(task.execute) == "table" then
-      local has_bash = false
-      for _, step in ipairs(task.execute) do
-        if type(step) == "string" and step:sub(1, 5) == "bash " then
-          has_bash = true; break
-        end
-        if type(step) == "string" and step:sub(1, 5) == "bash:" then
-          has_bash = true; break
-        end
-      end
-      if has_bash then
-        local ok_a, automation = pcall(require, "auto-core.todo.automation")
-        if ok_a and type(automation.trust_state) == "function" then
-          local ts_ok, ts = pcall(automation.trust_state)
-          if ts_ok and type(ts) == "table" and ts.bash_enabled == false then
-            bash_disabled_indicator = true
-            parts[#parts + 1] = "  [bash:disabled]"
-          end
-        end
-      end
-    end
-
     -- 4. The id in parens at the end as a stable reference.
     parts[#parts + 1] = "  (" .. tostring(task.id or "?") .. ")"
 
@@ -706,14 +663,6 @@ local function _render(bufnr, snapshot)
     if type(task.due) == "string" and task.due ~= "" then
       local len = #parts[i]
       mark(lnum0, cursor, cursor + len, HL.due)
-      cursor = cursor + len
-      i = i + 1
-    end
-    -- ADR-0035 Phase 3: highlight the `[bash:disabled]` indicator
-    -- when it was emitted above.
-    if bash_disabled_indicator then
-      local len = #parts[i]
-      mark(lnum0, cursor, cursor + len, HL.bash_disabled)
       cursor = cursor + len
       i = i + 1
     end
@@ -1640,223 +1589,9 @@ end
 -- thrice to land on `deferred`?" — the modal eliminates that
 -- mental tax: the user always sees the destinations and picks one.
 --
--- ADR-0035 Phase 1: `in-progress` joins the cycle (auto-engaged by
--- `M.assign()` but can be hand-set / hand-cleared too).
---
--- ADR-0035 post-ship UX amendment (2026-05-31): `automated` is ALSO
--- in the cycle now. When the user selects `automated` from a
--- non-automated state, `_scaffold_automated_template` (below)
--- appends usage instructions to the body AND populates
--- `condition:` / `execute:` with working defaults so the
--- just-promoted template passes auto-core's new "empty
--- condition/execute = malformed" validator rule. Order mirrors
--- the panel's bucket order (open → in-progress → automated →
--- completed → deferred → archived).
-local STATUS_CHOICES = { "open", "in-progress", "automated", "completed", "deferred", "archived" }
-
--- Scaffold appended to the task body on first promotion to
--- `automated` via the panel `s` modal. The marker
--- `## How to author this template` is the idempotency guard —
--- re-cycling (automated → open → automated) doesn't double-append.
-local AUTOMATED_SCAFFOLD_MARKER = "## How to author this template"
-local AUTOMATED_SCAFFOLD_BODY = [[
-
-
-## How to author this template
-
-This task is now an **automated template** — the engine fires it
-(producing a cloned task) when every `condition:` is satisfied
-since `last_fired_at`, then runs each step in `execute:` in order.
-The scaffold below the heading is what auto-finder dropped in on
-your `s → automated` selection; replace it with your own
-condition + execute when ready.
-
-### `condition:` — cron expressions OR event references (AND-joined)
-
-```yaml
-condition:
-  - "0 9 * * 1-5"         # weekdays at 09:00
-  - "event:new-task"      # any task transitions to `open`
-```
-
-5-field cron (minute / hour / day-of-month / month / day-of-week,
-Sunday=0 with `7` aliased). Tokens: `*` `N` `N-M` `N,M,P` `*/STEP`
-`N-M/STEP` `D#K` (e.g. `2#1` = first Tuesday of the month).
-
-Event topics: `new-task`, `task-completed`, `task-archived`,
-`task-deferred`, `assign:<agent>`, or wildcard `assign:*`.
-
-### `execute:` — steps run sequentially
-
-```yaml
-execute:
-  - "assign agent:lector"           # mailbox-notify assignee
-  - "bash echo hello"               # async, 1h default timeout
-  - 'bash -t=1 "echo hello world"'  # inline bash → floating term T1
-  - "bash -t=2 ./script.sh"         # unquoted = file/path form
-  - "assign slot:5"                 # resolves slot 5 → live agent
-```
-
-`bash -t=N <cmd>` (N ∈ 1..4) routes the command to floating
-terminal T<N>. **Quoting is semantic**: outer `"..."` or `'...'`
-around the command signals "inline bash" and the quotes are
-stripped before sending. Unquoted forms (file paths, single-token
-commands) are sent verbatim.
-
-Other primitives: `assign user` (local-human; no mailbox),
-`bash:<sec> <cmd>` (explicit timeout).
-
-### Defaults already populated
-
-The frontmatter above starts with working defaults so the template
-passes the validator (empty `condition:` / `execute:` would flag
-as `automation-condition-malformed` / `automation-execute-malformed`):
-
-  - `condition: ["0 0 * * *"]` — fires at midnight every day.
-  - `execute: ["bash echo hello world"]` — runs a CAPTURED bash
-    step. The clone records the command's `exit_code:` and is
-    marked `completed` on success (exit 0). Swap in
-    `'bash -t=1 "echo hello world"'` if you'd rather watch it run
-    in floating terminal T1 — terminal-routed steps record no
-    exit code and just complete on successful dispatch.
-
-**Before midnight rolls around**, enable the bash trust gate (it's
-disabled by default so checked-in templates can't auto-run shell
-commands on someone else's machine):
-
-```vim
-:AutoAgentsTodosAutomationEnable
-```
-
-Without that, the bash step fails with code
-`automation-bash-disabled` and the clone gets an `errors[]` entry.
-
-### Try it now
-
-  - Fire manually:    `:AutoAgentsTodos fire id=<this-task-id>`
-  - Enable bash:      `:AutoAgentsTodosAutomationEnable`
-  - Full docs:        auto-finder repo `AUTOMATION.md`
-
-_(Delete this section once your template is dialed in — it's just
-the scaffold auto-finder appended on first `status → automated`.)_
-]]
-
----Promote-to-automated scaffold helper. Idempotent; only fires
----when the task is currently automated AND the scaffold marker
----isn't already in the body. Populates `condition:` / `execute:`
----with working defaults (daily-at-midnight cron + a captured
----`bash echo hello world` step) ONLY when both fields are
----absent — don't clobber a re-cycled template's existing values.
----Returns the file path so the caller can open the file (we don't
----auto-edit here: opening the file from inside a scheduled-render
----callback context triggers buffer-swap autocmds that can hang
----headless smoke, and a buffer switch mid-render is jumpy in
----interactive use too).
----@param task_id string
----@param with_body boolean  append the instructional body + signal the caller to open the file (panel `s`-modal path only)
----@return string? file_path  the scaffolded file when a write happened, else nil
-local function _scaffold_automated_template(task_id, with_body)
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return nil end
-  local t = todo.get(task_id)
-  if not (t and t.status == "automated") then return nil end
-
-  local ok_paths, paths_mod = pcall(require, "auto-core.todo.paths")
-  local ok_md,    md         = pcall(require, "auto-core.todo.md")
-  if not (ok_paths and ok_md) then return nil end
-  -- BUG FIX (2026-06-01): use auto-core's OVERRIDE-AWARE dir
-  -- resolver, NOT `paths.resolve_todo_dir(nil)`. The latter falls
-  -- back to `<workspace>/.todo-list` and ignores the
-  -- `todo.dir_overrides` state — so on a KB-rooted store (set via
-  -- `todos.set_dir`) it computes a path that doesn't hold the
-  -- file, `io.open` returns nil, and the scaffold silently
-  -- no-ops. `todo.get_todo_dir()` is the same resolver
-  -- todo.get/status/add use internally.
-  local file = paths_mod.task_file_path(todo.get_todo_dir(), task_id, "automated", nil)
-
-  local f = io.open(file, "r"); if not f then return nil end
-  local txt = f:read("*a"); f:close()
-  local dec = md.decode(txt)
-  if not (dec and dec.ok and type(dec.value) == "table") then return nil end
-
-  local task = dec.value
-  local wrote = false
-
-  -- Populate frontmatter defaults ONLY when BOTH fields are absent
-  -- — don't clobber a template that already declares either.
-  if task.condition == nil and task.execute == nil then
-    task.condition = { "0 0 * * *" }
-    -- (2026-06-01) Default to a CAPTURED bash step (`bash <cmd>`),
-    -- not terminal-routed `bash -t=N`. Captured steps record the
-    -- clone's `exit_code` and complete it on success — the richer
-    -- default for a brand-new template. Switch to `bash -t=N` only
-    -- when you actually want the command in a live floating term.
-    task.execute   = { "bash echo hello world" }
-    wrote = true
-  end
-
-  -- Append the instructional body only on the rich (panel-modal)
-  -- path, and only once (marker guard makes re-cycling idempotent).
-  if with_body
-      and not (type(task.description) == "string"
-        and task.description:find(AUTOMATED_SCAFFOLD_MARKER, 1, true))
-  then
-    task.description = (task.description or "") .. AUTOMATED_SCAFFOLD_BODY
-    wrote = true
-  end
-
-  if not wrote then return nil end  -- nothing to do; idempotent no-op
-
-  local enc_ok, enc = pcall(md.encode, task)
-  if not enc_ok then return nil end
-  -- ADR-0040 C5/B: delegate to the canonical atomic primitive (the
-  -- hand-rolled temp+rename here skipped fsync AND ignored the
-  -- os.rename return — a failed rename silently reported success).
-  local wok, werr = require("auto-core.fs.atomic").write(file, enc)
-  if not wok then
-    require("auto-finder.log").error("view.todos",
-      "scaffold write failed for " .. file .. ": " .. tostring(werr))
-    return nil
-  end
-
-  return file
-end
-
--- Setup-time subscriber handle (panel-independent — installed from
--- auto-finder.setup, NOT gated on the panel being open, so the
--- mailbox-verb path is covered even before the panel is first
--- focused).
-M._auto_default_sub = nil
-
----Install the universal promote-to-automated default-populator.
----Idempotent. Subscribes to `core.todo.status:changed` and, when
----a task transitions INTO automated, populates the frontmatter
----defaults (no body — `with_body = false`) via the shared
----`_scaffold_automated_template`. Covers the panel `s`-modal AND
----the `todos.status` mailbox-verb paths (both fire the event).
----Pure direct-YAML edits don't fire the event and aren't covered —
----a hand-author writing `status: automated` can write
----condition/execute in the same edit.
-function M.install_automated_default_hook()
-  if M._auto_default_sub then return end
-  local ok_ev, ev = pcall(require, "auto-core.events")
-  if not (ok_ev and ev and type(ev.subscribe) == "function") then return end
-  M._auto_default_sub = ev.subscribe("core.todo.status:changed", function(payload)
-    if type(payload) == "table" and payload.to == "automated" and payload.id then
-      pcall(_scaffold_automated_template, payload.id, false)
-    end
-  end)
-end
-
----Symmetric teardown for tests / re-arm.
-function M.uninstall_automated_default_hook()
-  if not M._auto_default_sub then return end
-  local ok_ev, ev = pcall(require, "auto-core.events")
-  if ok_ev and ev and type(ev.unsubscribe) == "function" then
-    pcall(ev.unsubscribe, M._auto_default_sub)
-  end
-  M._auto_default_sub = nil
-end
+-- The statuses AutoDoc accepts (ADR 1791532020 §2.2): `automated` went
+-- with automation. Order mirrors the panel's bucket order.
+local STATUS_CHOICES = { "open", "in-progress", "completed", "deferred", "archived" }
 
 ---`s` action: open a numbered-options modal listing the four
 ---valid statuses; on selection, route through auto-core.todo.status.
@@ -1895,35 +1630,6 @@ local function _set_status(row)
       require("auto-finder.log").error("view.todos",
         "status failed: " .. tostring(err_str))
       return
-    end
-    -- ADR-0035 post-ship UX: on first promotion to automated,
-    -- scaffold the task body with usage instructions + populate
-    -- working defaults so the new template doesn't land as
-    -- malformed under the new "empty condition/execute" validator
-    -- rule, and the user has a working example to customize.
-    -- Re-cycling (automated → open → automated) is idempotent —
-    -- the scaffold helper guards on a body marker.
-    --
-    -- The scaffold helper writes the file synchronously then
-    -- returns the path. We open the file in a deferred `vim.schedule`
-    -- call so the buffer-switch happens AFTER the current
-    -- modal-callback chain returns — otherwise the BufEnter/BufRead
-    -- autocmd hooks (notably auto-finder's panel re-render +
-    -- auto-core's worktree resolver) can recurse into the
-    -- in-progress modal and hang in headless smoke.
-    if choice == "automated" and current ~= "automated" then
-      -- with_body = true: the panel path gets the full treatment
-      -- (defaults + instructional body + file-open). The setup-
-      -- time status:changed subscriber ALSO fires for this same
-      -- promote with with_body = false; the shared helper's
-      -- guards make the double-invocation idempotent (defaults
-      -- populated once, body appended once).
-      local scaffolded_path = _scaffold_automated_template(row.task.id, true)
-      if scaffolded_path then
-        vim.schedule(function()
-          pcall(vim.cmd, "edit " .. vim.fn.fnameescape(scaffolded_path))
-        end)
-      end
     end
     if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
       _render(M._bufnr)
@@ -2333,11 +2039,11 @@ local function _apply_keymaps(bufnr, panel_winid)
   -- statuses instead of cycling. Picking the current status is a
   -- no-op.
   set("s", function() _set_status(_row_under_cursor(panel_winid)) end,
-    "auto-finder.todos: set status (numbered modal: open / in-progress / automated / completed / deferred / archived)")
+    "auto-finder.todos: set status (numbered modal: open / in-progress / completed / deferred / archived)")
   -- v0.2.43: `A` (capital — distinct from `a` add) assigns the
   -- task under the cursor to a spawned agent with optional
-  -- direction notes. Routes through auto-core.todo.assign which
-  -- fires the mailbox-notification event.
+  -- direction notes. Routes through auto-core.todo.assign; AutoDoc logs
+  -- the assignment and auto-core's notifier tells the agent.
   set("A", function() _assign_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: assign task to a spawned agent (picker + notes prompt)")
   set("o", function() _toggle_expand(_row_under_cursor(panel_winid)) end,
