@@ -99,12 +99,14 @@ end
 
 ---context resolves (and, the first time, claims) this project's store:
 ---cb(ctx) with ctx { root, at, store, store_id, claimed, writable }, or
----cb(nil, err).
+---cb(nil, err). `root` is a root a sequence captured at its start (default:
+---the project root now).
 ---@param cb fun(ctx: table|nil, err: string|nil)
-function M.context(cb)
+---@param root string?
+function M.context(cb, root)
   local d, why = deps()
   if not d then return cb(nil, why) end
-  local root = d.where.root()
+  root = root or d.where.root()
   d.daemon.run(function() return d.where.ensure(root) end, function(ok, ctx)
     if not ok then return cb(nil, tostring(ctx)) end
     cb(ctx)
@@ -349,7 +351,9 @@ function M.set_dir(dir, cb)
     if err then return cb(false, M.format(err)) end
     d.where.set_override(root, dir ~= "" and dir or nil)
     d.where.reset(root)
-    M.context(function(_, cerr) cb(cerr == nil, cerr) end) -- resolve (and claim) the new store now
+    -- resolve (and claim) the new store now: the root this call started on,
+    -- not the project root after the wait (Lector, auto-agents #26 r2 P2)
+    M.context(function(_, cerr) cb(cerr == nil, cerr) end, root)
   end)
   if not ok then cb(false, "autodoc: " .. tostring(perr)) end
 end

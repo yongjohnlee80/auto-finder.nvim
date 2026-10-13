@@ -499,6 +499,29 @@ do
   check("load: … and it finished without an error", parts[#parts] and parts[#parts].err == nil, vim.inspect(parts))
   require("auto-core.git.worktree").set_workspace_root(proj)
   reload()
+
+  -- set_dir: the switch lands while the daemon answers set_dir; the store it
+  -- then resolves (and claims) is the starting project's
+  local target = vim.uv.fs_realpath(sandbox) .. "/set-dir-target"
+  vim.fn.mkdir(target, "p")
+  local back = door.dir()
+  res, switched, after = switch_during("set_dir", elsewhere, function(done)
+    door.set_dir(target, done)
+  end)
+  require("auto-core.git.worktree").set_workspace_root(proj)
+  check("set_dir: fixture — the project switched while set_dir waited", switched)
+  check("set_dir: it succeeded", res[1] == true, vim.inspect(res))
+  local touched = false
+  for _, a in ipairs(after) do
+    if a.verb == "register" or (type(a.at) == "table" and a.at.root == elsewhere) then touched = true end
+  end
+  check("set_dir: nothing was resolved, registered or claimed for the project switched to",
+    not touched, vim.inspect(after))
+  check("set_dir: the project switched to got no store", not exists(elsewhere .. "/.todo-list"))
+  local done_back = false
+  door.set_dir(back, function() done_back = true end)
+  vim.wait(10000, function() return done_back end, 10)
+  reload()
 end
 
 check("auto-core.todo was still never required", package.loaded["auto-core.todo"] == nil)
