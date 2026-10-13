@@ -123,7 +123,7 @@ jobs:
           # PR was open; now main at #5, the commit v0.4.0 tags.
           AUTO_CORE_REF: "5bd0f4be35ecaf025fd7dc3dd2ddb44e550e5fe2"  # auto-core v0.4.0 (main @ #5, the release commit)
           # The daemon the shim forwards to: v0.1.41, the cutover's AutoDoc half (#150).
-          AUTODOC_REF:   "eda6ed9dcf702d9b968849333df0420e257a7296"  # autodoc v0.1.41
+          AUTODOC_REF:   "0584e785b7b7d839bcfd2671b75896583ef91488"  # autodoc v0.1.41
           # BUMPED for ADR-0083 r11: `p` and `d` call
           # `review.amend_pr_association`, which the previous pin predated.
           # Briefly pointed at PR #34's head while that PR was open; now on
