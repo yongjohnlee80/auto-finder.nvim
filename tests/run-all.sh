@@ -88,7 +88,15 @@ if ! AF_TEST_SANDBOX_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auto-finder-testrun-XXXX
 fi
 export AF_TEST_SANDBOX_ROOT
 
+# The todo cells start AutoDoc daemons of their own (tests/_autodoc.lua); a
+# daemon outlives its nvim, so each is stopped here, matched by the config path
+# under this run's sandbox (no other daemon is touched).
+stop_autodoc_daemons() {
+  pkill -f -- "--config $AF_TEST_SANDBOX_ROOT/" 2>/dev/null || true
+}
+
 cleanup_sandbox() {
+  stop_autodoc_daemons
   # Guard the rm: only ever remove a path matching the pattern we
   # created ourselves, never an empty or inherited value.
   case "$AF_TEST_SANDBOX_ROOT" in
@@ -136,6 +144,7 @@ run_suite() {
   echo "── $name ──────────────────────────────"
   out="$(nvim --headless -u NONE -l "$file" 2>&1)"
   exit_code=$?
+  stop_autodoc_daemons
   pass=$(printf '%s\n' "$out" | grep -cE "^  PASS" || true)
   fail=$(printf '%s\n' "$out" | grep -cE "^  FAIL" || true)
   printf '%s\n' "$out" | grep -E "^  FAIL" | head -10
@@ -177,12 +186,12 @@ run_suite() {
 # its entry so the reasons for the extractions stay discoverable.
 SUITES=(
   "smoke|tests/smoke.lua"
-  # [41]/[42] (ADR-0035 automation) — extracted from smoke.lua; the
-  # malformed-template :edit crashes with smoke.lua's accumulated state.
-  # The isolated runner also preserves natural headless geometry because
-  # synthetic columns/lines independently provoke the core defect.
-  "smoke_automation|tests/smoke-automation.lua"
+  # smoke_automation ([41]/[42], ADR-0035) was removed with automation
+  # (ADR 1791532020): the diagnostics and the scaffold it tested are gone.
   "todos-loading|tests/todos-loading.lua"
+  # The todo cutover (ADR 1791532020): every panel write goes to AutoDoc's
+  # daemon; a write spy fails any direct write under a .todo-list.
+  "todos-cutover|tests/todos-cutover.lua"
   # [45] (ADR-0044 worktree:switched) — extracted from smoke.lua; needs
   # a freshly-materialised panel window, which only happens early.
   "smoke_adr0044|tests/smoke-adr0044.lua"

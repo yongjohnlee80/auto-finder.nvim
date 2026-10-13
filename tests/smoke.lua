@@ -3620,7 +3620,12 @@ end)
 
 -- ─────────────────────── 39. views.todos — Phase 2 auto-core.todo panel ──
 print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
+-- auto-core.todo forwards to AutoDoc's daemon from v0.3.4 (ADR 1791532020):
+-- the todo sections ([39]-[40]) run against a daemon of this suite's own.
+local AUTODOC_OK, AUTODOC_WHY = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
+  .. "/_autodoc.lua")(SANDBOX, "smoke")
 section(function()
+  ok("[39] AutoDoc is set up for the todo cells", AUTODOC_OK, AUTODOC_WHY)
   local ok_v, view = pcall(require, "auto-finder.views.todos")
   ok("auto-finder.views.todos loads", ok_v, tostring(view))
   if not ok_v then return end
@@ -4236,28 +4241,23 @@ section(function()
       type(s_cb) == "function")
     if s_cb then s_cb() end
   end
-  -- ADR-0035 post-ship UX amendment (2026-05-31): the modal lists
-  -- 6 user-cyclable statuses in canonical bucket order. `automated`
-  -- joined the cycle so users can promote a regular task to a
-  -- template via the panel `s` action; auto-finder scaffolds the
-  -- task body + populates `condition:` / `execute:` defaults on
-  -- the promotion (covered separately in section [42]).
-  ok("status-modal: vim.ui.select invoked with 6 statuses in canonical order",
-    captured_choices and #captured_choices == 6
+  -- The modal lists the five statuses AutoDoc accepts, in canonical bucket
+  -- order. `automated` went with automation (ADR 1791532020 §2.2).
+  ok("status-modal: vim.ui.select invoked with 5 statuses in canonical order",
+    captured_choices and #captured_choices == 5
       and captured_choices[1] == "open"
       and captured_choices[2] == "in-progress"
-      and captured_choices[3] == "automated"
-      and captured_choices[4] == "completed"
-      and captured_choices[5] == "deferred"
-      and captured_choices[6] == "archived",
+      and captured_choices[3] == "completed"
+      and captured_choices[4] == "deferred"
+      and captured_choices[5] == "archived",
     "got: " .. vim.inspect(captured_choices))
-  ok("status-modal: `automated` is INCLUDED in the user cycle (post-ship UX)",
+  ok("status-modal: `automated` is NOT offered (automation was removed)",
     (function()
       if not captured_choices then return false end
       for _, item in ipairs(captured_choices) do
-        if item == "automated" then return true end
+        if item == "automated" then return false end
       end
-      return false
+      return true
     end)(),
     "got: " .. vim.inspect(captured_choices))
   vim.wait(120, function() return false end)
@@ -4512,10 +4512,16 @@ section(function()
   --
   -- This is a fixture that has to say what it wants rather than rely on a
   -- side effect of something else, which is the better shape regardless.
+  -- (Since the cutover, D1 makes the assignment itself move it; the status
+  -- call is then a no-op.)
   todo.assign(id_ip, "agent:phase1")
   todo.status(id_ip, "in-progress")
-  local id_auto = todo.add({ id = "2026-05-30-p40-auto",     title = "automated template" })
-  todo.status(id_auto, "automated")
+  -- automation was removed (ADR 1791532020): the status is refused.
+  local id_auto = todo.add({ id = "2026-05-30-p40-auto",     title = "not a template" })
+  local auto_t, auto_err = todo.status(id_auto, "automated")
+  ok("p40: status automated is refused (automation was removed)",
+    auto_t == nil and tostring(auto_err):find("automation was removed", 1, true) ~= nil, auto_err)
+  todo.status(id_auto, "deferred") -- out of Open, so p40-open stays its only row
   local id_arch = todo.add({ id = "2026-05-30-p40-archived", title = "archived task" })
   todo.status(id_arch, "archived")  -- direct archive (no completed predecessor)
 
@@ -4537,7 +4543,7 @@ section(function()
   -- 40a. Each section header is rendered.
   ok("p40: Open section header rendered",       text:find("Open %(", 1) ~= nil)
   ok("p40: In Progress section header rendered",text:find("In Progress %(", 1) ~= nil)
-  ok("p40: Automated section header rendered",  text:find("Automated %(", 1) ~= nil)
+  ok("p40: no Automated section",              text:find("Automated %(", 1) == nil)
   ok("p40: Deferred section header rendered",   text:find("Deferred %(", 1) ~= nil)
   ok("p40: Completed section header rendered",  text:find("Completed %(", 1) ~= nil)
   ok("p40: Archived section header rendered",   text:find("Archived %(", 1) ~= nil)
@@ -4547,16 +4553,13 @@ section(function()
   -- text — string ordering equates to render ordering.
   local pos_open = text:find("Open %(", 1)
   local pos_ip   = text:find("In Progress %(", 1)
-  local pos_auto = text:find("Automated %(", 1)
   local pos_def  = text:find("Deferred %(", 1)
   local pos_done = text:find("Completed %(", 1)
   local pos_arch = text:find("Archived %(", 1)
   ok("p40: section order — Open before In Progress",
     pos_open and pos_ip and pos_open < pos_ip)
-  ok("p40: section order — In Progress before Automated",
-    pos_ip and pos_auto and pos_ip < pos_auto)
-  ok("p40: section order — Automated before Deferred",
-    pos_auto and pos_def and pos_auto < pos_def)
+  ok("p40: section order — In Progress before Deferred",
+    pos_ip and pos_def and pos_ip < pos_def)
   ok("p40: section order — Deferred before Completed",
     pos_def and pos_done and pos_def < pos_done)
   ok("p40: section order — Completed before Archived",
@@ -4581,7 +4584,7 @@ section(function()
 
   -- Each non-archived task is the ONLY task in its bucket, so
   -- each should carry the `  1. ` ordinal.
-  for _, id in ipairs({ id_open, id_ip, id_auto, id_def, id_done }) do
+  for _, id in ipairs({ id_open, id_ip, id_done }) do
     local line = row_line(id)
     ok("p40: " .. id .. " row has numbered ordinal `  1. `",
       line and line:match("^%s*1%.%s") ~= nil,
@@ -4628,31 +4631,15 @@ section(function()
     ok("p40: archived row not present in rows (collapsed sub-period)", true)
   end
 
-  -- 40e. ASSIGNMENT DOES NOT MOVE A TASK — the PANEL-VISIBLE half.
+  -- 40e. ASSIGNMENT MOVES AN OPEN TASK — the PANEL-VISIBLE half of D1.
   --
-  -- auto-core decoupled assignment from the status transition (86b0897,
-  -- ADR-0035 r5: "starting work should not be claimed purely because
-  -- ownership changed") and asserts that at the MODEL layer. What only this
-  -- repo can assert is the consequence a user sees: an assigned task still
-  -- renders under Open. auto-core has no panel, so that property has no other
-  -- home.
-  --
-  -- This is NOT covered by the fixture above, and the reason is worth stating
-  -- because it is why the cell exists: the fixture now calls assign AND
-  -- status, so it ARRANGES the state it wants and observes the decoupling
-  -- nowhere. Setup is not pinning. Without this cell, someone "fixing" the
-  -- panel by re-adding the move — here, or by asking auto-core to revert
-  -- deliberate work — meets nothing. (gold-man, #28 r0.)
-  --
-  -- 2026-09-08: the `A` ACTION now does move an open task to in-progress
-  -- (Johno's requirement 5), and this cell still holds — deliberately. The
-  -- two are different subjects. `todo.assign` is the model operation an agent
-  -- calls when it delegates, and it must not claim on a peer's behalf that
-  -- work started; the `A` action is an operator picking a live agent and
-  -- dispatching a directive, which is a decision to start. See [40f] below
-  -- for the other half, and the comment at `_assign_task`'s status call.
+  -- ADR 1791532020 §2.3 (D1, Johno): assigning an open task makes it
+  -- in-progress in the same write, from every surface, decided once in
+  -- AutoDoc. It reverses ADR-0035 r5, which this cell used to pin. What only
+  -- this repo can assert is what a user sees: the assigned task renders under
+  -- In Progress.
   local id_asg = todo.add({ id = "2026-05-30-p40-assigned-only",
-                            title = "assigned but not started" })
+                            title = "assigned, so started" })
   todo.assign(id_asg, "agent:phase1")
   todo.refresh()
   vim.wait(150, function() return false end)
@@ -4664,8 +4651,11 @@ section(function()
   for _, row in ipairs(view._rows or {}) do
     if row.kind == "task" and row.task and row.task.id == id_asg then asg_row = row end
   end
-  ok("p40e: an assigned task is still status=open (assignment moved nothing)",
-    asg_row ~= nil and asg_row.task.status == "open",
+  -- D1 (ADR 1791532020 §2.3, Johno): assigning an open task makes it
+  -- in-progress in the SAME write, from every surface. This used to pin the
+  -- opposite (ADR-0035 r5); the cutover decided it once, in AutoDoc.
+  ok("p40e: an assigned open task is in-progress (D1: the assignment moved it)",
+    asg_row ~= nil and asg_row.task.status == "in-progress",
     "row=" .. tostring(asg_row ~= nil) .. " status="
       .. tostring(asg_row and asg_row.task.status))
 
@@ -4675,9 +4665,8 @@ section(function()
     if not ln_open and l:find("Open %(") then ln_open = i end
     if not ln_ip and l:find("In Progress %(") then ln_ip = i end
   end
-  ok("p40e: …and it renders UNDER Open, above the In Progress header",
-    asg_row and ln_open and ln_ip
-      and asg_row.lnum > ln_open and asg_row.lnum < ln_ip,
+  ok("p40e: …and it renders under In Progress",
+    asg_row and ln_open and ln_ip and asg_row.lnum > ln_ip,
     ("row lnum=%s, Open header=%s, In Progress header=%s")
       :format(tostring(asg_row and asg_row.lnum), tostring(ln_open), tostring(ln_ip)))
 
@@ -4685,11 +4674,9 @@ section(function()
   -- assigned, the auto-finder should trigger the task to move to
   -- 'in-progress' via auto-core command").
   --
-  -- Paired with 40e on purpose. 40e pins that `todo.assign` moves nothing;
-  -- this pins that the OPERATOR ACTION does. Either cell alone would be
-  -- satisfied by putting the move in the wrong layer — 40e by never moving
-  -- anything, this one by reinstating the auto-transition ADR-0035 r5
-  -- removed. Together they say WHERE the decision to start work is made.
+  -- Since the cutover the move happens in AutoDoc's assignment write (D1);
+  -- the cell pins that the panel makes ONE call for it, no separate status
+  -- change after it.
   --
   -- Driven through the bound `A` keymap rather than by calling the local, so
   -- what is exercised is the path a keypress takes.
@@ -4731,8 +4718,24 @@ section(function()
 
   if start_row and start_lnum and akm and vim.api.nvim_win_is_valid(panel_win) then
     vim.api.nvim_win_set_cursor(panel_win, { start_lnum, 0 })
+    -- Count what A sends: one todos.assign, and no separate todos.status
+    -- (D1 moves the task in the assignment's own write).
+    local daemon_m = require("auto-core.todo.daemon")
+    local sent = {}
+    daemon_m._set_transport(function(method, params, cb)
+      sent[#sent + 1] = method
+      daemon_m._real_request(method, params, cb)
+    end)
     pcall(akm.callback)
     vim.wait(200, function() return false end)
+    daemon_m._set_transport(nil)
+    local n_assign, n_status = 0, 0
+    for _, m in ipairs(sent) do
+      if m == "todos.assign" then n_assign = n_assign + 1 end
+      if m == "todos.status" then n_status = n_status + 1 end
+    end
+    ok("p40f: A sends one todos.assign and no todos.status", n_assign == 1 and n_status == 0,
+      vim.inspect(sent))
     local t_after = todo.get(id_start)
     ok("p40f: *** the assignee landed ***",
       t_after ~= nil and t_after.assignee == "agent:gold-man",
@@ -4785,9 +4788,8 @@ section(function()
   cleanup()
 end)
 
--- ─────────────────────── 41. ADR-0035 Phase 3 — diagnostics ──────────
--- Real-time vim.diagnostic validator for `.todo-list/automated/*.md`
--- buffers + bash-disabled panel row indicator.
+-- [41]/[42] (ADR-0035 automation diagnostics and scaffold) lived in
+-- tests/smoke-automation.lua; they went with automation (ADR 1791532020).
 -- ─────────── [43] ADR-0040 Batches A+B+E ───────────
 print("\n[43] ADR-0040 A+B+E — scope-safe window styling, surfaced failures, reopen-safe subscriptions")
 -- IIFE: the main chunk is near Lua's 200-active-locals limit; a
