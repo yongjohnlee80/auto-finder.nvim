@@ -20,6 +20,11 @@ removes `auto-core.todo`.
   `todos.stale`: the panel says so and reloads, and never retries. The shim
   read the task again just before writing, which let a stale row overwrite a
   newer change.
+- **One store per operation.** A multi-step operation resolves the project's
+  store once: add's scaffold and retried add, a load's archive months, and
+  set_dir's final resolution all stay on the store they started on, even if the
+  project switched while a step waited (#70; the class Lector found in
+  auto-agents #26).
 - **"AutoDoc required".** Without autodoc.nvim, or without the daemon, the
   panel shows "AutoDoc required" and how to come back (`R`), as the kb section
   does. With an auto-core older than v0.4.0 it says "update auto-core". There is
