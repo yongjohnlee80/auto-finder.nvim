@@ -1654,14 +1654,11 @@ end
 ---     to a default "Task assigned to you." reason so an
 ---     instruction-less assignment still pings the recipient with a
 ---     meaningful message.
----  4. Call `auto-core.todo.assign(id, mailbox_id, reason)` —
----     fires `core.todo.assignee:changed`; auto-agents'
----     subscriber routes a one-shot mailbox message into the
----     recipient's inbox carrying title, id, file path, and
----     the notes as `reason:`.
----  5. Move an `open` task to `in-progress` (Johno, 2026-09-08). See the
----     comment at the call site for why this is not the auto-transition
----     ADR-0035 r5 removed.
+---  4. Call `auto-core.todo.assign(id, mailbox_id, reason)`. AutoDoc
+---     writes it, and assigning an `open` task makes it `in-progress` in
+---     the same write (D1, ADR 1791532020 §2.3); auto-core's notifier
+---     sends the recipient its mailbox message (title, id, file path,
+---     and the notes as `Reason:`).
 ---
 ---No-op on non-task rows (vars / malformed / headers).
 ---@param row table?
@@ -1718,52 +1715,23 @@ local function _assign_task(row)
       -- cleanly without touching the task. (The earlier variant that
       -- `return`ed on BOTH nil and "" made an instruction-less
       -- assignment a silent no-op — no bucket move, no notification.)
-      --
-      -- "lands the open → in-progress move" was true when written, became
-      -- false at ADR-0035 r5, and is true again as of 2026-09-08 — but now
-      -- because THIS function makes the move explicitly below, not because
-      -- `todo.assign` does it as a side effect.
       if notes == nil then return end  -- ESC / cancel — leave task untouched
       local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
       local ok_todo, todo = pcall(require, "auto-core.todo")
       if not ok_todo or todo.get_todo_dir() ~= directory then return end
-      local _, err = todo.assign(row.task.id, choice.mailbox_id, reason)
-      if err then
+      local assigned, err = todo.assign(row.task.id, choice.mailbox_id, reason)
+      if err or not assigned then
         require("auto-finder.log").error("view.todos",
           "assign failed: " .. tostring(err))
         return
       end
 
-      -- ASSIGNING FROM THIS PANEL STARTS THE WORK (Johno, 2026-09-08: "once
-      -- the task is assigned, the auto-finder should trigger the task to move
-      -- to 'in-progress' via auto-core command").
-      --
-      -- This does NOT reinstate the auto-transition ADR-0035 r5 removed. That
-      -- amendment was about `todo.assign` itself: an agent handing a task to a
-      -- peer is delegating, and it must not claim on the peer's behalf that
-      -- work has started. An OPERATOR pressing `A` here is doing something
-      -- else — picking a live agent, typing a directive, and dispatching it —
-      -- and the task being left in `open` afterwards meant the panel showed
-      -- nothing happening while an agent was already working on it.
-      --
-      -- So `todo.assign` stays status-neutral and the UI action that means
-      -- "start this" is explicit, which is exactly the shape r5 asked for.
-      -- Only from `open`: a task already `in-progress`, `blocked` or
-      -- `completed` is not moved backwards by a re-assignment.
-      local moved = false
-      if row.task.status == "open" then
-        local _, serr = todo.status(row.task.id, "in-progress")
-        if serr then
-          -- The assignment LANDED and the recipient was notified; only the
-          -- bucket move failed. Report it without pretending the whole
-          -- action failed, and without claiming the move happened.
-          require("auto-finder.log").error("view.todos",
-            "assigned, but could not move to in-progress: " .. tostring(serr))
-        else
-          moved = true
-        end
-      end
+      -- ASSIGNING STARTS THE WORK (Johno, 2026-09-08), now from every
+      -- surface: AutoDoc moves an `open` task to `in-progress` in the same
+      -- write as the assignment (D1, ADR 1791532020 §2.3). The panel no
+      -- longer makes a second, separate status call.
+      local moved = row.task.status == "open" and assigned.status == "in-progress"
 
       require("auto-finder.log").notify(
         string.format("assigned '%s' to %s%s%s",
