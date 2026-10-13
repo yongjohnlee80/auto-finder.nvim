@@ -10,8 +10,13 @@ local function check(name, condition)
   if condition then passed = passed + 1 else failed = failed + 1 end
   io.stdout:write((condition and "  PASS  " or "  FAIL  ") .. name .. "\n")
 end
+-- auto-core.todo forwards to AutoDoc's daemon (ADR 1791532020): a daemon of
+-- this suite's own.
+local autodoc_ok, autodoc_why = dofile(root .. "/tests/_autodoc.lua")(sandbox, "loading")
+check("AutoDoc is set up (" .. tostring(autodoc_why or "ok") .. ")", autodoc_ok)
 local todo = require("auto-core.todo")
 local dir = sandbox .. "/tasks"
+vim.fn.mkdir(dir, "p") -- set_todo_dir needs an existing directory (auto-core v0.3.4)
 todo.set_todo_dir(dir)
 local active = assert(todo.add({ title = "Active task" }))
 local archived = assert(todo.add({ title = "Archived task" }))
@@ -25,21 +30,30 @@ if vim.env.AF_TODOS_BASELINE == "1" then
   view = assert(loadstring(baseline.stdout, "@committed-todos-view"))()
 end
 local md = require("auto-core.todo.md")
-local decode, reads = md.decode, 0
-md.decode = function(...)
-  reads = reads + 1
-  return decode(...)
-end
+-- AutoDoc's daemon decodes the files now (ADR 1791532020); what the panel
+-- controls is when it asks. Count the listings it sends, and inject a
+-- listing failure on demand.
+local daemon = require("auto-core.todo.daemon")
+local reads, fail_list = 0, false
+daemon._set_transport(function(method, params, cb)
+  if method == "todos.list" then
+    reads = reads + 1
+    if fail_list then return cb(nil, { message = "injected listing failure" }) end
+  end
+  daemon._real_request(method, params, cb)
+end)
+reads = 0
 local b = view.get_buffer(0)
-check("mount does not decode task files", reads == 0)
+check("mount does not list the store", reads == 0)
 check("mount displays loading placeholder", table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n"):find("Loading", 1, true) ~= nil)
 view.on_focus(0, b)
-check("focus does not decode task files synchronously", reads == 0)
+check("focus does not list the store synchronously", reads == 0)
 check("eventual render includes active, archived and malformed files", vim.wait(3000, function()
   local text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   return text:find("Active task", 1, true) and text:find("Archived", 1, true) and text:find("broken.md", 1, true) and not view._loading
 end, 5))
-check("first mount scans each file once", reads == 3)
+-- one listing of the active buckets, one of the archive's months, one per month
+check("first mount lists once: active, the months, the one month", reads == 3)
 local original_scan = todo.scan
 local scans = 0
 todo.scan = function(...)
@@ -50,7 +64,6 @@ view.on_focus(0, b)
 view.on_close()
 vim.wait(100, function() return false end, 5)
 check("closing cancels pending load", scans == 0 and view._bufnr == nil)
-md.decode = decode
 todo.scan = original_scan
 
 if type(todo.scan_async) == "function" then
@@ -76,24 +89,20 @@ if type(todo.scan_async) == "function" then
     vim.fn.writefile(vim.split(md.encode(task), "\n", { plain = true }),
       archive_dir .. "/" .. task.id .. ".md")
   end
-  local heartbeat, decode_count, yielded, done = false, 0, false, false
-  md.decode = function(...)
-    decode_count = decode_count + 1
-    if decode_count == 1 then vim.schedule(function() heartbeat = true end) end
-    if decode_count > 32 and heartbeat then yielded = true end
-    return decode(...)
-  end
+  local heartbeat, beat_before_archive, done = false, nil, false
   local active_first = false
   todo.scan_async(function(result, complete)
     if not complete then active_first = #result.tasks == 1 end
+    if complete then beat_before_archive = heartbeat end
     done = complete
   end)
+  vim.schedule(function() heartbeat = true end)
   check("large archive finishes", vim.wait(3000, function() return done end, 5))
-  check("large archive yields to the editor between batches", yielded)
-  check("active result precedes archive decoding", active_first)
-  md.decode = decode
+  check("the editor runs while the archive is read", beat_before_archive == true)
+  check("active result precedes the archive", active_first)
 
   local other_dir = sandbox .. "/other-tasks"
+  vim.fn.mkdir(other_dir, "p") -- set_todo_dir needs an existing directory
   todo.set_todo_dir(other_dir)
   local shared = assert(todo.add({ title = "Active task" }))
   check("two stores share the same task id", shared == active)
@@ -191,13 +200,13 @@ if type(todo.scan_async) == "function" then
       return not view._loading and content:find("Different location", 1, true) ~= nil
     end, 5))
 
-  md.decode = function() error("injected decoder failure") end
+  fail_list = true
   local focus_ok = pcall(view.on_focus, 0, b)
-  check("decoder failure ends loading", focus_ok and vim.wait(3000, function() return not view._loading end, 5))
-  check("decoder failure is visible and does not retain stale rows",
+  check("a listing failure ends loading", focus_ok and vim.wait(3000, function() return not view._loading end, 5))
+  check("a listing failure is visible and does not retain stale rows",
     vim.api.nvim_buf_get_lines(b, 0, 1, false)[1]:find("loading failed", 1, true) ~= nil
       and #view._rows == 0)
-  md.decode = decode
+  fail_list = false
   view.on_focus(0, b)
   check("loading recovers after failure", vim.wait(3000, function()
     local content = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
@@ -207,12 +216,8 @@ if type(todo.scan_async) == "function" then
 
   todo.scan_async = nil
   reads = 0
-  md.decode = function(...)
-    reads = reads + 1
-    return decode(...)
-  end
   b = view.get_buffer(0)
-  check("older-core fallback mounts without synchronous decoding", reads == 0)
+  check("older-core fallback mounts without a synchronous listing", reads == 0)
   check("older-core fallback eventually renders", vim.wait(3000, function()
     local content = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
     return not view._loading and content:find("Different location", 1, true) ~= nil
@@ -235,7 +240,6 @@ if type(todo.scan_async) == "function" then
     return not view._loading and content:find("Active task", 1, true) ~= nil
   end, 5))
   todo.scan_async = async_scan
-  md.decode = decode
   view.on_close()
 else
   check("core provides cooperative async scanner", false)
