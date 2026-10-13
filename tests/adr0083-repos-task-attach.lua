@@ -54,8 +54,9 @@ end
 
 local tree = require("auto-finder.views.repos.tree")
 local logger = require("auto-finder.log")
-local todo_api = require("auto-core.todo")
-local todo_paths = require("auto-core.todo.paths")
+-- The repos panel reaches the todo store through the todos panel's door to
+-- AutoDoc's daemon (ADR 1791532020 §3 step 4); the cells stub that door.
+local door = require("auto-finder.views.todos.store")
 
 -- Capture notifications
 local notes = {}
@@ -108,13 +109,15 @@ ok("ADR-0083: review row with missing path warns",
   vim.inspect(notes))
 
 -- 4. Review row with no in-progress tasks
-local saved_list = todo_api.list
-local saved_update = todo_api.update
+local saved_available, saved_call, saved_mutate = door.available, door.call, door.mutate
+door.available = function() return true end
+local CTX = { store = "/tmp/store" }
 
-todo_api.list = function(filter)
+door.call = function(verb, args, cb)
   ok("ADR-0083: queries tasks with status in-progress",
-    filter and filter.status == "in-progress")
-  return {}
+    verb == "list" and args[1] and args[1].buckets and args[1].buckets[1] == "in-progress"
+      and #args[1].buckets == 1, vim.inspect({ verb, args }))
+  cb({ tasks = {} }, nil, CTX)
 end
 
 notes = {}
@@ -132,15 +135,16 @@ local mock_tasks = {
   { id = "task-1", title = "Task One", status = "in-progress", review = nil },
   { id = "task-2", title = "Task Two", status = "in-progress", review = { "$KB_ROOT/existing.md" } },
 }
-todo_api.list = function(filter)
-  return mock_tasks
+door.call = function(_, _, cb)
+  cb({ tasks = vim.deepcopy(mock_tasks) }, nil, CTX)
 end
 
 local updated_id, updated_fields
-todo_api.update = function(id, fields)
-  updated_id = id
-  updated_fields = fields
-  return true, nil
+door.mutate = function(verb, task, extra, cb)
+  if verb ~= "update" then return cb(nil, "unexpected verb " .. tostring(verb)) end
+  updated_id = task.id
+  updated_fields = extra[1]
+  cb({ id = task.id })
 end
 
 local real_select = vim.ui.select
@@ -198,18 +202,25 @@ ok("ADR-0083: existing reviews preserved and new review appended",
   and updated_fields.review[2]:find("new-finding.md", 1, true) ~= nil,
   vim.inspect(updated_fields))
 
--- 7. Deduplication: attaching an already attached review
+ok("ADR-0083: the new review goes over the wire absolute (AutoDoc symbolizes it)",
+  updated_fields and updated_fields.review[2] == "/tmp/kb/new-finding.md",
+  vim.inspect(updated_fields))
+
+-- 7. Deduplication: attaching an already attached review writes nothing
 local dup_ref = updated_fields.review[2]
 mock_tasks[2].review = { "$KB_ROOT/existing.md", dup_ref }
 updated_id, updated_fields = nil, nil
+notes = {}
 
 tree.attach_review_to_task({
   kind = "review",
   review = { path = "/tmp/repo@abc.r1.review.json", document = dup_ref },
 })
-ok("ADR-0083: duplicate attachment avoided (length unchanged)",
-  updated_fields and #updated_fields.review == 2,
-  vim.inspect(updated_fields))
+ok("ADR-0083: duplicate attachment avoided (no update sent)",
+  updated_id == nil and updated_fields == nil, vim.inspect(updated_fields))
+ok("ADR-0083: … and the user is told the task already has it",
+  last_note() and last_note().msg:find("already has this review", 1, true) ~= nil,
+  vim.inspect(notes))
 
 -- 8. User cancellation (dismiss picker)
 vim.ui.select = function(items, opts, on_choice)
@@ -227,8 +238,8 @@ ok("ADR-0083: cancelling picker does not call update",
 vim.ui.select = function(items, opts, on_choice)
   on_choice(items[1])
 end
-todo_api.update = function(id, fields)
-  return nil, "disk full"
+door.mutate = function(_, _, _, cb)
+  cb(nil, "disk full")
 end
 notes = {}
 tree.attach_review_to_task({
@@ -241,8 +252,7 @@ ok("ADR-0083: update error reported via ERROR log",
   vim.inspect(notes))
 
 -- Restore mocks
-todo_api.list = saved_list
-todo_api.update = saved_update
+door.available, door.call, door.mutate = saved_available, saved_call, saved_mutate
 vim.ui.select = real_select
 logger.notify = real_notify
 

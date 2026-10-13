@@ -116,7 +116,11 @@ processing — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
   and the `fs.atomic` write primitive that auto-finder's persistence
   delegates to). **Hard dep**, `^0.2.30` (the release that carries
   `fs.scan` and `git.status.get_async`). The **todos** view needs
-  **v0.4.0** or later (the shim that forwards to AutoDoc), so pin `^0.4.0`.
+  **v0.4.0** or later (its store resolution, `auto-core.todo.where`), so pin
+  `^0.4.0`.
+- [AutoDoc](https://github.com/yongjohnlee80/autodoc) — required by the
+  **todos** view: autodoc.nvim **v0.1.39** or later and its binary. The panel
+  calls AutoDoc's daemon itself; without it the panel says "AutoDoc required".
 - [`nvim-tree/nvim-web-devicons`](https://github.com/nvim-tree/nvim-web-devicons)
   (or `mini.icons` with its devicons mock) — **optional**, recommended.
   Without it, directories and files get plain glyphs.
@@ -645,25 +649,37 @@ work — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 ## Todos view — a view over AutoDoc's todo store
 
 AutoDoc's daemon owns the todo system: the task format, its rules and every
-write (ADR 1791532020). The panel reads and changes tasks through
-`auto-core.todo` (**v0.4.0 or later**, which forwards to the daemon) and writes
-nothing under a `.todo-list/` itself.
+write (ADR 1791532020). The panel calls the daemon's `todos.*` verbs itself,
+through autodoc.nvim's client (`autodoc.todos`), and writes nothing under a
+`.todo-list/`. auto-core (**v0.4.0 or later**) only says where this project's
+store is (`auto-core.todo.where`), and claims it the first time.
+
+Each write names the `rev` of the task the panel listed. A task changed since
+(by an agent, or by hand) is refused (`todos.stale`), and the panel says so and
+reloads instead of overwriting the change.
+
+Without AutoDoc, the panel says "AutoDoc required", as the kb section does.
+There is no Lua fallback.
 
 | Key | Does |
 |---|---|
 | `a` | add a task (or a variable in the Vars section) |
 | `s` | set the status: open, in-progress, completed, deferred, archived |
 | `A` | assign to a spawned agent; an `open` task becomes `in-progress` in the same write, and the agent is told |
-| `d` | remove a task; on a malformed row, AutoDoc deletes the file (`todo.remove_malformed`) |
-| `M` | move the store (`todo.move_store`, which keeps its claim and change log), or switch to an existing directory (`todo.set_todo_dir`). The parent must exist: the panel creates no directories |
-| `R` | ask AutoDoc to reconcile the store (`todo.refresh`) |
+| `d` | remove a task; on a malformed row, AutoDoc deletes the file (`todos.remove_malformed`) |
+| `M` | move the store (`todos.move_store`, which keeps its claim and change log), or switch to an existing directory (`todos.set_dir`). The parent must exist: the panel creates no directories |
+| `R` | ask AutoDoc to reconcile the store (`todos.refresh`); also the retry after "AutoDoc required" |
 
 Automation (`automated` templates, the `condition:` / `execute:` fields, cron
 firing) was **removed**. AutoDoc lists a file that still uses it as malformed,
 with the reason, and never deletes it.
 
-With an auto-core older than v0.4.0, the malformed-file delete and `M` say
-"update auto-core". They never fall back to writing files themselves.
+A relative `adr:` / `review:` ref opens under the KB root only (D2), the rule
+AutoDoc's validator uses. The old KB, then workspace, then cwd fallback is
+gone.
+
+With an auto-core older than v0.4.0, the panel and `M` say "update auto-core".
+They never fall back to reading or writing the files themselves.
 
 ## Development
 

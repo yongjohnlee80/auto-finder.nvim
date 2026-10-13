@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# tests/todos-cutover-mutants.sh — every write the todo cutover replaced
-# (ADR 1791532020 §3 step 3) must be load-bearing in its suite: a direct write
-# coming back, or an auto-core.todo call dropped, must turn a cell red.
+# tests/todos-cutover-mutants.sh — every rule of the todo cutover must be
+# load-bearing in its suite (ADR 1791532020 §3 steps 3 and 4): a direct write
+# coming back, a daemon verb dropped, the shim used again, the stale guard
+# lost, "AutoDoc required" gone or D2's fallback back must turn a cell red.
 #
 # Copies the tree NEXT TO this checkout (the suites find auto-core, autodoc and
 # the other family plugins two directories up), applies ONE mutation, runs the
@@ -43,22 +44,29 @@ for s in tests/todos-cutover.lua tests/smoke.lua; do
 done
 
 V=lua/auto-finder/views/todos/init.lua
+D=lua/auto-finder/views/todos/store.lua
 C=tests/todos-cutover.lua
 S=tests/smoke.lua
 # file|suite|name|old|new — literal strings; old must occur exactly once.
+# (No mutant re-adds a require of auto-core.todo: auto-core v0.4.1 removes the
+# module, so such a mutant would load nothing and survive there. The cutover
+# suite's "never required" cells guard it while the pinned auto-core ships it.)
 mutants=(
-  "$V|$C|the malformed unlink comes back|local pcall_ok, removed, err = pcall(todo_m.remove_malformed, row.filepath)|local pcall_ok, removed, err = pcall(vim.uv.fs_unlink, row.filepath)"
-  "$V|$C|remove_malformed is not called|local pcall_ok, removed, err = pcall(todo_m.remove_malformed, row.filepath)|local pcall_ok, removed, err = true, true, nil"
-  "$V|$C|an older auto-core falls back to the unlink|      require(\"auto-finder.log\").error(\"view.todos\", M.NEEDS_AUTOCORE)\n      return\n    end\n    local choice|      vim.uv.fs_unlink(row.filepath)\n      return\n    end\n    local choice"
-  "$V|$C|the store rename comes back|      okm, merr = pcall(todo.move_store, new_path)|      okm, merr = pcall(vim.uv.fs_rename, current, new_path)"
-  "$V|$C|move_store is not called (switch instead)|      okm, merr = pcall(todo.move_store, new_path)|      okm, merr = pcall(todo.set_todo_dir, new_path)"
+  "$V|$C|the malformed unlink comes back|    store.remove_malformed(row.relpath, function(ok, err)|    vim.uv.fs_unlink(row.filepath); (function(cb) cb(true) end)(function(ok, err)"
+  "$V|$C|remove_malformed is not called|    store.remove_malformed(row.relpath, function(ok, err)|    (function(cb) cb(true) end)(function(ok, err)"
+  "$V|$C|the store rename comes back|      store.move_store(new_path, function(moved, err) done(moved ~= nil, err) end)|      done(vim.uv.fs_rename(current, new_path), \"renamed\")"
+  "$V|$C|move_store is not called (switch instead)|      store.move_store(new_path, function(moved, err) done(moved ~= nil, err) end)|      store.set_dir(new_path, done)"
   "$V|$C|the parent mkdir comes back|      local parent = fs_path.parent(new_path)\n      if not fs_path.is_dir(parent) then|      local parent = fs_path.parent(new_path)\n      vim.fn.mkdir(parent, \"p\")\n      if not fs_path.is_dir(parent) then"
   "$V|$C|neither exists: the panel makes the directory|    else\n      require(\"auto-finder.log\").error(\"view.todos\",\n        \"migrate: neither \"|    else\n      vim.fn.mkdir(new_path, \"p\"); action = \"switch_only\"\n    end\n    if false then\n      require(\"auto-finder.log\").error(\"view.todos\",\n        \"migrate: neither \""
-  "$V|$C|a scaffold write after a status change comes back|        \"status failed: \" .. tostring(err_str))\n      return\n    end|        \"status failed: \" .. tostring(err_str))\n      return\n    end\n    require(\"auto-core.fs.atomic\").write(task_or_err.file_path, \"scaffold\\\\n\")"
-  "$V|$C|the promote-to-automated hook comes back|\nreturn M\n|\nrequire(\"auto-core.events\").subscribe(\"core.todo.status:changed\", function(p)\n  if p and p.to == \"automated\" then\n    local t = require(\"auto-core.todo\").get(p.id)\n    if t then require(\"auto-core.fs.atomic\").write(t.file_path, \"defaults\\\\n\") end\n  end\nend)\nreturn M\n"
-  "$V|$C|the message names the wrong auto-core (v0.3.4)|M.NEEDS_AUTOCORE = \"auto-finder.todos: this needs auto-core v0.4.0 or later|M.NEEDS_AUTOCORE = \"auto-finder.todos: this needs auto-core v0.3.4 or later"
+  "$V|$C|a scaffold write after a status change comes back|      store.follow(row.task, task)|      store.follow(row.task, task)\n      require(\"auto-core.fs.atomic\").write(task.file_path, \"scaffold\\\\n\")"
+  "$V|$C|the promote-to-automated hook comes back|\nreturn M\n|\nrequire(\"auto-core.events\").subscribe(\"core.todo.status:changed\", function(p)\n  if p and p.to == \"automated\" then\n    local t = M._by_id and M._by_id[p.id]\n    if t then require(\"auto-core.fs.atomic\").write(t.file_path, \"defaults\\\\n\") end\n  end\nend)\nreturn M\n"
+  "$D|$C|the message names the wrong auto-core (v0.3.4)|M.NEEDS_AUTOCORE = \"the todos panel needs auto-core v0.4.0 or later|M.NEEDS_AUTOCORE = \"the todos panel needs auto-core v0.3.4 or later"
   "$V|$C|automated is offered again|local STATUS_CHOICES = { \"open\", \"in-progress\", \"completed\", \"deferred\", \"archived\" }|local STATUS_CHOICES = { \"open\", \"in-progress\", \"automated\", \"completed\", \"deferred\", \"archived\" }"
-  "$V|$S|A follows the assignment with its own status call|      local moved = row.task.status == \"open\" and assigned.status == \"in-progress\"|      local moved = row.task.status == \"open\" and assigned.status == \"in-progress\"\n      todo.status(row.task.id, \"in-progress\")"
+  "$V|$S|A follows the assignment with its own status call|        local moved = row.task.status == \"open\" and assigned.status == \"in-progress\"|        local moved = row.task.status == \"open\" and assigned.status == \"in-progress\"\n        store.mutate(\"status\", assigned, { \"in-progress\" }, function() end)"
+  "$D|$C|a write re-reads the rev (the stale guard is lost)|  local args = { task.id, task.rev }|  if not task._fresh then\n    return M.call(\"get\", { task.id }, function(cur)\n      M.mutate(verb, vim.tbl_extend(\"force\", task, { rev = cur and cur.rev, _fresh = true }), extra, cb)\n    end)\n  end\n  local args = { task.id, task.rev }"
+  "$V|$C|AutoDoc missing: no \"AutoDoc required\" screen|    _show_message(bufnr, M.REQUIRED_LINES(why))|    _show_message(bufnr, { \"Loading todos…\" })"
+  "$V|$S|D2: the workspace fallback for relative refs comes back|  local kb = _kb_root()|  local ws = require(\"auto-core.todo.where\").root() .. \"/\" .. ref\n  if vim.fn.filereadable(ws) == 1 then return ws end\n  local kb = _kb_root()"
+  "$D|$C|open buffers stay on the old path|    pcall(buffers.retarget, from, to)|    local _ = buffers"
 )
 
 killed=0; survived=0; broken=0; i=0
