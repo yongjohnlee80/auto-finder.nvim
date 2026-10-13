@@ -122,17 +122,31 @@ end
 function M.call(verb, args, cb)
   M.context(function(ctx, cerr)
     if not ctx then return cb(nil, cerr) end
-    local d = deps()
-    if not d then return cb(nil, M.REQUIRED) end
-    local params = { ctx.at }
-    for i = 1, #(args or {}) do params[i + 1] = args[i] end
-    local ok, perr = pcall(d.todos.call, verb, params, function(res, err)
-      res, err = d.daemon.normalize(res), d.daemon.normalize(err)
-      if M.is(err, M.UNCLAIMED) then d.where.reset(ctx.root) end
-      cb(res, err, ctx)
-    end)
-    if not ok then cb(nil, "autodoc: " .. tostring(perr), ctx) end
+    M.call_at(ctx, verb, args, cb)
   end)
+end
+
+---call_at runs todos.<verb>(ctx.at, …) on the store a previous call resolved,
+---without resolving the project again. ONE STORE PER OPERATION: a sequence
+---(add → scaffold → add; a load's active buckets, then its months) resolves
+---once and sends every later step here, so a project switch while one step
+---waits cannot send the next to another project's store (Lector, auto-agents
+---#26 r1 P2: the same class).
+---@param ctx table a ctx a previous call answered
+---@param verb string
+---@param args any[]
+---@param cb fun(result: any, err: any, ctx: table)
+function M.call_at(ctx, verb, args, cb)
+  local d = deps()
+  if not d then return cb(nil, M.REQUIRED, ctx) end
+  local params = { ctx.at }
+  for i = 1, #(args or {}) do params[i + 1] = args[i] end
+  local ok, perr = pcall(d.todos.call, verb, params, function(res, err)
+    res, err = d.daemon.normalize(res), d.daemon.normalize(err)
+    if M.is(err, M.UNCLAIMED) then d.where.reset(ctx.root) end
+    cb(res, err, ctx)
+  end)
+  if not ok then cb(nil, "autodoc: " .. tostring(perr), ctx) end
 end
 
 ---file_path is a daemon task's absolute path in the store ctx names.
@@ -200,7 +214,7 @@ function M.load(on_part)
       add(active)
       on_part(snap, false)
       if cancelled then return end
-      M.call("list", { { buckets = { "archived" } } }, function(months, merr)
+      M.call_at(snap.ctx, "list", { { buckets = { "archived" } } }, function(months, merr)
         if cancelled then return end
         if merr then return fail(merr) end
         local wanted = {}
@@ -217,7 +231,7 @@ function M.load(on_part)
             cancelled = true
             return on_part(snap, true)
           end
-          M.call("list", { { buckets = { "archived/" .. wanted[i] } } }, function(listing, lerr)
+          M.call_at(snap.ctx, "list", { { buckets = { "archived/" .. wanted[i] } } }, function(listing, lerr)
             if cancelled then return end
             if lerr then return fail(lerr) end
             add(listing)
@@ -249,9 +263,9 @@ end
 function M.add(spec, cb)
   M.call("add", { spec }, function(task, err, ctx)
     if M.is(err, M.NOT_A_STORE) then
-      return M.call("scaffold", {}, function(_, serr)
+      return M.call_at(ctx, "scaffold", {}, function(_, serr)
         if serr then return cb(nil, M.format(serr)) end
-        M.call("add", { spec }, function(t2, err2, ctx2)
+        M.call_at(ctx, "add", { spec }, function(t2, err2, ctx2)
           if err2 then return cb(nil, M.format(err2)) end
           t2.file_path = M.file_path(ctx2, t2)
           cb(t2)
