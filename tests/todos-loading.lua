@@ -13,7 +13,10 @@ local sandbox = dofile(root .. "/tests/_sandbox.lua")("todos-loading")
 local passed, failed = 0, 0
 local function check(name, condition)
   if condition then passed = passed + 1 else failed = failed + 1 end
-  io.stdout:write((condition and "  PASS  " or "  FAIL  ") .. name .. "\n")
+  -- Start on a line of our own: output without a trailing newline (the
+  -- daemon's start) would otherwise glue onto the line, and run-all's
+  -- "^  PASS" / "^  FAIL" count would miss it.
+  io.stdout:write("\n", (condition and "  PASS  " or "  FAIL  ") .. name .. "\n")
 end
 -- A daemon of this suite's own.
 local autodoc_ok, autodoc_why = dofile(root .. "/tests/_autodoc.lua")(sandbox, "loading")
