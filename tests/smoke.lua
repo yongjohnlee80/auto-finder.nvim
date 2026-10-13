@@ -4025,6 +4025,10 @@ section(function()
   ok("event-driven re-render: 'First open task' now under Completed bucket",
     panel_shows(b, "Completed %(2%).-First open task.-%(2026%-05%-25%-foo%)"),
     table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n"))
+  -- The text matched on the load's first (active-buckets) render; let its
+  -- archive half finish while visible, so the hidden-gate cell below sees
+  -- only what happens while the panel is hidden.
+  await_todos(view)
   ok("no-hijack: current window unchanged after event-driven re-render",
     vim.api.nvim_get_current_win() == pre_event_win,
     "expected " .. pre_event_win .. ", got " .. vim.api.nvim_get_current_win())
