@@ -567,9 +567,6 @@ local function _render(bufnr, snapshot)
     end
   end
 
-  vim.bo[bufnr].modifiable = true
-  vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
-
   local grouped, malformed = _collect_grouped(snapshot)
   local rows    = {}     -- accumulating M._rows
   local lines   = {}     -- text lines we'll buf_set after the loop
@@ -1097,6 +1094,13 @@ local function _render(bufnr, snapshot)
     end
   end
 
+  -- Writable only for the write itself. Reading the tasks (and resolving a
+  -- row's refs) asks AutoDoc's daemon, and a synchronous auto-core.todo call
+  -- waits with vim.wait, which runs other scheduled work: another render of
+  -- this buffer can finish meanwhile and set it read-only again.
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  vim.bo[bufnr].modifiable = true
+  vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
   for _, mk in ipairs(marks) do
     _hl(bufnr, mk[1], mk[2], mk[3], mk[4])
