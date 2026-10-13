@@ -2126,15 +2126,21 @@ local function _refresh(bufnr)
   _render(bufnr)
 end
 
----`M` action: migrate the `.todo-list/` directory to a new location
----and re-point auto-core's per-workspace override at it. Atomic at
----the filesystem level (uses `vim.uv.fs_rename`) — refuses to
----clobber an existing target. When the current todo dir doesn't
----exist on disk yet (no tasks created), the migration is just a
----`set_todo_dir` — no filesystem move needed.
+---`M` action: migrate the `.todo-list/` directory to a new location.
+---AutoDoc does the filesystem work (ADR 1791532020 §2.3): a move is
+---`auto-core.todo.move_store`, which refuses an existing target and keeps
+---the store's claim, change log and cursors; "switch only" is
+---`auto-core.todo.set_todo_dir`, which needs an existing directory. The
+---panel never renames, creates or deletes a directory itself: a missing
+---parent (or, for a switch, a missing target) is refused with a message
+---(jarvis, 2026-10-13).
 local function _migrate_dir()
   local ok_todo, todo = pcall(require, "auto-core.todo")
   if not ok_todo then return end
+  if type(todo.move_store) ~= "function" then
+    require("auto-finder.log").error("view.todos", M.NEEDS_AUTOCORE)
+    return
+  end
   local ok_path, fs_path = pcall(require, "auto-core.fs.path")
   if not ok_path then return end
 
@@ -2173,20 +2179,12 @@ local function _migrate_dir()
     local current_exists = fs_path.is_dir(current)
     local target_exists  = fs_path.exists(new_path)
 
-    -- v0.2.44: decide the action up front. Three shapes:
-    --   * both exist            → 3-option confirm (Move+switch is
-    --                              disabled here because we won't
-    --                              clobber; offer Switch only or Cancel)
-    --   * only current exists   → move + switch (single Yes/No)
-    --   * only target exists    → switch only (single Yes/No)
-    --   * neither exists        → switch only (the target will be
-    --                              created lazily on first add)
-    --
-    -- "Switch only" is the cross-machine workflow: you pulled a
-    -- shared `.todo-list/` from git into the KB and want THIS
-    -- workspace's local override to point at it. The local files
-    -- (if any) stay where they are — orphaned in the panel until
-    -- you switch back — so the prompt explicitly calls that out.
+    -- Three shapes, decided up front:
+    --   * both exist          → switch only (a move would clobber)
+    --   * only current exists → move + switch (AutoDoc moves it)
+    --   * only target exists  → switch only
+    --   * neither exists      → refused: switch needs an existing
+    --                           directory, and the panel creates none
     local action  -- "move_switch" | "switch_only"
 
     if current_exists and target_exists then
@@ -2203,54 +2201,47 @@ local function _migrate_dir()
       action = "switch_only"
 
     elseif current_exists then
+      local parent = fs_path.parent(new_path)
+      if not fs_path.is_dir(parent) then
+        require("auto-finder.log").error("view.todos",
+          "migrate: the parent directory " .. parent .. " does not exist; "
+            .. "create it first (the panel creates no directories)")
+        return
+      end
       local choice = vim.fn.confirm(
         string.format(
-          "Move\n   %s\n → %s\n\nThe per-workspace override will be updated.",
+          "Move\n   %s\n → %s\n\nAutoDoc moves the store; the per-workspace override will be updated.",
           current, new_path),
         "&Yes\n&No", 2)
       if choice ~= 1 then return end
       action = "move_switch"
 
-    else
+    elseif target_exists then
       local choice = vim.fn.confirm(
         string.format(
-          target_exists
-            and "Switch the per-workspace override to:\n   %s\n\n(target already exists; no files will be moved)"
-            or  "No tasks to move (%s does not exist).\nSet the per-workspace override to:\n   %s",
-          target_exists and new_path or current,
+          "Switch the per-workspace override to:\n   %s\n\n(target already exists; no files will be moved)",
           new_path),
         "&Yes\n&No", 2)
       if choice ~= 1 then return end
       action = "switch_only"
+
+    else
+      require("auto-finder.log").error("view.todos",
+        "migrate: neither " .. current .. " nor " .. new_path .. " exists; "
+          .. "create " .. new_path .. " first (the panel creates no directories)")
+      return
     end
 
-    -- Ensure target's parent dir exists so fs_rename can place it
-    -- (only needed for the move path — switch_only doesn't touch
-    -- the filesystem).
+    local okm, merr
     if action == "move_switch" then
-      local parent = fs_path.parent(new_path)
-      if not fs_path.is_dir(parent) then
-        local mkok, mkerr = pcall(vim.fn.mkdir, parent, "p")
-        if not mkok then
-          require("auto-finder.log").error("view.todos",
-            "migrate: could not create parent '" .. parent
-            .. "': " .. tostring(mkerr))
-          return
-        end
-      end
-
-      local ok, err = vim.uv.fs_rename(current, new_path)
-      if not ok then
-        require("auto-finder.log").error("view.todos",
-          "migrate: rename failed: " .. tostring(err)
-          .. "\n(cross-filesystem moves need a manual copy+delete)")
-        return
-      end
+      okm, merr = pcall(todo.move_store, new_path)
+    else
+      okm, merr = pcall(todo.set_todo_dir, new_path)
     end
-
-    -- Update auto-core's per-workspace override so future calls
-    -- resolve to the new location.
-    todo.set_todo_dir(new_path)
+    if not okm then
+      require("auto-finder.log").error("view.todos", "migrate failed: " .. tostring(merr))
+      return
+    end
 
     -- Success path — INFO toast (notify=true so it always toasts;
     -- INFO normally wouldn't per the default should_toast rule, but
