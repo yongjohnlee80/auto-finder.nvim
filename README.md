@@ -63,7 +63,7 @@ list them in `opts.sections`):
 |---|---|---|
 | **buffers** | — | Open-buffer list as a tree: the cwd, then terminals, then one bucket per outside location. Mirrors `:ls`, including unloaded buffers added via `:badd` or session restore. *Solves: `:ls` as a navigable tree.* |
 | **marks** | — | nvim marks browser. *Solves: marks you set and then forgot.* |
-| **todos** | — | The auto-core task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. See [Automation](#automation-todo-listautomated). *Solves: tracking work in the repo instead of a browser tab.* |
+| **todos** | auto-core **≥ v0.3.4** and [AutoDoc](https://github.com/yongjohnlee80/autodoc) | The task store: one file per task, status by directory. Rows expand to a task's full frontmatter — assignee, priority, tags, and `adr:` / `review:` document refs you can open straight from the panel. AutoDoc's daemon owns every write; see [Todos view](#todos-view--a-view-over-autodocs-todo-store). *Solves: tracking work in the repo instead of a browser tab.* |
 | **dbase** | [`autodb`](https://github.com/yongjohnlee80/autodb) **≥ v0.3.0** | autodb's database explorer, hosted in the panel — connections, workspaces, notes and script history. See [DBase view](#dbase-view--autodb-inside-the-panel). *Solves: querying a managed database without a second application.* |
 | **tests** / **debug** | [`auto-run.nvim`](https://github.com/yongjohnlee80/auto-run.nvim) | The ADR-0048 pair: a discovered test tree with per-row status glyphs, and a debug view over entry points (edited in place; `launch.json` imports into them), live dap sessions and persisted breakpoints — both headed by the state a run will use (active worktree, env file, base, test config). See [Tests & Debug views](#tests--debug-views-auto-run). *Solves: running and debugging without a terminal round-trip.* |
 
@@ -641,23 +641,28 @@ per-event-source detection + processing walkthrough,
 auto-core dependency surface, lifecycle, pointers for new
 work — see [`ARCHITECTURE.md`](./ARCHITECTURE.md).
 
-## Automation (`.todo-list/automated/`)
+## Todos view — a view over AutoDoc's todo store
 
-The todos view doubles as a scheduled-task engine: drop a
-`status: automated` template under
-`<workspace>/.todo-list/automated/<id>.md`, declare cron or
-event conditions + an execute plan, and the engine clones it
-into a fresh task on every condition match. Each clone goes
-through the normal `open → in-progress → completed` lifecycle
-so every fire leaves an audit trail.
+AutoDoc's daemon owns the todo system: the task format, its rules and every
+write (ADR 1791532020). The panel reads and changes tasks through
+`auto-core.todo` (**v0.3.4 or later**, which forwards to the daemon) and writes
+nothing under a `.todo-list/` itself.
 
-Author templates with cron + event conditions, plain `bash` /
-`bash -t=<N>` (floating-terminal-routed) / `assign agent:<name>`
-execute primitives, a workspace-scoped bash trust gate, and
-real-time `vim.diagnostic` validation as you type — full
-how-to with examples, the cron grammar, the trust-gate flow,
-debugging recipes, and the manual-fire / inspection commands
-is in **[`AUTOMATION.md`](./AUTOMATION.md)**.
+| Key | Does |
+|---|---|
+| `a` | add a task (or a variable in the Vars section) |
+| `s` | set the status: open, in-progress, completed, deferred, archived |
+| `A` | assign to a spawned agent; an `open` task becomes `in-progress` in the same write, and the agent is told |
+| `d` | remove a task; on a malformed row, AutoDoc deletes the file (`todo.remove_malformed`) |
+| `M` | move the store (`todo.move_store`, which keeps its claim and change log), or switch to an existing directory (`todo.set_todo_dir`). The parent must exist: the panel creates no directories |
+| `R` | ask AutoDoc to reconcile the store (`todo.refresh`) |
+
+Automation (`automated` templates, the `condition:` / `execute:` fields, cron
+firing) was **removed**. AutoDoc lists a file that still uses it as malformed,
+with the reason, and never deletes it.
+
+With an auto-core older than v0.3.4, the malformed-file delete and `M` say
+"update auto-core". They never fall back to writing files themselves.
 
 ## Development
 

@@ -2,6 +2,35 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — the todo cutover: the panel writes nothing under .todo-list
+
+Released as v0.5.9 in the cutover set (ADR 1791532020 §3 step 3). **Requires
+auto-core v0.3.4** (the forwarding shim) and AutoDoc; do not ship it alone.
+
+- **No direct writes.** Every write under a `.todo-list/` now goes through
+  auto-core.todo to AutoDoc's daemon:
+  - deleting a malformed file (`d` on a malformed row) was a `uv.fs_unlink`; it
+    is `todo.remove_malformed`, which AutoDoc journals, and which refuses a file
+    that uses the removed automation fields;
+  - `M` (move the store) was `mkdir -p` of the parent plus `uv.fs_rename`; it is
+    `todo.move_store` (the store keeps its claim, change log and cursors), or
+    `todo.set_todo_dir` for "switch only". A missing parent, or a switch to a
+    directory that does not exist, is refused: the panel creates no directories;
+  - the promote-to-automated scaffold (an `fs.atomic.write` of the task file) is
+    gone with automation.
+  With an auto-core older than v0.3.4 these say "update auto-core" and write
+  nothing.
+- **Automation removed** (ADR 1791532020 §2.2): the `automated` bucket and
+  status choice, the `[bash:disabled]` marker, the scaffold and its
+  `core.todo.status:changed` hook, `automation_diagnostics.lua`, and
+  `AUTOMATION.md`.
+- **`A` makes one call.** Assigning an open task makes it in-progress in the
+  same write, from every surface (D1), so the panel no longer follows the
+  assignment with its own status change.
+- **Tests:** the todo suites run against a real AutoDoc daemon
+  (`tests/_autodoc.lua`), `tests/smoke-automation.lua` is removed, and CI builds
+  AutoDoc and pins auto-core at the shim.
+
 ## [v0.5.8] — 2026-10-09 — the todos panel opens at once
 
 Patch. Needs auto-core.nvim at the #58 merge (`3c1a8b0`) or later for the
