@@ -109,9 +109,11 @@ ok("ADR-0083: review row with missing path warns",
   vim.inspect(notes))
 
 -- 4. Review row with no in-progress tasks
-local saved_available, saved_call, saved_mutate = door.available, door.call, door.mutate
+local saved_available, saved_call, saved_mutate, saved_dir = door.available, door.call, door.mutate, door.dir
 door.available = function() return true end
 local CTX = { store = "/tmp/store" }
+local current_store = CTX.store -- what door.dir() answers: the project's store now
+door.dir = function() return current_store end
 
 door.call = function(verb, args, cb)
   ok("ADR-0083: queries tasks with status in-progress",
@@ -251,8 +253,50 @@ ok("ADR-0083: update error reported via ERROR log",
   and last_note().level == vim.log.levels.ERROR,
   vim.inspect(notes))
 
+-- 10. The project switches while the picker is open (Lector #68 r0 P2): the
+-- tasks were listed from store A; the choice arrives later, after the
+-- project moved to store B. Nothing may be written: the update would
+-- re-resolve to B, where the same id and rev could exist.
+door.mutate = function(_, task, extra, cb)
+  updated_id, updated_fields = task.id, extra[1]
+  cb({ id = task.id })
+end
+local pending_choice
+vim.ui.select = function(items, _, on_choice)
+  pending_choice = function() on_choice(items[1]) end
+end
+updated_id, updated_fields = nil, nil
+notes = {}
+tree.attach_review_to_task({
+  kind = "review",
+  review = { path = "/tmp/repo@abc.r1.review.json", document = "/tmp/kb/late.md" },
+})
+ok("ADR-0083: the picker opened on store A's tasks", pending_choice ~= nil)
+current_store = "/tmp/other-store"   -- the project switched under the picker
+vim.schedule(function() if pending_choice then pending_choice() end end)
+vim.wait(200, function() return #notes > 0 end, 10)
+ok("ADR-0083: a choice after a project switch writes nothing",
+  updated_id == nil and updated_fields == nil, vim.inspect({ updated_id, updated_fields }))
+ok("ADR-0083: … and the user is told why",
+  last_note() and last_note().msg:find("todo store changed while the picker was open", 1, true) ~= nil
+  and last_note().level == vim.log.levels.WARN, vim.inspect(notes))
+current_store = CTX.store
+pending_choice = nil
+notes = {}
+vim.ui.select = function(items, _, on_choice)
+  pending_choice = function() on_choice(items[1]) end
+end
+tree.attach_review_to_task({
+  kind = "review",
+  review = { path = "/tmp/repo@abc.r1.review.json", document = "/tmp/kb/late.md" },
+})
+vim.schedule(function() if pending_choice then pending_choice() end end)
+vim.wait(200, function() return updated_id ~= nil end, 10)
+ok("ADR-0083: control — the same delayed choice with no switch attaches",
+  updated_id == "task-1", tostring(updated_id))
+
 -- Restore mocks
-door.available, door.call, door.mutate = saved_available, saved_call, saved_mutate
+door.available, door.call, door.mutate, door.dir = saved_available, saved_call, saved_mutate, saved_dir
 vim.ui.select = real_select
 logger.notify = real_notify
 
