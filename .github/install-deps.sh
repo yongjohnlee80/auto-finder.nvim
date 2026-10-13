@@ -13,7 +13,7 @@
 # Refs come from the environment. An EMPTY ref means "whatever the default
 # branch is now" — that is the drift job's whole purpose, so it is a supported
 # value and not a mistake:
-#   AUTO_CORE_REF  WORKTREE_REF  AUTO_RUN_REF  NVIM_DAP_REF  MINI_ICONS_REF  CATPPUCCIN_REF
+#   AUTO_CORE_REF  WORKTREE_REF  AUTO_RUN_REF  AUTODOC_REF  NVIM_DAP_REF  MINI_ICONS_REF  CATPPUCCIN_REF
 #
 # The parity gate (tests/parity/compare.lua, ADR-0200) renders with the icon
 # provider and colour scheme its goldens were captured with, so those two are
@@ -52,6 +52,18 @@ for spec in "auto-core.nvim:${AUTO_CORE_REF:-}" \
     ln -s "$siblings/$plugin/main" "$lazy/$plugin"
   fi
 done
+
+# AutoDoc (ADR 1791532020): from auto-core v0.3.4 auto-core.todo forwards to
+# AutoDoc's daemon, so the todo cells need autodoc.nvim (lua/, in the autodoc
+# repo) and its binary. Sibling shape only: tests/_autodoc.lua looks for
+# <plugins>/autodoc/main and its bin/autodoc, and gives each suite a daemon of
+# its own. The binary is built here, without cgo, as autodoc's Makefile does.
+echo "autodoc:"
+clone_at https://github.com/yongjohnlee80/autodoc "$siblings/autodoc/main" "${AUTODOC_REF:-}"
+command -v go >/dev/null || { echo "go is required to build autodoc (actions/setup-go)" >&2; exit 1; }
+( cd "$siblings/autodoc/main" && GOWORK=off CGO_ENABLED=0 GOFLAGS=-buildvcs=false \
+    go build -o bin/autodoc ./cmd/autodoc )
+"$siblings/autodoc/main/bin/autodoc" --version
 
 echo "third-party:"
 # Real nvim-dap: smoke and smoke-adr0048 drive the actual surface rather than a
