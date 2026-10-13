@@ -3620,7 +3620,7 @@ end)
 
 -- ─────────────────────── 39. views.todos — Phase 2 auto-core.todo panel ──
 print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
--- auto-core.todo forwards to AutoDoc's daemon from v0.3.4 (ADR 1791532020):
+-- auto-core.todo forwards to AutoDoc's daemon from v0.4.0 (ADR 1791532020):
 -- the todo sections ([39]-[40]) run against a daemon of this suite's own.
 local AUTODOC_OK, AUTODOC_WHY = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
   .. "/_autodoc.lua")(SANDBOX, "smoke")

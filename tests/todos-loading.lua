@@ -16,7 +16,7 @@ local autodoc_ok, autodoc_why = dofile(root .. "/tests/_autodoc.lua")(sandbox, "
 check("AutoDoc is set up (" .. tostring(autodoc_why or "ok") .. ")", autodoc_ok)
 local todo = require("auto-core.todo")
 local dir = sandbox .. "/tasks"
-vim.fn.mkdir(dir, "p") -- set_todo_dir needs an existing directory (auto-core v0.3.4)
+vim.fn.mkdir(dir, "p") -- set_todo_dir needs an existing directory (auto-core v0.4.0)
 todo.set_todo_dir(dir)
 local active = assert(todo.add({ title = "Active task" }))
 local archived = assert(todo.add({ title = "Archived task" }))
