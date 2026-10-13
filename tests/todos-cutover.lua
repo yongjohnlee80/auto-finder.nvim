@@ -1,5 +1,5 @@
 -- tests/todos-cutover.lua — the todos panel writes nothing under a .todo-list
--- (ADR 1791532020 §3 step 3). Every change goes through auto-core.todo (v0.3.4,
+-- (ADR 1791532020 §3 step 3). Every change goes through auto-core.todo (v0.4.0,
 -- the forwarding shim) to a REAL AutoDoc daemon of this suite's own.
 --
 -- Each action runs under a write spy: vim.uv.fs_unlink / fs_rename / fs_open
@@ -197,6 +197,11 @@ do
   todo.remove_malformed = real
   check("an older auto-core: \"update auto-core\"", errors[1] and errors[1]:find("update auto-core", 1, true),
     vim.inspect(errors))
+  -- The floor is found by feature (remove_malformed / move_store), not by a
+  -- version comparison; what must stay right is the version the message names:
+  -- the shim ships in auto-core v0.4.0 (ADR 1791532020 D4, amended).
+  check("… and it names the release that carries the shim, auto-core v0.4.0",
+    errors[1] and errors[1]:find("auto-core v0.4.0 or later", 1, true), vim.inspect(errors))
   check("… and the file is untouched, nothing written", exists(again) and #writes == 0, vim.inspect(writes))
   vim.uv.fs_unlink(again)
 end
@@ -295,6 +300,8 @@ do
   todo.move_store = real
   check("an older auto-core: M says \"update auto-core\" and moves nothing",
     errors[1] and errors[1]:find("update auto-core", 1, true) and #writes == 0, vim.inspect(errors))
+  check("… naming auto-core v0.4.0", errors[1] and errors[1]:find("auto-core v0.4.0 or later", 1, true),
+    vim.inspect(errors))
 end
 
 -- ─────────────────────────────────────────────────────────────

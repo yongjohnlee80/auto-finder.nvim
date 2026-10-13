@@ -1,6 +1,6 @@
 ---tests/_autodoc.lua — the AutoDoc daemon the todo cells run against.
 ---
----From auto-core v0.3.4, auto-core.todo forwards every call to AutoDoc's
+---From auto-core v0.4.0, auto-core.todo forwards every call to AutoDoc's
 ---daemon (ADR 1791532020); the panel's todo cells therefore need autodoc.nvim
 ---on the runtimepath and an autodoc binary. This sets autodoc.nvim up against a
 ---daemon of the suite's OWN: its config names a socket, a state dir and a data
