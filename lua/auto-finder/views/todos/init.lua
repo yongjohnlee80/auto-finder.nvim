@@ -3,7 +3,9 @@
 ---Flat scratch-buffer list with its own renderer (same UX shape as
 ---`auto-finder.views.marks`). Consumes the v0.1.36+ `auto-core.todo`
 ---surface for data + lifecycle; the panel never edits YAML
----frontmatter directly.
+---frontmatter directly, and it writes nothing under a `.todo-list/`:
+---AutoDoc's daemon owns every todo write (ADR 1791532020), reached through
+---auto-core.todo (v0.3.4+).
 ---
 ---Layout:
 ---  - One section per status bucket, in fixed order:
@@ -22,13 +24,14 @@
 ---  i     floating preview (title / status / priority / assignee /
 ---        due / description; + errors section when non-empty)
 ---  a     prompt for title, add task, open file
----  d     remove task (with confirmation)
----  s     cycle status (open → completed → deferred → open)
+---  d     remove task (with confirmation); on a malformed row, ask AutoDoc
+---        to delete the file (auto-core.todo.remove_malformed)
+---  s     set status (open / in-progress / completed / deferred / archived)
 ---  o     toggle — task frontmatter expansion, or section/period
 ---        collapse when on a header (same as <CR> on a header)
 ---  R     manual refresh (auto-core.todo.refresh + re-render)
----  M     migrate `.todo-list/` to a new location (filesystem
----        rename + update auto-core's per-workspace dir override)
+---  M     migrate `.todo-list/` to a new location (AutoDoc moves the
+---        store: auto-core.todo.move_store; or switch only: set_todo_dir)
 ---  ?     help overlay listing every keymap on this buffer
 ---
 ---Auto-refresh (task 24):
@@ -42,6 +45,11 @@ local M = {
   name        = "todos",
   description = "auto-core todo tasks (per-workspace .todo-list/)",
 }
+
+-- What the panel says when auto-core predates the todo cutover: it never
+-- falls back to writing a task file itself (ADR 1791532020 §3 step 3).
+M.NEEDS_AUTOCORE = "auto-finder.todos: this needs auto-core v0.3.4 or later (AutoDoc owns "
+  .. "the todo store; AutoDoc required): update auto-core"
 
 local FILETYPE = "auto-finder"
 
@@ -1566,19 +1574,27 @@ local function _remove_task(row)
     return
   end
 
-  -- v0.2.38: malformed-task rows have no validated task id to
-  -- route through `auto-core.todo.remove`. Delete the broken file
-  -- directly via libuv after confirmation.
+  -- v0.2.38: malformed-task rows have no validated task id to route
+  -- through `auto-core.todo.remove`. AutoDoc deletes the broken file
+  -- (todos.remove_malformed, ADR 1791532020 §2.3): the panel never
+  -- unlinks under a .todo-list itself. An auto-core without the
+  -- function predates the cutover: say so, and write nothing.
   if row.kind == "malformed-task" then
     if not row.filepath then return end
+    local ok_t, todo_m = pcall(require, "auto-core.todo")
+    if not ok_t or type(todo_m.remove_malformed) ~= "function" then
+      require("auto-finder.log").error("view.todos", M.NEEDS_AUTOCORE)
+      return
+    end
     local choice = vim.fn.confirm(
       "Delete malformed file?\n   " .. tostring(row.filepath),
       "&Yes\n&No", 2)
     if choice ~= 1 then return end
-    local ok, err = vim.uv.fs_unlink(row.filepath)
-    if not ok then
-      require("auto-finder.log").error("view.todos",
-        "delete failed: " .. tostring(err))
+    local pcall_ok, removed, err = pcall(todo_m.remove_malformed, row.filepath)
+    if not pcall_ok then
+      require("auto-finder.log").error("view.todos", "delete crashed: " .. tostring(removed))
+    elseif not removed then
+      require("auto-finder.log").error("view.todos", "delete failed: " .. tostring(err))
     end
     if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
       _render(M._bufnr)
