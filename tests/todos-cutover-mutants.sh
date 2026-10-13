@@ -69,6 +69,8 @@ mutants=(
   "$V|$C|AutoDoc missing: no \"AutoDoc required\" screen|    _show_message(bufnr, M.REQUIRED_LINES(why))|    _show_message(bufnr, { \"Loading todos…\" })"
   "$V|$S|D2: the workspace fallback for relative refs comes back|  local kb = _kb_root()|  local ws = require(\"auto-core.todo.where\").root() .. \"/\" .. ref\n  if vim.fn.filereadable(ws) == 1 then return ws end\n  local kb = _kb_root()"
   "$D|$C|open buffers stay on the old path|    pcall(buffers.retarget, from, to)|    local _ = buffers"
+  "$D|$C|add re-resolves the project for the scaffold|      return M.call_at(ctx, \"scaffold\", {}, function(_, serr)|      return M.call(\"scaffold\", {}, function(_, serr)"
+  "$D|$C|a load re-resolves the project for its months|      M.call_at(snap.ctx, \"list\", { { buckets = { \"archived\" } } }, function(months, merr)|      M.call(\"list\", { { buckets = { \"archived\" } } }, function(months, merr)"
   "$T|$A|the review attach writes after a project switch (Lector #68 r0 P2)|      if store.dir() ~= listed then|      if false then"
 )
 

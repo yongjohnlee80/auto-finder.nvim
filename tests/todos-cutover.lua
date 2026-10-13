@@ -434,6 +434,73 @@ do
   pcall(vim.api.nvim_buf_delete, tbuf, { force = true })
 end
 
+-- ─────────────────────────────────────────────────────────────
+section("a project switch during a multi-step operation: every step stays on its store")
+do
+  ---switch_during runs start(done) while a spy switches the workspace root to
+  ---`to` the moment `hook_verb` first answers; it records the `at` of every
+  ---verb sent after that.
+  local function switch_during(hook_verb, to, start)
+    local switched, after, finished = false, {}, false
+    local spy = ad_todos.call
+    ad_todos.call = function(verb, params, cb)
+      if switched then after[#after + 1] = { verb = verb, at = params[1] } end
+      spy(verb, params, function(r, e)
+        if verb == hook_verb and not switched then
+          switched = true
+          require("auto-core.git.worktree").set_workspace_root(to)
+        end
+        cb(r, e)
+      end)
+    end
+    local res = {}
+    start(function(...) res = { ... }; finished = true end)
+    vim.wait(10000, function() return finished end, 10)
+    ad_todos.call = spy
+    return res, switched, after
+  end
+  local function stayed(after, root)
+    if #after == 0 then return false end
+    for _, a in ipairs(after) do
+      if type(a.at) ~= "table" or a.at.root ~= root then return false end
+    end
+    return true
+  end
+  local elsewhere = vim.uv.fs_realpath(sandbox) .. "/switched-to"
+  vim.fn.mkdir(elsewhere, "p")
+
+  -- add on a project with no store: the switch lands at the not_a_store answer,
+  -- between the first add and the scaffold
+  local fresh = vim.uv.fs_realpath(sandbox) .. "/fresh-add"
+  vim.fn.mkdir(fresh, "p")
+  require("auto-core.git.worktree").set_workspace_root(fresh)
+  local res, switched, after = switch_during("add", elsewhere, function(done)
+    door.add({ title = "Made in fresh-add" }, done)
+  end)
+  check("add: fixture — the project switched after the first add answered", switched)
+  check("add: the task was created", type(res[1]) == "table" and res[1].id ~= nil, vim.inspect(res))
+  check("add: the scaffold and the retried add went to fresh-add's store",
+    stayed(after, fresh) and #after == 2, vim.inspect(after))
+  check("add: the project switched to got no store", not exists(elsewhere .. "/.todo-list"))
+
+  -- a load: the switch lands at the active buckets' answer, before the archive
+  require("auto-core.git.worktree").set_workspace_root(proj)
+  reload()
+  local parts = {}
+  res, switched, after = switch_during("list", elsewhere, function(done)
+    door.load(function(snap, fin, err)
+      parts[#parts + 1] = { n = snap and #snap.tasks, err = err }
+      if fin then done() end
+    end)
+  end)
+  check("load: fixture — the project switched after the first listing", switched)
+  check("load: the archive listings went to the store the load started on",
+    stayed(after, proj), vim.inspect(after))
+  check("load: … and it finished without an error", parts[#parts] and parts[#parts].err == nil, vim.inspect(parts))
+  require("auto-core.git.worktree").set_workspace_root(proj)
+  reload()
+end
+
 check("auto-core.todo was still never required", package.loaded["auto-core.todo"] == nil)
 view.on_close()
 ad_todos.call = real_call
