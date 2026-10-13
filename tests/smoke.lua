@@ -96,6 +96,21 @@ local function await_todos(view)
     vim.wait(3000, function() return not view._loading end, 5))
 end
 
+-- The todo fixtures' client: AutoDoc's daemon through the panel's own door
+-- (auto-core.todo is gone from auto-core v0.4.1, ADR 1791532020 §3 step 5).
+local TESTS_DIR = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
+local function todos_client() return dofile(TESTS_DIR .. "/_todos.lua") end
+
+---panel_shows waits, bounded, until the todos panel's buffer text matches
+---`pattern`: the panel reloads from the daemon asynchronously after an event.
+local function panel_shows(b, pattern, plain)
+  return vim.wait(3000, function()
+    if not vim.api.nvim_buf_is_valid(b) then return false end
+    return table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+      :find(pattern, 1, plain) ~= nil
+  end, 10)
+end
+
 -- ── silent-truncation guard (KB todo 2026-08-23) ──────────────────
 -- Before this guard, an uncaught error in a section body aborted the
 -- WHOLE main chunk. Because the final "N passed, M failed" summary is
@@ -3618,10 +3633,10 @@ do
 end
 end)
 
--- ─────────────────────── 39. views.todos — Phase 2 auto-core.todo panel ──
+-- ─────────────────────── 39. views.todos — the todos panel over AutoDoc ──
 print("\n[39] views.todos — render, keymaps, subscriptions, no-hijack")
--- auto-core.todo forwards to AutoDoc's daemon from v0.4.0 (ADR 1791532020):
--- the todo sections ([39]-[40]) run against a daemon of this suite's own.
+-- The panel calls AutoDoc's daemon itself (ADR 1791532020 §3 step 4): the
+-- todo sections ([39]-[40]) run against a daemon of this suite's own.
 local AUTODOC_OK, AUTODOC_WHY = dofile(vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
   .. "/_autodoc.lua")(SANDBOX, "smoke")
 section(function()
@@ -3629,9 +3644,7 @@ section(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
   ok("auto-finder.views.todos loads", ok_v, tostring(view))
   if not ok_v then return end
-  local ok_t, todo = pcall(require, "auto-core.todo")
-  ok("auto-core.todo loads", ok_t, tostring(todo))
-  if not ok_t then return end
+  local todo = todos_client()
 
   -- Isolate filesystem state.
   local tmp_root = vim.fn.tempname()
@@ -3911,10 +3924,11 @@ section(function()
       == _kb_test_dir .. "/shared/adrs/0099-fix.md",
     adr_abs_row and tostring(adr_abs_row.filepath))
 
-  -- (b) Workspace-rooted relative when no KB env is set.
-  -- Save current KB env (the polish-1 block set it earlier and
-  -- the polish-2 cursor block above tweaked it again — sequence
-  -- aside, we need a known state here).
+  -- (b) D2 (ADR 1791532020 §2.3): a relative ref resolves against the KB
+  -- root ONLY, the daemon's one rule. The old KB → workspace → cwd fallback
+  -- is gone: with no KB root, a relative ref that names a file in the
+  -- workspace resolves to nothing, and with a KB root it is KB-rooted even
+  -- when the same relative path exists in the workspace.
   local _saved_kb_write = vim.env.AUTO_AGENTS_KB_WRITE
   local _saved_kb_root  = vim.env.AUTO_AGENTS_KB_ROOT
   local _saved_kb_read  = vim.env.AUTO_AGENTS_KB_READ
@@ -3922,8 +3936,6 @@ section(function()
   vim.env.AUTO_AGENTS_KB_ROOT  = nil
   vim.env.AUTO_AGENTS_KB_READ  = nil
 
-  -- Create a file under the workspace root that the rel path
-  -- should resolve to.
   vim.fn.mkdir(tmp_root .. "/docs/refs", "p")
   vim.fn.writefile({ "# ws-rooted" }, tmp_root .. "/docs/refs/v37.md")
 
@@ -3932,22 +3944,39 @@ section(function()
     title = "Workspace-rooted adr",
     adr   = { "docs/refs/v37.md" },
   })
+  local function adr_row_of(id)
+    for _, r in ipairs(view._rows) do
+      if r.kind == "frontmatter-field" and r.task and r.task.id == id
+         and r.field == "adr[]"
+      then return r end
+    end
+  end
   view._expanded[id_ws] = true
   view.on_focus(nil, b)
   await_todos(view)
-  local adr_ws_row
-  for _, r in ipairs(view._rows) do
-    if r.kind == "frontmatter-field" and r.task and r.task.id == id_ws
-       and r.field == "adr[]"
-    then adr_ws_row = r; break end
-  end
-  ok("workspace-rooted adr (no KB env): row.filepath resolved to <ws>/<rel>",
-    adr_ws_row and adr_ws_row.filepath == tmp_root .. "/docs/refs/v37.md",
+  local kb_now = require("auto-core.todo.vars").get("KB_ROOT")
+  local adr_ws_row = adr_row_of(id_ws)
+  ok("D2: a relative adr never resolves to <workspace>/<rel>",
+    adr_ws_row and adr_ws_row.filepath ~= tmp_root .. "/docs/refs/v37.md",
     adr_ws_row and tostring(adr_ws_row.filepath))
+  ok("D2: a relative adr resolves to <KB_ROOT>/<rel>, or to nothing without a KB root",
+    adr_ws_row and (kb_now == nil and adr_ws_row.filepath == nil
+      or kb_now ~= nil and adr_ws_row.filepath == vim.fn.fnamemodify(kb_now, ":p"):gsub("/$", "")
+        .. "/docs/refs/v37.md"),
+    adr_ws_row and ("KB_ROOT=" .. tostring(kb_now) .. " filepath=" .. tostring(adr_ws_row.filepath)))
 
   vim.env.AUTO_AGENTS_KB_WRITE = _saved_kb_write
   vim.env.AUTO_AGENTS_KB_ROOT  = _saved_kb_root
   vim.env.AUTO_AGENTS_KB_READ  = _saved_kb_read
+
+  -- With the KB root set, the same relative ref is KB-rooted although the
+  -- workspace holds a file at that relative path.
+  view.on_focus(nil, b)
+  await_todos(view)
+  local adr_kb_row = adr_row_of(id_ws)
+  ok("D2: with a KB root, the relative adr is KB-rooted, not the workspace's file",
+    adr_kb_row and adr_kb_row.filepath == _kb_test_dir .. "/docs/refs/v37.md",
+    adr_kb_row and tostring(adr_kb_row.filepath))
 
   -- (c) Non-existent rel: best-guess KB-rooted candidate is
   -- returned so the editor surfaces a "file not found" rather
@@ -3988,13 +4017,14 @@ section(function()
   vim.cmd("wincmd p")
   local pre_event_win = vim.api.nvim_get_current_win()
 
-  -- Trigger a status change → event → scheduled re-render
+  -- Trigger a status change → event → scheduled reload from the daemon.
+  -- The fixture client publishes core.todo.status:changed, as any client
+  -- (auto-agents' todos.status) does after its write.
   todo.status("2026-05-25-foo", "completed")
-  vim.wait(50, function() return false end)
 
   ok("event-driven re-render: 'First open task' now under Completed bucket",
-    table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
-      :find("First open task.-%(2026%-05%-25%-foo%)") ~= nil)
+    panel_shows(b, "Completed %(2%).-First open task.-%(2026%-05%-25%-foo%)"),
+    table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n"))
   ok("no-hijack: current window unchanged after event-driven re-render",
     vim.api.nvim_get_current_win() == pre_event_win,
     "expected " .. pre_event_win .. ", got " .. vim.api.nvim_get_current_win())
@@ -4039,8 +4069,7 @@ print("\n[39b] views.todos — malformed-task scan rendering")
 section(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
   if not ok_v then return end
-  local ok_t, todo = pcall(require, "auto-core.todo")
-  if not ok_t then return end
+  local todo = todos_client()
 
   local tmp_root = vim.fn.tempname()
   vim.fn.mkdir(tmp_root, "p")
@@ -4051,12 +4080,9 @@ section(function()
     vim.fn.delete(tmp_root, "rf")
   end
 
-  ok("scan() is exposed by auto-core.todo (>= v0.1.38)",
-    type(todo.scan) == "function")
-
   -- One valid + two malformed files.
   todo.add({ title = "valid task in scan-render fixture" })
-  local td = todo._todo_dir()
+  local td = todo.dir()
   local bad1 = td .. "/open/2026-05-26-broken-yaml.md"
   local fh = io.open(bad1, "w")
   fh:write("---\ntitle: [oh no\n---\nbody\n")
@@ -4110,7 +4136,7 @@ section(function()
   local tmp2 = vim.fn.tempname()
   vim.fn.mkdir(tmp2, "p")
   worktree.set_workspace_root(tmp2)
-  local td2 = todo._todo_dir()
+  local td2 = todo.dir()
   vim.fn.mkdir(td2 .. "/open", "p")
   local fh3 = io.open(td2 .. "/open/2026-05-26-lone-broken.md", "w")
   fh3:write("---\nbad: [\n---\n")
@@ -4136,8 +4162,7 @@ print("\n[39c] views.todos — Vars section + numbered status modal")
 section(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
   if not ok_v then return end
-  local ok_t, todo = pcall(require, "auto-core.todo")
-  if not ok_t then return end
+  local todo = todos_client()
 
   local tmp_root = vim.fn.tempname()
   vim.fn.mkdir(tmp_root, "p")
@@ -4187,25 +4212,22 @@ section(function()
 
   -- Event-driven re-render: visible-buffer path.
   vars.set("ANOTHER", "/tmp/another")
-  vim.wait(120, function() return false end)
-  local text2 = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   ok("core.todo.vars:changed triggers a re-render (new var visible)",
-    text2:find("$ANOTHER", 1, true) ~= nil)
+    panel_shows(b, "$ANOTHER", true))
 
   vars.remove("ANOTHER")
-  vim.wait(120, function() return false end)
-  local text3 = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   ok("remove triggers re-render (var no longer visible)",
-    text3:find("$ANOTHER", 1, true) == nil)
+    vim.wait(3000, function()
+      return not table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+        :find("$ANOTHER", 1, true)
+    end, 10))
 
   -- Numbered status modal: stub vim.ui.select, fire the `s` keymap.
   local id = todo.add({ title = "status-modal target" })
-  -- Force a refresh so the panel learns about the new task row
-  -- (todo.add doesn't fire core.todo:* on its own; the panel
-  -- relies on core.todo:refreshed for adds + core.todo.status:
-  -- changed for status mutations).
-  todo.refresh()
-  vim.wait(120, function() return false end)
+  -- The add publishes core.todo:changed; wait for the panel's reload.
+  ok("status-modal: the new task reaches the panel",
+    panel_shows(b, "status-modal target", true))
+  await_todos(view)
   local task_lnum
   for _, row in ipairs(view._rows or {}) do
     if row.kind == "task" and row.task and row.task.id == id then
@@ -4260,9 +4282,11 @@ section(function()
       return true
     end)(),
     "got: " .. vim.inspect(captured_choices))
-  vim.wait(120, function() return false end)
+  -- The write is asynchronous: wait for the panel's reload after it.
+  panel_shows(b, "Completed %(1%)")
+  await_todos(view)
   local updated = todo.get(id)
-  ok("status-modal: choice 'completed' applied via auto-core.todo.status",
+  ok("status-modal: choice 'completed' applied (todos.status at the row's rev)",
     updated and updated.status == "completed",
     "got status=" .. tostring(updated and updated.status))
 
@@ -4283,8 +4307,7 @@ print("\n[39d] views.todos — collapsible sections + archive year/month groups"
 section(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
   if not ok_v then return end
-  local ok_t, todo = pcall(require, "auto-core.todo")
-  if not ok_t then return end
+  local todo = todos_client()
 
   local tmp_root = vim.fn.tempname()
   vim.fn.mkdir(tmp_root, "p")
@@ -4302,7 +4325,7 @@ section(function()
   todo.add({ title = "open task A" })
   -- Synthesize archived tasks in two periods by hand so we can
   -- control archived_at without relying on the 28-day rule.
-  local td = todo._todo_dir()
+  local td = todo.dir()
   vim.fn.mkdir(td .. "/archived/2026/05", "p")
   vim.fn.mkdir(td .. "/archived/2026/04", "p")
   local fh = io.open(td .. "/archived/2026/05/2026-05-05-may-task.md", "w")
@@ -4472,8 +4495,7 @@ print("\n[40] ADR-0035 Phase 1 — six-bucket panel + numbered non-archived rend
 section(function()
   local ok_v, view = pcall(require, "auto-finder.views.todos")
   if not ok_v then return end
-  local ok_t, todo = pcall(require, "auto-core.todo")
-  if not ok_t then return end
+  local todo = todos_client()
 
   -- Isolate state (mirrors [39c] pattern).
   local tmp_root  = vim.fn.tempname()
@@ -4516,11 +4538,11 @@ section(function()
   -- call is then a no-op.)
   todo.assign(id_ip, "agent:phase1")
   todo.status(id_ip, "in-progress")
-  -- automation was removed (ADR 1791532020): the status is refused.
+  -- automation was removed (ADR 1791532020): AutoDoc refuses the status.
   local id_auto = todo.add({ id = "2026-05-30-p40-auto",     title = "not a template" })
   local auto_t, auto_err = todo.status(id_auto, "automated")
-  ok("p40: status automated is refused (automation was removed)",
-    auto_t == nil and tostring(auto_err):find("automation was removed", 1, true) ~= nil, auto_err)
+  ok("p40: status automated is refused by AutoDoc (todos.invalid)",
+    auto_t == nil and tostring(auto_err):find("todos.invalid", 1, true) ~= nil, auto_err)
   todo.status(id_auto, "deferred") -- out of Open, so p40-open stays its only row
   local id_arch = todo.add({ id = "2026-05-30-p40-archived", title = "archived task" })
   todo.status(id_arch, "archived")  -- direct archive (no completed predecessor)
@@ -4535,9 +4557,13 @@ section(function()
   ok("p40: get_buffer returned a valid buffer",
     bufnr and vim.api.nvim_buf_is_valid(bufnr))
 
-  -- Force a refresh so the panel picks up our seeded tasks.
+  -- The panel reloads from the daemon after the seeding's events.
+  local function reload()
+    view.on_focus(panel_win, bufnr)
+    await_todos(view)
+  end
   todo.refresh()
-  vim.wait(150, function() return false end)
+  reload()
   local text = table.concat(vim.api.nvim_buf_get_lines(bufnr, 0, -1, false), "\n")
 
   -- 40a. Each section header is rendered.
@@ -4595,7 +4621,7 @@ section(function()
   -- carries NO numbered ordinal (whitespace leader instead).
   todo.status(id_done, "archived")
   todo.refresh()
-  vim.wait(150, function() return false end)
+  reload()
 
   -- The archive section is collapsed by default — expand it for
   -- the test so the row actually renders.
@@ -4603,14 +4629,7 @@ section(function()
   for k, _ in pairs(view._archive_collapsed or {}) do
     view._archive_collapsed[k] = false
   end
-  -- view exposes a refresh entry via the panel-public surface; if
-  -- not present (older shape), re-running get_buffer rerenders.
-  if type(view.refresh) == "function" then
-    pcall(view.refresh)
-  else
-    view.get_buffer(panel_win)
-  end
-  vim.wait(80, function() return false end)
+  reload()
 
   rows_by_id = {}
   for _, row in ipairs(view._rows or {}) do
@@ -4642,10 +4661,7 @@ section(function()
                             title = "assigned, so started" })
   todo.assign(id_asg, "agent:phase1")
   todo.refresh()
-  vim.wait(150, function() return false end)
-  if type(view.refresh) == "function" then pcall(view.refresh)
-  else view.get_buffer(panel_win) end
-  vim.wait(80, function() return false end)
+  reload()
 
   local asg_row
   for _, row in ipairs(view._rows or {}) do
@@ -4694,10 +4710,7 @@ section(function()
   local id_start = todo.add({ id = "2026-05-30-p40-A-starts-work",
                               title = "dispatched by the operator" })
   todo.refresh()
-  vim.wait(150, function() return false end)
-  if type(view.refresh) == "function" then pcall(view.refresh)
-  else view.get_buffer(panel_win) end
-  vim.wait(80, function() return false end)
+  reload()
 
   local start_row, start_lnum
   for _, row in ipairs(view._rows or {}) do
@@ -4719,16 +4732,22 @@ section(function()
   if start_row and start_lnum and akm and vim.api.nvim_win_is_valid(panel_win) then
     vim.api.nvim_win_set_cursor(panel_win, { start_lnum, 0 })
     -- Count what A sends: one todos.assign, and no separate todos.status
-    -- (D1 moves the task in the assignment's own write).
-    local daemon_m = require("auto-core.todo.daemon")
-    local sent = {}
-    daemon_m._set_transport(function(method, params, cb)
-      sent[#sent + 1] = method
-      daemon_m._real_request(method, params, cb)
-    end)
+    -- (D1 moves the task in the assignment's own write). The panel calls
+    -- autodoc.todos itself, so the spy wraps that client's call.
+    local ad_todos = require("autodoc.todos")
+    local real_call = ad_todos.call
+    local sent, answered = {}, false
+    ad_todos.call = function(verb, params, cb)
+      sent[#sent + 1] = "todos." .. verb
+      real_call(verb, params, function(r, e)
+        if verb == "assign" then answered = true end
+        cb(r, e)
+      end)
+    end
     pcall(akm.callback)
-    vim.wait(200, function() return false end)
-    daemon_m._set_transport(nil)
+    ok("p40f: the assignment was answered", vim.wait(3000, function() return answered end, 10))
+    await_todos(view)
+    ad_todos.call = real_call
     local n_assign, n_status = 0, 0
     for _, m in ipairs(sent) do
       if m == "todos.assign" then n_assign = n_assign + 1 end
@@ -4755,9 +4774,7 @@ section(function()
                              title = "already finished" })
   todo.status(id_done, "completed")
   todo.refresh()
-  vim.wait(150, function() return false end)
-  if type(view.refresh) == "function" then pcall(view.refresh) end
-  vim.wait(80, function() return false end)
+  reload()
   local done_lnum
   for _, row in ipairs(view._rows or {}) do
     if row.kind == "task" and row.task and row.task.id == id_done then
@@ -4766,8 +4783,19 @@ section(function()
   end
   if done_lnum and akm and vim.api.nvim_win_is_valid(panel_win) then
     vim.api.nvim_win_set_cursor(panel_win, { done_lnum, 0 })
+    local ad_todos = require("autodoc.todos")
+    local real_call = ad_todos.call
+    local answered = false
+    ad_todos.call = function(verb, params, cb)
+      real_call(verb, params, function(r, e)
+        if verb == "assign" then answered = true end
+        cb(r, e)
+      end)
+    end
     pcall(akm.callback)
-    vim.wait(200, function() return false end)
+    vim.wait(3000, function() return answered end, 10)
+    ad_todos.call = real_call
+    await_todos(view)
     local t_done = todo.get(id_done)
     ok("p40f: *** A on a COMPLETED task assigns without rewinding it ***",
       t_done ~= nil and t_done.status == "completed"
@@ -4831,22 +4859,23 @@ section(function()
     pcall(vim.api.nvim_win_close, win43, true)
   end
 
-  -- 43c. C3 (fail-before/pass-after): a todo.remove API failure must
+  -- 43c. C3 (fail-before/pass-after): a remove the daemon refuses must
   -- surface. Pre-fix, `local ok, err = pcall(todo.remove, id)` put
   -- the API's ok-flag into `err`, and the failure (plus its reason)
-  -- vanished silently.
+  -- vanished silently. The panel's write goes through its door's
+  -- `mutate`; the stub answers a refusal.
   local todos_view = require("auto-finder.views.todos")
   local af_log = require("auto-finder.log")
-  local todo_mod = require("auto-core.todo")
-  local orig_remove = todo_mod.remove
+  local todo_store = require("auto-finder.views.todos.store")
+  local orig_mutate = todo_store.mutate
   local orig_log_error = af_log.error
   local orig_confirm = vim.fn.confirm
   local captured43 = nil
-  todo_mod.remove = function() return false, "boom (p43 stub)" end
+  todo_store.mutate = function(_, _, _, cb) cb(nil, "boom (p43 stub)") end
   af_log.error = function(_, msg) captured43 = tostring(msg) end
   vim.fn.confirm = function() return 1 end
-  pcall(todos_view._remove_task, { task = { id = "p43-x", title = "p43" } })
-  todo_mod.remove = orig_remove
+  pcall(todos_view._remove_task, { task = { id = "p43-x", title = "p43", rev = "x" } })
+  todo_store.mutate = orig_mutate
   af_log.error = orig_log_error
   vim.fn.confirm = orig_confirm
   ok("43c: API-level remove failure is surfaced to the log",

@@ -3332,68 +3332,75 @@ function M.attach_review_to_task(row)
     logger.notify("repos: review has no file path", { level = vim.log.levels.WARN })
     return
   end
-  local ok_todo, todo_api = pcall(require, "auto-core.todo")
-  if not (ok_todo and todo_api and type(todo_api.list) == "function") then
-    logger.notify("repos: auto-core.todo not available", { level = vim.log.levels.WARN })
+  local store = require("auto-finder.views.todos.store")
+  local available, why = store.available()
+  if not available then
+    logger.notify("repos: " .. tostring(why), { level = vim.log.levels.WARN })
     return
   end
-  local tasks = todo_api.list({ status = "in-progress" })
-  if not tasks or #tasks == 0 then
-    logger.notify("repos: no in-progress tasks found in .todo-list/in-progress/",
-      { level = vim.log.levels.WARN })
-    return
-  end
-  local items = {}
-  for _, t in ipairs(tasks) do
-    table.insert(items, {
-      task = t,
-      label = string.format("%s (%s)", t.title or "untitled", t.id or "no-id"),
-    })
-  end
-  vim.ui.select(items, {
-    prompt = "Attach review to in-progress task:",
-    format_item = function(item) return item.label end,
-  }, function(choice)
-    if not choice then return end
-    local sel_task = choice.task
-    local ok_paths, todo_paths = pcall(require, "auto-core.todo.paths")
-    local portable_ref
-    if ok_paths and todo_paths and type(todo_paths.to_portable) == "function" then
-      portable_ref = todo_paths.to_portable(review_path)
-    else
-      local ok_vars, vars = pcall(require, "auto-core.todo.vars")
-      if ok_vars and vars and type(vars.symbolize_path) == "function" then
-        portable_ref = vars.symbolize_path(review_path)
-      else
-        portable_ref = review_path
-      end
-    end
-    local updated_reviews = {}
-    if type(sel_task.review) == "table" then
-      for _, r in ipairs(sel_task.review) do
-        table.insert(updated_reviews, r)
-      end
-    elseif type(sel_task.review) == "string" and sel_task.review ~= "" then
-      table.insert(updated_reviews, sel_task.review)
-    end
-    local exists = false
-    for _, r in ipairs(updated_reviews) do
-      if r == portable_ref or r == review_path then
-        exists = true
-        break
-      end
-    end
-    if not exists then
-      table.insert(updated_reviews, portable_ref)
-    end
-    local ok, err = todo_api.update(sel_task.id, { review = updated_reviews })
-    if ok then
-      logger.notify(string.format("repos: attached review to task '%s'", sel_task.title or sel_task.id),
-        { level = vim.log.levels.INFO })
-    else
-      logger.notify(string.format("repos: failed to attach review: %s", tostring(err)),
+  store.call("list", { { buckets = { "in-progress" } } }, function(listing, lerr, ctx)
+    if lerr then
+      logger.notify("repos: listing in-progress tasks failed: " .. store.format(lerr),
         { level = vim.log.levels.ERROR })
+      return
     end
+    local tasks = store._decorate(ctx, (listing and listing.tasks) or {})
+    if #tasks == 0 then
+      logger.notify("repos: no in-progress tasks found in .todo-list/in-progress/",
+        { level = vim.log.levels.WARN })
+      return
+    end
+    local items = {}
+    for _, t in ipairs(tasks) do
+      table.insert(items, {
+        task = t,
+        label = string.format("%s (%s)", t.title or "untitled", t.id or "no-id"),
+      })
+    end
+    vim.ui.select(items, {
+      prompt = "Attach review to in-progress task:",
+      format_item = function(item) return item.label end,
+    }, function(choice)
+      if not choice then return end
+      local sel_task = choice.task
+      -- The review goes over the wire ABSOLUTE: AutoDoc symbolizes it its own
+      -- way ($KB_ROOT/…). The refs already on the task are the daemon's own
+      -- form and go back unchanged; one that already names this review (in
+      -- either form) is not added twice.
+      local abs = vim.fn.fnamemodify(review_path, ":p")
+      local ok_vars, vars = pcall(require, "auto-core.todo.vars")
+      local function names_it(ref)
+        if ref == review_path or ref == abs then return true end
+        if ok_vars and type(vars.resolve_path) == "function" then
+          local r = vars.resolve_path(ref)
+          return r and r.ok and r.path == abs or false
+        end
+        return false
+      end
+      local updated_reviews, exists = {}, false
+      local current = sel_task.review
+      if type(current) == "string" and current ~= "" then current = { current } end
+      for _, r in ipairs(type(current) == "table" and current or {}) do
+        table.insert(updated_reviews, r)
+        if names_it(r) then exists = true end
+      end
+      if exists then
+        logger.notify(string.format("repos: task '%s' already has this review",
+          sel_task.title or sel_task.id), { level = vim.log.levels.INFO })
+        return
+      end
+      table.insert(updated_reviews, abs)
+      store.mutate("update", sel_task, { { review = updated_reviews } }, function(task, err)
+        if task then
+          store.publish("core.todo:changed", { kind = "update", id = task.id })
+          logger.notify(string.format("repos: attached review to task '%s'", sel_task.title or sel_task.id),
+            { level = vim.log.levels.INFO })
+        else
+          logger.notify(string.format("repos: failed to attach review: %s", tostring(err)),
+            { level = vim.log.levels.ERROR })
+        end
+      end)
+    end)
   end)
 end
 

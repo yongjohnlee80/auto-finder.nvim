@@ -1,11 +1,12 @@
 ---View — auto-core todo tasks (per-workspace `.todo-list/*.md`).
 ---
 ---Flat scratch-buffer list with its own renderer (same UX shape as
----`auto-finder.views.marks`). Consumes the v0.1.36+ `auto-core.todo`
----surface for data + lifecycle; the panel never edits YAML
----frontmatter directly, and it writes nothing under a `.todo-list/`:
----AutoDoc's daemon owns every todo write (ADR 1791532020), reached through
----auto-core.todo (v0.4.0+).
+---`auto-finder.views.marks`). The panel never edits YAML frontmatter
+---directly, and it writes nothing under a `.todo-list/`: AutoDoc's daemon owns
+---the store and every write (ADR 1791532020). The panel calls its `todos.*`
+---verbs itself, through autodoc.nvim (`views/todos/store.lua`); auto-core only
+---says where this project's store is (auto-core.todo.where). Without AutoDoc
+---the panel says "AutoDoc required": there is no Lua fallback.
 ---
 ---Layout:
 ---  - One section per status bucket, in fixed order:
@@ -25,19 +26,22 @@
 ---        due / description; + errors section when non-empty)
 ---  a     prompt for title, add task, open file
 ---  d     remove task (with confirmation); on a malformed row, ask AutoDoc
----        to delete the file (auto-core.todo.remove_malformed)
+---        to delete the file (todos.remove_malformed)
 ---  s     set status (open / in-progress / completed / deferred / archived)
 ---  o     toggle — task frontmatter expansion, or section/period
 ---        collapse when on a header (same as <CR> on a header)
----  R     manual refresh (auto-core.todo.refresh + re-render)
+---  R     manual refresh (todos.refresh + re-render)
 ---  M     migrate `.todo-list/` to a new location (AutoDoc moves the
----        store: auto-core.todo.move_store; or switch only: set_todo_dir)
+---        store: todos.move_store; or switch only: todos.set_dir)
 ---  ?     help overlay listing every keymap on this buffer
 ---
 ---Auto-refresh (task 24):
 ---  - on slot focus (always)
----  - on `core.todo.status:changed` published by auto-core.todo.status
----  - on `core.todo:refreshed` published by auto-core.todo.refresh
+---  - on `core.todo.status:changed`, `core.todo:changed` and
+---    `core.todo:refreshed` (published by the panel's own writes, by
+---    auto-agents' todos.* verbs and by auto-core's notifier)
+---  A write names the `rev` the panel read: a task changed since (by an
+---  agent, by hand) is refused as todos.stale and the panel reloads.
 ---  All event-driven re-renders are gated on the buffer being visible.
 ---@module 'auto-finder.views.todos'
 
@@ -46,10 +50,11 @@ local M = {
   description = "auto-core todo tasks (per-workspace .todo-list/)",
 }
 
+local store = require("auto-finder.views.todos.store")
+
 -- What the panel says when auto-core predates the todo cutover: it never
 -- falls back to writing a task file itself (ADR 1791532020 §3 step 3).
-M.NEEDS_AUTOCORE = "auto-finder.todos: this needs auto-core v0.4.0 or later (AutoDoc owns "
-  .. "the todo store; AutoDoc required): update auto-core"
+M.NEEDS_AUTOCORE = "auto-finder.todos: " .. store.NEEDS_AUTOCORE
 
 local FILETYPE = "auto-finder"
 
@@ -321,8 +326,7 @@ local function _row_under_cursor(panel_winid)
   if not (M._rows and panel_winid and vim.api.nvim_win_is_valid(panel_winid)) then
     return nil
   end
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if ok_todo and M._rows_dir ~= todo.get_todo_dir() then return nil end
+  if M._rows_dir ~= store.dir() then return nil end
   local pos = vim.api.nvim_win_get_cursor(panel_winid)
   local lnum = pos[1]
   for _, row in ipairs(M._rows) do
@@ -348,106 +352,51 @@ local function _kb_root()
   return (vim.fn.fnamemodify(vim.fn.expand(root), ":p"):gsub("/$", ""))
 end
 
----Build the absolute path for a `blocked[i]` task id by looking up
----the target task via `auto-core.todo.get` (which find_task_path's
----internally) and computing its file path. Returns nil when the
----blocked task doesn't exist — which is the error case that
----`auto-core.todo.refresh` would have flagged in `errors[]`.
+---The absolute path of the task a `blocked[i]` id names, from the tasks the
+---panel last loaded (every bucket, the archive included). nil when no such task
+---is loaded: the daemon flags that case in the task's `errors[]`.
 ---@param blocked_id string
 ---@return string?
 local function _blocked_task_path(blocked_id)
   if type(blocked_id) ~= "string" or blocked_id == "" then return nil end
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return nil end
-  local task = todo.get(blocked_id)
-  if not task then return nil end
-  local ok_paths, paths = pcall(require, "auto-core.todo.paths")
-  if not ok_paths then return nil end
-  return paths.task_file_path(todo.get_todo_dir(), task.id, task.status, task.archived_at)
+  local t = M._by_id and M._by_id[blocked_id]
+  return t and t.file_path or nil
 end
 
 ---Resolve a reference string (an `adr:` / `review:` value) into an
----absolute filesystem path. Multi-root strategy:
+---absolute filesystem path:
 ---
----  1. **Absolute path** (starts with `/` or `~`) — `vim.fn.expand`
----     and return as-is.
----  2. **Relative path** — try in order, returning the first that
----     points at a readable file on disk:
----        a. `<KB_root>/<rel>`                 (when KB env is set)
----        b. `<workspace_root>/<rel>`          (auto-core.git.worktree)
----        c. `<cwd>/<rel>`                     (last-resort fallback)
----     If none exist, return the KB-rooted candidate as a "best
----     guess" so the caller can still attempt to open it (the open
----     will fail visibly via the editor's "file not found" rather
----     than silently no-op).
+---  1. `$VAR/...` — auto-core.todo.vars substitutes it. An unresolved
+---     variable comes back as its literal text, so the open fails
+---     visibly naming the variable rather than guessing a path.
+---  2. Absolute (`/…` or `~/…`) — expanded and used as is.
+---  3. Relative — the store's KB root, `<KB_ROOT>/<rel>`, only (D2,
+---     ADR 1791532020 §2.3: one rule, the one the daemon's validator
+---     uses). The old KB → workspace → cwd fallback is gone: a path the
+---     daemon flags as not-found must not open some other file here.
 ---@param ref string
----@return string?  best-guess absolute path, or nil for invalid input
+---@return string?  absolute path, or nil for invalid input or no KB root
 local function _resolve_ref_path(ref)
   if type(ref) ~= "string" or ref == "" then return nil end
 
-  -- v0.2.39: delegate `$VAR/...` and absolute-path forms to
-  -- auto-core.todo.vars.resolve_path. Unresolved variables still
-  -- come back via `r.unresolved=true` carrying the literal text;
-  -- we return that literal so the editor's file-not-found error
-  -- visibly cites the unresolved variable rather than silently
-  -- producing a misleading multi-root best-guess.
   local ok_vars, vars = pcall(require, "auto-core.todo.vars")
   if ok_vars and type(vars.resolve_path) == "function" then
     local r = vars.resolve_path(ref)
     if r.unresolved then
       return r.path  -- the literal $VAR/... so the editor surfaces a clear error
     end
-    if r.ok and r.path then
-      -- `$VAR/...` substituted OR absolute/`~` expanded — return as-is.
-      if r.var_name or r.path:sub(1, 1) == "/" then
-        return r.path
-      end
-      -- plain relative case falls through to the multi-root logic below
+    if r.ok and r.path and (r.var_name or r.path:sub(1, 1) == "/") then
+      return r.path
     end
   end
 
-  -- Absolute: `/path` or `~/path` → expand and use (fallback path
-  -- when auto-core.todo.vars isn't available).
   if ref:sub(1, 1) == "/" or ref:sub(1, 1) == "~" then
     return vim.fn.expand(ref)
   end
 
-  local function exists(p)
-    return p and (vim.fn.filereadable(p) == 1 or vim.fn.isdirectory(p) == 1)
-  end
-  local function join(base, rel)
-    if not base or base == "" then return nil end
-    return base:gsub("/+$", "") .. "/" .. rel:gsub("^/+", "")
-  end
-
-  -- Candidate roots in priority order. The first existence-confirmed
-  -- match wins; otherwise the KB-rooted candidate is returned as a
-  -- best guess so the editor can produce a visible "file not found"
-  -- error rather than a silent no-op.
-  local candidates = {}
-
   local kb = _kb_root()
-  local kb_cand = kb and join(kb, ref)
-  if kb_cand then candidates[#candidates + 1] = kb_cand end
-
-  local ok_paths, paths = pcall(require, "auto-core.todo.paths")
-  if ok_paths then
-    local ws = paths.workspace_root()
-    if ws and ws ~= "" then
-      candidates[#candidates + 1] = join(ws, ref)
-    end
-  end
-
-  candidates[#candidates + 1] = join(vim.fn.getcwd(), ref)
-
-  for _, cand in ipairs(candidates) do
-    if exists(cand) then return cand end
-  end
-  -- None exist on disk — return the first candidate (KB-rooted when
-  -- a KB is set, else workspace-rooted). The open path will surface
-  -- a "file not found" via the editor, which is more discoverable
-  -- than a silent no-op.
-  return candidates[1]
+  if not kb then return nil end
+  return kb:gsub("/+$", "") .. "/" .. ref:gsub("^/+", "")
 end
 
 -- ─── render ───────────────────────────────────────────────────
@@ -458,49 +407,40 @@ end
 local LEADER_WIDTH  = 6  -- `  NN. ` for OPEN; `      ` (6 spaces) for others
                         -- — both put the title's first char at column 7.
 
----Collect tasks via the auto-core.todo public surface, grouped by
----bucket per BUCKET_ORDER. Within each bucket: tasks with non-empty
----errors[] float to the top; both groups are then sorted by id
+---Group the loaded tasks by bucket per BUCKET_ORDER. Within each bucket: tasks
+---with non-empty errors[] float to the top; both groups are then sorted by id
 ---(lex = chronological because ids are `<YYYY-MM-DD>-<slug>`).
 ---
----v0.2.38: prefers `auto-core.todo.scan()` over `list()` so files
----whose YAML frontmatter fails to parse or whose decoded body
----fails schema validation also come back (in `.malformed`). list()
----is used as fallback for older auto-core (< 0.1.38) — those
----callers just won't see malformed files until they upgrade.
+---The tasks come from the panel's last load (`store.load`, the daemon's
+---`todos.list`). Rendering never asks the daemon: a toggle or an expansion
+---re-renders what was loaded. Malformed files arrive as the daemon lists them,
+---`{path, reason}` with path store-relative, and are mapped to the rows' shape.
+---@param snapshot table? { ctx, tasks, malformed }; nil renders nothing
 ---@return table<string, table[]> grouped  bucket → list of tasks
----@return table[] malformed                list of { file_path, bucket, filename, err }
+---@return table[] malformed                list of { file_path, relpath, bucket, filename, err }
 local function _collect_grouped(snapshot)
-  -- ADR-0035 Phase 1: six buckets total. Keep the initializer
-  -- aligned with BUCKETS / BUCKET_ORDER so a future bucket addition
-  -- only requires updating one source of truth — the BUCKETS table —
-  -- and `_collect_grouped` walks it automatically.
+  -- Keep the initializer aligned with BUCKETS / BUCKET_ORDER so a
+  -- future bucket addition only requires updating one source of truth.
   local grouped   = {}
   for name, _ in pairs(BUCKETS) do grouped[name] = {} end
   local malformed = {}
-  local todo_ok, todo = pcall(require, "auto-core.todo")
-  if not todo_ok then return grouped, malformed end
+  if type(snapshot) ~= "table" then return grouped, malformed end
 
-  local tasks
-  if snapshot then
-    tasks = snapshot.tasks
-    malformed = snapshot.malformed or {}
-  elseif type(todo.scan) == "function" then
-    local scan_ok, result = pcall(todo.scan)
-    if scan_ok and type(result) == "table" then
-      tasks     = result.tasks
-      malformed = type(result.malformed) == "table" and result.malformed or {}
+  local dir = snapshot.ctx and snapshot.ctx.store or ""
+  for _, m in ipairs(snapshot.malformed or {}) do
+    if type(m) == "table" then
+      local rel = tostring(m.path or "")
+      malformed[#malformed + 1] = {
+        file_path = dir .. "/" .. rel,
+        relpath   = rel,
+        bucket    = rel:match("^([^/]+)/") or "",
+        filename  = vim.fn.fnamemodify(rel, ":t"),
+        err       = tostring(m.reason or "malformed"),
+      }
     end
   end
-  if type(tasks) ~= "table" then
-    -- Older auto-core: fall back to list(). Malformed entries will
-    -- silently disappear (the pre-v0.2.38 behavior).
-    local list_ok, list_tasks = pcall(todo.list)
-    if list_ok and type(list_tasks) == "table" then tasks = list_tasks end
-  end
-  if type(tasks) ~= "table" then return grouped, malformed end
 
-  for _, t in ipairs(tasks) do
+  for _, t in ipairs(snapshot.tasks or {}) do
     if type(t) == "table" and BUCKETS[t.status] then
       table.insert(grouped[t.status], t)
     end
@@ -567,6 +507,17 @@ local function _render(bufnr, snapshot)
     end
   end
 
+  -- A load hands its snapshot in; every other render (a toggle, an
+  -- expansion) re-renders the last one, and never asks the daemon.
+  if snapshot then
+    M._snapshot = snapshot
+    M._by_id = {}
+    for _, t in ipairs(snapshot.tasks or {}) do
+      if type(t) == "table" and type(t.id) == "string" then M._by_id[t.id] = t end
+    end
+  else
+    snapshot = M._snapshot
+  end
   local grouped, malformed = _collect_grouped(snapshot)
   local rows    = {}     -- accumulating M._rows
   local lines   = {}     -- text lines we'll buf_set after the loop
@@ -871,6 +822,7 @@ local function _render(bufnr, snapshot)
       kind     = "malformed-task",
       lnum     = lnum0 + 1,
       filepath = m.file_path,
+      relpath  = m.relpath,
       bucket   = m.bucket,
       err      = err,
     }
@@ -1094,10 +1046,7 @@ local function _render(bufnr, snapshot)
     end
   end
 
-  -- Writable only for the write itself. Reading the tasks (and resolving a
-  -- row's refs) asks AutoDoc's daemon, and a synchronous auto-core.todo call
-  -- waits with vim.wait, which runs other scheduled work: another render of
-  -- this buffer can finish meanwhile and set it read-only again.
+  -- Writable only for the write itself.
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
@@ -1108,8 +1057,7 @@ local function _render(bufnr, snapshot)
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].modified   = false
   M._rows = rows
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  M._rows_dir = ok_todo and todo.get_todo_dir() or nil
+  M._rows_dir = store.dir()
 
   -- Restore cursors (clamped to the new line count). Skip lnum 0 to
   -- satisfy nvim_win_set_cursor's 1-based contract.
@@ -1126,19 +1074,32 @@ end
 
 -- ─── keymap helpers ───────────────────────────────────────────
 
----Resolve the absolute filesystem path for a task. Uses
----auto-core.todo.paths + the task's status / archived_at so the
----path is correct for any bucket including archived/YYYY/MM/.
+-- The panel reloads from the daemon after its own writes (defined with the
+-- load machinery below).
+local _reload
+
+---_failed reports a write the daemon refused. A stale row (todos.stale: the
+---task changed since the panel read it, by an agent or by hand) reloads the
+---panel, so the next try works on what is there now; nothing is retried.
+---@param what string
+---@param err string
+---@param raw any the daemon's error, when there was one
+local function _failed(what, err, raw)
+  if store.is(raw, store.STALE) then
+    require("auto-finder.log").error("view.todos", what .. ": the task changed since the panel "
+      .. "read it; reloaded. Check it and try again. (" .. tostring(err) .. ")")
+    _reload()
+    return
+  end
+  require("auto-finder.log").error("view.todos", what .. " failed: " .. tostring(err))
+end
+
+---The absolute filesystem path of a task: the daemon's store-relative `path`
+---under the store it was listed from (`store.load` adds it as `file_path`).
 ---@param task table
 ---@return string?
 local function _task_file_path(task)
-  local ok_paths, paths = pcall(require, "auto-core.todo.paths")
-  local ok_todo,  todo  = pcall(require, "auto-core.todo")
-  if not (ok_paths and ok_todo and task and task.id and task.status) then
-    return nil
-  end
-  local td = todo.get_todo_dir()
-  return paths.task_file_path(td, task.id, task.status, task.archived_at)
+  return type(task) == "table" and task.file_path or nil
 end
 
 ---`<CR>` action: context-aware open in the editor-target window.
@@ -1423,8 +1384,6 @@ local function _preview_task(row)
   end
 end
 
----`a` action: prompt for a title; on non-empty, create a task via
----auto-core.todo.add and open its file in the editor target.
 ---v0.2.39: prompt for a new user-defined variable. Two-step
 ---prompt (name, then value) so the user sees the typed name
 ---before committing the value. Both prompts must produce non-
@@ -1472,31 +1431,22 @@ local function _edit_var(row)
   end)
 end
 
+---`a` action: prompt for a title; on non-empty, create the task (todos.add,
+---which scaffolds a new project's store first) and open its file in the
+---editor target.
 local function _add_task()
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return end
+  local directory = store.dir()
   vim.ui.input({ prompt = "New todo title: " }, function(input)
-    if not input or input == "" then return end
-    local ok, id_or_err = pcall(todo.add, { title = input })
-    if not ok then
-      -- log.error auto-toasts at ERROR level + writes the ring entry
-    -- (auto-core.log dispatch routes ERROR/WARN through should_toast
-    -- by default). One call, both surfaces.
-    require("auto-finder.log").error("view.todos",
-        "add failed: " .. tostring(id_or_err))
-      return
-    end
-    -- Open the new file via the editor-window resolver. Build a
-    -- Synthetic row for _open — kind="task" so the dispatch lands on
-    -- the task-file branch.
-    local task = todo.get(id_or_err)
-    if task then
+    if not input or input == "" or store.dir() ~= directory then return end
+    store.add({ title = input }, function(task, err)
+      if not task then
+        require("auto-finder.log").error("view.todos", "add failed: " .. tostring(err))
+        return
+      end
+      store.publish("core.todo:changed", { kind = "add", id = task.id })
       _open({ kind = "task", task = task })
-    end
-    -- Re-render the panel buffer (we own M._bufnr).
-    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-      _render(M._bufnr)
-    end
+      _reload()
+    end)
   end)
 end
 
@@ -1527,63 +1477,38 @@ local function _remove_task(row)
     return
   end
 
-  -- v0.2.38: malformed-task rows have no validated task id to route
-  -- through `auto-core.todo.remove`. AutoDoc deletes the broken file
-  -- (todos.remove_malformed, ADR 1791532020 §2.3): the panel never
-  -- unlinks under a .todo-list itself. An auto-core without the
-  -- function predates the cutover: say so, and write nothing.
+  -- A malformed row has no validated task to remove: AutoDoc deletes the
+  -- broken file (todos.remove_malformed, ADR 1791532020 §2.3), by its
+  -- store-relative path. The panel never unlinks under a .todo-list itself.
   if row.kind == "malformed-task" then
-    if not row.filepath then return end
-    local ok_t, todo_m = pcall(require, "auto-core.todo")
-    if not ok_t or type(todo_m.remove_malformed) ~= "function" then
-      require("auto-finder.log").error("view.todos", M.NEEDS_AUTOCORE)
-      return
-    end
+    if not row.relpath then return end
+    local directory = store.dir()
     local choice = vim.fn.confirm(
       "Delete malformed file?\n   " .. tostring(row.filepath),
       "&Yes\n&No", 2)
-    if choice ~= 1 then return end
-    local pcall_ok, removed, err = pcall(todo_m.remove_malformed, row.filepath)
-    if not pcall_ok then
-      require("auto-finder.log").error("view.todos", "delete crashed: " .. tostring(removed))
-    elseif not removed then
-      require("auto-finder.log").error("view.todos", "delete failed: " .. tostring(err))
-    end
-    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-      _render(M._bufnr)
-    end
+    if choice ~= 1 or store.dir() ~= directory then return end
+    store.remove_malformed(row.relpath, function(ok, err)
+      if not ok then
+        require("auto-finder.log").error("view.todos", "delete failed: " .. tostring(err))
+        return
+      end
+      store.publish("core.todo:changed", { kind = "remove_malformed", path = row.filepath })
+      _reload()
+    end)
     return
   end
 
   if not row.task then return end
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return end
-  local directory = todo.get_todo_dir()
+  local directory = store.dir()
   local choice = vim.fn.confirm(
     "Remove task '" .. (row.task.title or row.task.id or "?") .. "'?",
     "&Yes\n&No", 2)
-  if choice ~= 1 or todo.get_todo_dir() ~= directory then return end
-  -- ADR-0040 C3: `todo.remove` returns `(ok_bool, err_string?)` —
-  -- pcall wraps that into `(success, ret1, ret2)`. The prior
-  -- `local ok, err = pcall(...)` put the API's ok-flag into `err`,
-  -- so an API failure (`false, "reason"`) hit the `err ~= true`
-  -- guard as `false` and vanished silently — the reason string in
-  -- ret2 was never even captured. Same class as the v0.2.51
-  -- status-modal blocker; this mirrors `_set_status`'s shape.
-  local pcall_ok, removed, err_str = pcall(todo.remove, row.task.id)
-  if not pcall_ok then
-    require("auto-finder.log").error("view.todos",
-      "remove crashed: " .. tostring(removed))
-    return
-  end
-  if not removed then
-    require("auto-finder.log").error("view.todos",
-      "remove failed: " .. tostring(err_str))
-    return
-  end
-  if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-    _render(M._bufnr)
-  end
+  if choice ~= 1 or store.dir() ~= directory then return end
+  store.mutate("remove", row.task, {}, function(_, err, raw)
+    if err then return _failed("remove", err, raw) end
+    store.publish("core.todo:changed", { kind = "remove", id = row.task.id })
+    _reload()
+  end)
 end
 
 -- v0.2.39: status changes are now driven by a vim.ui.select
@@ -1597,14 +1522,13 @@ end
 -- with automation. Order mirrors the panel's bucket order.
 local STATUS_CHOICES = { "open", "in-progress", "completed", "deferred", "archived" }
 
----`s` action: open a numbered-options modal listing the four
----valid statuses; on selection, route through auto-core.todo.status.
+---`s` action: open a numbered-options modal listing the statuses; on
+---selection, AutoDoc moves the task (todos.status, at the row's rev). Open
+---buffers follow the file into its new bucket.
 ---@param row table?
 local function _set_status(row)
   if not row or not row.task then return end
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return end
-  local directory = todo.get_todo_dir()
+  local directory = store.dir()
 
   local current = row.task.status
   vim.ui.select(STATUS_CHOICES, {
@@ -1615,29 +1539,16 @@ local function _set_status(row)
       return item
     end,
   }, function(choice)
-    if not choice or choice == current or todo.get_todo_dir() ~= directory then return end
-    -- ADR-0035 post-ship Lector finding (2026-05-31): `todo.status`
-    -- returns `(task | nil, err_string?)` — pcall wraps that into
-    -- `(success_bool, ret1, ret2)`. The prior `local ok, err =
-    -- pcall(...)` only caught actual Lua errors (ret1 became
-    -- `err`, the actual err_string in ret2 was discarded); when
-    -- `todo.status` returned `(nil, "schema: ...")` the modal
-    -- treated it as success and the panel re-rendered against a
-    -- task that hadn't actually moved.
-    local pcall_ok, task_or_err, err_str = pcall(todo.status, row.task.id, choice)
-    if not pcall_ok then
-      require("auto-finder.log").error("view.todos",
-        "status crashed: " .. tostring(task_or_err))
-      return
-    end
-    if not task_or_err then
-      require("auto-finder.log").error("view.todos",
-        "status failed: " .. tostring(err_str))
-      return
-    end
-    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-      _render(M._bufnr)
-    end
+    if not choice or choice == current or store.dir() ~= directory then return end
+    store.mutate("status", row.task, { choice }, function(task, err, raw)
+      if not task then return _failed("status", err, raw) end
+      store.follow(row.task, task)
+      store.publish("core.todo.status:changed", {
+        id = task.id, from = row.task.status, to = task.status,
+        at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+      })
+      _reload()
+    end)
   end)
 end
 
@@ -1658,19 +1569,17 @@ end
 ---     to a default "Task assigned to you." reason so an
 ---     instruction-less assignment still pings the recipient with a
 ---     meaningful message.
----  4. Call `auto-core.todo.assign(id, mailbox_id, reason)`. AutoDoc
----     writes it, and assigning an `open` task makes it `in-progress` in
----     the same write (D1, ADR 1791532020 §2.3); auto-core's notifier
----     sends the recipient its mailbox message (title, id, file path,
----     and the notes as `Reason:`).
+---  4. AutoDoc assigns it (todos.assign, at the row's rev), and
+---     assigning an `open` task makes it `in-progress` in the same write
+---     (D1, ADR 1791532020 §2.3). auto-core's notifier sends the
+---     recipient its mailbox message (title, id, file path, and the
+---     notes as `Reason:`); the panel asks it to poll at once.
 ---
 ---No-op on non-task rows (vars / malformed / headers).
 ---@param row table?
 local function _assign_task(row)
   if not row or not row.task or not row.task.id then return end
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return end
-  local directory = todo.get_todo_dir()
+  local directory = store.dir()
 
   -- Try the auto-agents Lua API first; it returns only ALIVE
   -- bootstrap slots, which is the natural "agents available right
@@ -1722,31 +1631,34 @@ local function _assign_task(row)
       if notes == nil then return end  -- ESC / cancel — leave task untouched
       local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
-      local ok_todo, todo = pcall(require, "auto-core.todo")
-      if not ok_todo or todo.get_todo_dir() ~= directory then return end
-      local assigned, err = todo.assign(row.task.id, choice.mailbox_id, reason)
-      if err or not assigned then
-        require("auto-finder.log").error("view.todos",
-          "assign failed: " .. tostring(err))
-        return
-      end
+      if store.dir() ~= directory then return end
+      store.mutate("assign", row.task, { choice.mailbox_id, reason }, function(assigned, err, raw)
+        if not assigned then return _failed("assign", err, raw) end
 
-      -- ASSIGNING STARTS THE WORK (Johno, 2026-09-08), now from every
-      -- surface: AutoDoc moves an `open` task to `in-progress` in the same
-      -- write as the assignment (D1, ADR 1791532020 §2.3). The panel no
-      -- longer makes a second, separate status call.
-      local moved = row.task.status == "open" and assigned.status == "in-progress"
+        -- ASSIGNING STARTS THE WORK (Johno, 2026-09-08), now from every
+        -- surface: AutoDoc moves an `open` task to `in-progress` in the same
+        -- write as the assignment (D1, ADR 1791532020 §2.3). The panel makes
+        -- no second, separate status call.
+        local moved = row.task.status == "open" and assigned.status == "in-progress"
+        store.follow(row.task, assigned)
+        if moved then
+          store.publish("core.todo.status:changed", {
+            id = assigned.id, from = row.task.status, to = assigned.status,
+            at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+          })
+        end
+        store.publish("core.todo:changed", { kind = "assign", id = assigned.id })
+        store.poke_notifier()
 
-      require("auto-finder.log").notify(
-        string.format("assigned '%s' to %s%s%s",
-          row.task.title or row.task.id,
-          choice.name,
-          instruction and (" — " .. instruction) or "",
-          moved and " (→ in-progress)" or ""),
-        { component = "view.todos", level = "info", notify = true })
-      if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-        _render(M._bufnr)
-      end
+        require("auto-finder.log").notify(
+          string.format("assigned '%s' to %s%s%s",
+            row.task.title or row.task.id,
+            choice.name,
+            instruction and (" — " .. instruction) or "",
+            moved and " (→ in-progress)" or ""),
+          { component = "view.todos", level = "info", notify = true })
+        _reload()
+      end)
     end)
   end)
 end
@@ -1795,34 +1707,39 @@ local function _toggle_expand(row)
   end
 end
 
----`R` action: full refresh via auto-core.todo.refresh, then
----re-render the panel.
+---`R` action: AutoDoc reconciles the store (todos.refresh), then the panel
+---reloads. Also the retry after "AutoDoc required" or a failed load.
 ---@param bufnr integer
 local function _refresh(bufnr)
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if ok_todo then pcall(todo.refresh) end
-  _render(bufnr)
+  if not store.available() then return _reload(bufnr) end
+  store.refresh(function(summary, err)
+    if not summary then
+      require("auto-finder.log").error("view.todos", "refresh failed: " .. tostring(err))
+    else
+      store.publish("core.todo:refreshed", { summary = summary, at = os.date("!%Y-%m-%dT%H:%M:%SZ") })
+    end
+    _reload(bufnr)
+  end)
 end
 
 ---`M` action: migrate the `.todo-list/` directory to a new location.
 ---AutoDoc does the filesystem work (ADR 1791532020 §2.3): a move is
----`auto-core.todo.move_store`, which refuses an existing target and keeps
----the store's claim, change log and cursors; "switch only" is
----`auto-core.todo.set_todo_dir`, which needs an existing directory. The
+---`todos.move_store`, which refuses an existing target and keeps the
+---store's claim, change log and cursors; "switch only" is `todos.set_dir`
+---for this project's root, which needs an existing directory. The
 ---panel never renames, creates or deletes a directory itself: a missing
 ---parent (or, for a switch, a missing target) is refused with a message
 ---(jarvis, 2026-10-13).
 local function _migrate_dir()
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not ok_todo then return end
-  if type(todo.move_store) ~= "function" then
-    require("auto-finder.log").error("view.todos", M.NEEDS_AUTOCORE)
+  local available, why = store.available()
+  if not available then
+    require("auto-finder.log").error("view.todos", "migrate: " .. tostring(why))
     return
   end
   local ok_path, fs_path = pcall(require, "auto-core.fs.path")
   if not ok_path then return end
 
-  local current = todo.get_todo_dir()
+  local current = store.dir()
   vim.ui.input({
     prompt     = "Migrate .todo-list/ to: ",
     default    = current,
@@ -1910,28 +1827,30 @@ local function _migrate_dir()
       return
     end
 
-    local okm, merr
+    if store.dir() ~= current then return end -- the project changed under the prompt
+    local function done(ok, err)
+      if not ok then
+        require("auto-finder.log").error("view.todos", "migrate failed: " .. tostring(err))
+        return
+      end
+      -- Success path — INFO toast (notify=true so it always toasts;
+      -- INFO normally wouldn't per the default should_toast rule, but
+      -- the user explicitly invoked `M` and deserves visible confirmation).
+      require("auto-finder.log").notify(
+        action == "move_switch"
+          and ("auto-finder.todos: migrated to " .. new_path)
+          or  ("auto-finder.todos: override switched to " .. new_path
+                .. " (no files moved)"),
+        { component = "view.todos", level = "info", notify = true })
+      if action == "move_switch" then
+        store.publish("core.todo:changed", { kind = "move_store", dir = new_path })
+      end
+      _reload()
+    end
     if action == "move_switch" then
-      okm, merr = pcall(todo.move_store, new_path)
+      store.move_store(new_path, function(moved, err) done(moved ~= nil, err) end)
     else
-      okm, merr = pcall(todo.set_todo_dir, new_path)
-    end
-    if not okm then
-      require("auto-finder.log").error("view.todos", "migrate failed: " .. tostring(merr))
-      return
-    end
-
-    -- Success path — INFO toast (notify=true so it always toasts;
-    -- INFO normally wouldn't per the default should_toast rule, but
-    -- the user explicitly invoked `M` and deserves visible confirmation).
-    require("auto-finder.log").notify(
-      action == "move_switch"
-        and ("auto-finder.todos: migrated to " .. new_path)
-        or  ("auto-finder.todos: override switched to " .. new_path
-              .. " (no files moved)"),
-      { component = "view.todos", level = "info", notify = true })
-    if M._bufnr and vim.api.nvim_buf_is_valid(M._bufnr) then
-      _render(M._bufnr)
+      store.set_dir(new_path, done)
     end
   end)
 end
@@ -2014,7 +1933,7 @@ local function _apply_keymaps(bufnr, panel_winid)
     "auto-finder.todos: set status (numbered modal: open / in-progress / completed / deferred / archived)")
   -- v0.2.43: `A` (capital — distinct from `a` add) assigns the
   -- task under the cursor to a spawned agent with optional
-  -- direction notes. Routes through auto-core.todo.assign; AutoDoc logs
+  -- direction notes. AutoDoc assigns it (todos.assign) and logs
   -- the assignment and auto-core's notifier tells the agent.
   set("A", function() _assign_task(_row_under_cursor(panel_winid)) end,
     "auto-finder.todos: assign task to a spawned agent (picker + notes prompt)")
@@ -2023,7 +1942,7 @@ local function _apply_keymaps(bufnr, panel_winid)
   set("O", function() _toggle_all() end,
     "auto-finder.todos: toggle ALL sections — collapse everything if anything is open, else expand everything")
   set("R", function() _refresh(bufnr) end,
-    "auto-finder.todos: refresh (auto-core.todo.refresh + re-render)")
+    "auto-finder.todos: refresh (todos.refresh + re-render)")
   set("M", _migrate_dir,
     "auto-finder.todos: migrate .todo-list/ to a new location")
 
@@ -2048,15 +1967,47 @@ local function _cancel_pending_load()
   M._loading_dir = nil
 end
 
+---_show_message replaces the panel's body with a few lines and no rows (a
+---load that failed, or AutoDoc missing).
+---@param bufnr integer
+---@param lines string[]
+local function _show_message(bufnr, lines)
+  if not vim.api.nvim_buf_is_valid(bufnr) then return end
+  vim.bo[bufnr].modifiable = true
+  vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
+  vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, lines)
+  vim.bo[bufnr].modifiable = false
+  vim.bo[bufnr].modified = false
+  M._rows = {}
+  M._rows_dir = store.dir()
+end
+
+---The panel without AutoDoc: what is missing, and how to come back. There is no
+---Lua fallback (ADR 1791532020 §4), as the kb section has none.
+M.REQUIRED_LINES = function(why)
+  return {
+    "  todos section",
+    "",
+    "  AutoDoc is not available: " .. tostring(why or store.REQUIRED),
+    "",
+    "  AutoDoc required: install AutoDoc (or start its daemon), then press R.",
+  }
+end
+
 local function _load(bufnr)
   _cancel_pending_load()
   local generation = _load_generation
+  local available, why = store.available()
+  if not available then
+    _show_message(bufnr, M.REQUIRED_LINES(why))
+    return
+  end
   M._loading = true
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  local directory = ok_todo and todo.get_todo_dir()
+  local directory = store.dir()
   M._loading_dir = directory
   if M._rows_dir ~= directory then
     M._rows = {}
+    M._snapshot, M._by_id = nil, nil
     vim.bo[bufnr].modifiable = true
     vim.api.nvim_buf_clear_namespace(bufnr, NS, 0, -1)
     vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "Loading todos…" })
@@ -2066,7 +2017,7 @@ local function _load(bufnr)
   local function current()
     return generation == _load_generation and M._bufnr == bufnr
       and vim.api.nvim_buf_is_valid(bufnr)
-      and (not ok_todo or todo.get_todo_dir() == directory)
+      and store.dir() == directory
   end
   local function finish(result, done, err)
     if not current() then
@@ -2083,25 +2034,20 @@ local function _load(bufnr)
       if rendered then return end
       err = render_err
     end
-    if err then
-      _cancel_pending_load()
-      require("auto-finder.log").error("view.todos", "load failed: " .. tostring(err))
-      vim.bo[bufnr].modifiable = true
-      vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, { "Todos loading failed — press R to retry" })
-      vim.bo[bufnr].modifiable = false
-      M._rows = {}
+    _cancel_pending_load()
+    if tostring(err):find("AutoDoc required", 1, true) then
+      _show_message(bufnr, M.REQUIRED_LINES(err))
       return
     end
+    require("auto-finder.log").error("view.todos", "load failed: " .. tostring(err))
+    _show_message(bufnr, { "Todos loading failed — press R to retry", "", "  " .. tostring(err) })
   end
-  if ok_todo and type(todo.scan_async) == "function" then
-    _cancel_load = todo.scan_async(finish)
-  else
-    -- Compatibility with older auto-core: still let the panel appear
-    -- before the synchronous scan, but only the newer API yields in chunks.
-    vim.defer_fn(function()
-      finish(nil, true)
-    end, 1)
-  end
+  _cancel_load = store.load(finish)
+end
+
+_reload = function(bufnr)
+  bufnr = bufnr or M._bufnr
+  if bufnr and vim.api.nvim_buf_is_valid(bufnr) then _load(bufnr) end
 end
 
 -- Captured auto-core.events handles for our two subscriptions:
@@ -2146,7 +2092,7 @@ local function _on_event(reason)
   end)
 end
 
----Subscribe to auto-core.todo lifecycle events. Idempotent — when
+---Subscribe to the core.todo:* lifecycle events. Idempotent — when
 ---subscriptions already exist this is a no-op so re-focusing the
 ---slot doesn't duplicate callbacks.
 local function _ensure_subscriptions()
@@ -2208,8 +2154,7 @@ end
 
 function M.on_focus(panel_winid, bufnr)
   if not vim.api.nvim_buf_is_valid(bufnr) then return end
-  local ok_todo, todo = pcall(require, "auto-core.todo")
-  if not M._loading or (ok_todo and M._loading_dir ~= todo.get_todo_dir()) then
+  if not M._loading or M._loading_dir ~= store.dir() then
     _load(bufnr)
   end
   _apply_keymaps(bufnr, panel_winid)
@@ -2225,6 +2170,7 @@ function M.on_close()
   M._bufnr = nil
   M._rows  = nil
   M._rows_dir = nil
+  M._snapshot, M._by_id = nil, nil
 end
 
 -- Test-only — production code never calls this.

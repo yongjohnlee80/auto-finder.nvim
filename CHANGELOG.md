@@ -2,6 +2,41 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — the todos panel calls AutoDoc itself
+
+ADR 1791532020 §3 step 4 (r12). **Requires auto-core v0.4.0 or later and
+autodoc.nvim v0.1.39 or later.** It must ship before auto-core v0.4.1, which
+removes `auto-core.todo`.
+
+- **A direct client.** The todos panel and the repos panel's `A` (attach a
+  review to an in-progress task) call AutoDoc's `todos.*` verbs through
+  autodoc.nvim's client (`views/todos/store.lua`), not through `auto-core.todo`.
+  auto-core only says where the project's store is (`auto-core.todo.where`,
+  which also claims it the first time); open buffers still follow a moved task
+  through `auto-core.todo.buffers`. The panel publishes the `core.todo:*`
+  events after its own writes.
+- **The stale guard works.** Every write names the `rev` of the task the panel
+  listed. A task changed since (by an agent, by hand) is refused as
+  `todos.stale`: the panel says so and reloads, and never retries. The shim
+  read the task again just before writing, which let a stale row overwrite a
+  newer change.
+- **"AutoDoc required".** Without autodoc.nvim, or without the daemon, the
+  panel shows "AutoDoc required" and how to come back (`R`), as the kb section
+  does. With an auto-core older than v0.4.0 it says "update auto-core". There is
+  no Lua fallback.
+- **No synchronous reads.** Rendering never asks the daemon: the panel renders
+  what it loaded. `blocked:` targets resolve from the loaded tasks, and a task's
+  path is the daemon's.
+- **D2: relative refs resolve against the KB root only.** The KB, then
+  workspace, then cwd fallback for `adr:` / `review:` is gone (ADR 1791532020
+  §2.3).
+- **Attaching a review:** the review goes to AutoDoc absolute (it symbolizes
+  it), and a review the task already has is not written again.
+- **Tests:** a synchronous fixture client (`tests/_todos.lua`) replaces
+  `auto-core.todo` in the suites. `todos-cutover.lua` adds cells for "never
+  loads auto-core.todo", "AutoDoc required", the stale row and buffers
+  following a move; its mutant script adds mutants for each.
+
 ## [v0.5.9] — 2026-10-14 — the todo cutover: the panel writes nothing under .todo-list
 
 Released as v0.5.9 in the cutover set (ADR 1791532020 §3 step 3). **Requires

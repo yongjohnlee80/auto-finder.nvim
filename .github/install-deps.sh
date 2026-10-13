@@ -53,9 +53,9 @@ for spec in "auto-core.nvim:${AUTO_CORE_REF:-}" \
   fi
 done
 
-# AutoDoc (ADR 1791532020): from auto-core v0.4.0 auto-core.todo forwards to
-# AutoDoc's daemon, so the todo cells need autodoc.nvim (lua/, in the autodoc
-# repo) and its binary. Sibling shape only: tests/_autodoc.lua looks for
+# AutoDoc (ADR 1791532020): the todos panel calls AutoDoc's daemon itself,
+# through autodoc.nvim's todos client, so the todo cells need autodoc.nvim
+# (lua/, in the autodoc repo) and its binary. Sibling shape only: tests/_autodoc.lua looks for
 # <plugins>/autodoc/main and its bin/autodoc, and gives each suite a daemon of
 # its own. The binary is built here, without cgo, as autodoc's Makefile does.
 echo "autodoc:"
