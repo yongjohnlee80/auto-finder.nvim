@@ -317,11 +317,14 @@ do
   vim.wait(200, function() return false end, 10)
   remove_spies()
   vim.ui.select = select
+  -- (nil when a direct write broke the file: the cells fail, not the suite)
   local cur = todo.get(keep)
-  local bytes = assert(io.open(cur.file_path, "r")):read("*a")
-  check("the task is deferred", cur.status == "deferred")
+  local fh = cur and io.open(cur.file_path, "r")
+  local bytes = fh and fh:read("*a")
+  if fh then fh:close() end
+  check("the task is deferred, and AutoDoc still reads it", cur and cur.status == "deferred", cur and cur.status)
   check("the panel wrote nothing (no scaffold, no default hook)", #writes == 0, vim.inspect(writes))
-  check("the file's bytes are AutoDoc's (its rev)", vim.fn.sha256(bytes) == cur.rev)
+  check("the file's bytes are AutoDoc's (its rev)", bytes and vim.fn.sha256(bytes) == cur.rev)
 end
 
 view.on_close()
