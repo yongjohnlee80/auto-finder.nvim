@@ -2,7 +2,7 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — the todo cutover: the panel writes nothing under .todo-list
+## [v0.5.9] — 2026-10-14 — the todo cutover: the panel writes nothing under .todo-list
 
 Released as v0.5.9 in the cutover set (ADR 1791532020 §3 step 3). **Requires
 auto-core v0.4.0** (the forwarding shim) and AutoDoc; do not ship it alone.
