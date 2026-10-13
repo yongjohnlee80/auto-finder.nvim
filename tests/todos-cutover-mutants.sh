@@ -71,6 +71,7 @@ mutants=(
   "$D|$C|open buffers stay on the old path|    pcall(buffers.retarget, from, to)|    local _ = buffers"
   "$D|$C|add re-resolves the project for the scaffold|      return M.call_at(ctx, \"scaffold\", {}, function(_, serr)|      return M.call(\"scaffold\", {}, function(_, serr)"
   "$D|$C|a load re-resolves the project for its months|      M.call_at(snap.ctx, \"list\", { { buckets = { \"archived\" } } }, function(months, merr)|      M.call(\"list\", { { buckets = { \"archived\" } } }, function(months, merr)"
+  "$D|$C|set_dir resolves the project root after its wait|    M.context(function(_, cerr) cb(cerr == nil, cerr) end, root)|    M.context(function(_, cerr) cb(cerr == nil, cerr) end)"
   "$T|$A|the review attach writes after a project switch (Lector #68 r0 P2)|      if store.dir() ~= listed then|      if false then"
 )
 
