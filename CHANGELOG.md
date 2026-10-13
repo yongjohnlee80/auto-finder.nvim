@@ -2,7 +2,7 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — the todos panel calls AutoDoc itself
+## [v0.5.10] — 2026-10-14 — the todos panel calls AutoDoc itself
 
 ADR 1791532020 §3 step 4 (r12). **Requires auto-core v0.4.0 or later and
 autodoc.nvim v0.1.39 or later.** It must ship before auto-core v0.4.1, which
