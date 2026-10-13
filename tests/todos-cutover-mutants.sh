@@ -37,7 +37,7 @@ red() { # the run failed: a FAIL line, a non-zero failed count, or no summary
 }
 
 base="$(copy base)"
-for s in tests/todos-cutover.lua tests/smoke.lua; do
+for s in tests/todos-cutover.lua tests/smoke.lua tests/adr0083-repos-task-attach.lua; do
   out="$(run_suite "$base" "$s")"
   if red "$out"; then echo "BASELINE NOT GREEN ($s): $(summary_of "$out")"; printf '%s\n' "$out" | grep FAIL; exit 1; fi
   echo "baseline $s: $(summary_of "$out")"
@@ -45,8 +45,10 @@ done
 
 V=lua/auto-finder/views/todos/init.lua
 D=lua/auto-finder/views/todos/store.lua
+T=lua/auto-finder/views/repos/tree.lua
 C=tests/todos-cutover.lua
 S=tests/smoke.lua
+A=tests/adr0083-repos-task-attach.lua
 # file|suite|name|old|new — literal strings; old must occur exactly once.
 # (No mutant re-adds a require of auto-core.todo: auto-core v0.4.1 removes the
 # module, so such a mutant would load nothing and survive there. The cutover
@@ -67,6 +69,7 @@ mutants=(
   "$V|$C|AutoDoc missing: no \"AutoDoc required\" screen|    _show_message(bufnr, M.REQUIRED_LINES(why))|    _show_message(bufnr, { \"Loading todos…\" })"
   "$V|$S|D2: the workspace fallback for relative refs comes back|  local kb = _kb_root()|  local ws = require(\"auto-core.todo.where\").root() .. \"/\" .. ref\n  if vim.fn.filereadable(ws) == 1 then return ws end\n  local kb = _kb_root()"
   "$D|$C|open buffers stay on the old path|    pcall(buffers.retarget, from, to)|    local _ = buffers"
+  "$T|$A|the review attach writes after a project switch (Lector #68 r0 P2)|      if store.dir() ~= listed then|      if false then"
 )
 
 killed=0; survived=0; broken=0; i=0

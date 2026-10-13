@@ -3345,6 +3345,11 @@ function M.attach_review_to_task(row)
       return
     end
     local tasks = store._decorate(ctx, (listing and listing.tasks) or {})
+    -- The picker lists THIS store's tasks; the write must not land in
+    -- another one. A project switch while the picker is open (the next
+    -- write would re-resolve to the new project's store, where the same id
+    -- and rev could exist) is refused, as the todos panel refuses it.
+    local listed = ctx and ctx.store
     if #tasks == 0 then
       logger.notify("repos: no in-progress tasks found in .todo-list/in-progress/",
         { level = vim.log.levels.WARN })
@@ -3362,6 +3367,11 @@ function M.attach_review_to_task(row)
       format_item = function(item) return item.label end,
     }, function(choice)
       if not choice then return end
+      if store.dir() ~= listed then
+        logger.notify("repos: the project's todo store changed while the picker was open; "
+          .. "nothing attached (press A again)", { level = vim.log.levels.WARN })
+        return
+      end
       local sel_task = choice.task
       -- The review goes over the wire ABSOLUTE: AutoDoc symbolizes it its own
       -- way ($KB_ROOT/…). The refs already on the task are the daemon's own
