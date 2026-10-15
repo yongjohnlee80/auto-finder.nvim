@@ -865,9 +865,18 @@ end
   ok("[kb] *** and FORWARDED a kb_root — the line the panel needed ***",
     seen ~= nil and type(seen.kb_root) == "string" and seen.kb_root ~= "",
     seen and vim.inspect(seen))
-  -- It must be the resolver's answer, not something invented here.
-  local vok, vars = pcall(require, "auto-core.todo.vars")
-  local resolved = vok and select(2, pcall(vars.get, "KB_ROOT")) or nil
+  -- It must be the resolver's answer, not something invented here: auto-core's
+  -- one KB resolver, auto-core.kb.root() (auto-core >= v0.3.0). From auto-core
+  -- v0.4.2 the todo variable $KB_ROOT is AutoDoc's, derived from where the todo
+  -- store is, which is not the question; before v0.3.0 it was this resolution.
+  local kok, kb = pcall(require, "auto-core.kb")
+  local resolved
+  if kok and type(kb.root) == "function" then
+    resolved = select(2, pcall(kb.root))
+  else
+    local vok, vars = pcall(require, "auto-core.todo.vars")
+    resolved = vok and select(2, pcall(vars.get, "KB_ROOT")) or nil
+  end
   ok("[kb] *** and it is auto-core's resolved value, not a guess ***",
     seen ~= nil and resolved ~= nil and seen.kb_root == resolved,
     ("forwarded=%s resolved=%s"):format(tostring(seen and seen.kb_root), tostring(resolved)))

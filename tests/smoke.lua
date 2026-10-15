@@ -4196,7 +4196,14 @@ section(function()
   ok("render lists $KB_ROOT built-in",     text:find("$KB_ROOT", 1, true) ~= nil)
   ok("render lists $WORKSPACE built-in",   text:find("$WORKSPACE", 1, true) ~= nil)
   ok("render lists $HOME built-in",        text:find("$HOME", 1, true) ~= nil)
-  ok("render lists $CWD built-in",         text:find("$CWD", 1, true) ~= nil)
+  -- auto-core v0.4.2: the store's built-ins are AutoDoc's (ADR 1792015069):
+  -- $PROJECT_ROOT is one, and $CWD is gone (the daemon has no working directory)
+  if vars.is_builtin("PROJECT_ROOT") then
+    ok("render lists $PROJECT_ROOT built-in", text:find("$PROJECT_ROOT", 1, true) ~= nil)
+    ok("render lists no $CWD (auto-core v0.4.2)", text:find("$CWD", 1, true) == nil)
+  else
+    ok("render lists $CWD built-in",         text:find("$CWD", 1, true) ~= nil)
+  end
   ok("render lists user var $PROJECT_DOCS", text:find("$PROJECT_DOCS", 1, true) ~= nil)
   ok("built-in rows have (auto) tag",      text:find("%(auto%)") ~= nil)
 
