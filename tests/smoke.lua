@@ -111,6 +111,24 @@ local function panel_shows(b, pattern, plain)
   end, 10)
 end
 
+---store_kb pins the panel's store's $KB_ROOT for a cell. From auto-core v0.4.2 a
+---todo store's variables are AutoDoc's (ADR 1792015069): $KB_ROOT comes from where
+---the store is, never from $AUTO_AGENTS_KB_ROOT, so a fixture that wants one sets
+---the store's own override (nil clears it). An older auto-core reads the env,
+---which the cells still set: there this does nothing.
+local function store_kb(dir)
+  local vars = require("auto-core.todo.vars")
+  if not vars.is_builtin("PROJECT_ROOT") then return end
+  local where, daemon = require("auto-core.todo.where"), require("auto-core.todo.daemon")
+  local okd, err = daemon.sync(function()
+    local c = where.ensure(where.root())
+    local _, e = daemon.rpc("todos.set_var", { "KB_ROOT", dir or "", { at = c.at, scope = "store" } })
+    if e then daemon.fail(e) end
+  end)
+  assert(okd, "store_kb: " .. tostring(err))
+  vars._reset_for_tests()
+end
+
 -- ── silent-truncation guard (KB todo 2026-08-23) ──────────────────
 -- Before this guard, an uncaught error in a section body aborted the
 -- WHOLE main chunk. Because the final "N passed, M failed" summary is
@@ -3802,6 +3820,7 @@ section(function()
   vim.fn.writefile({ "# adr" }, _kb_test_dir .. "/shared/adrs/0099-fix.md")
   local saved_kb = vim.env.AUTO_AGENTS_KB_ROOT
   vim.env.AUTO_AGENTS_KB_ROOT = _kb_test_dir
+  store_kb(_kb_test_dir)
 
   local id_with_adr = todo.add({
     id    = "2026-05-25-with-adr",
@@ -3935,6 +3954,7 @@ section(function()
   vim.env.AUTO_AGENTS_KB_WRITE = nil
   vim.env.AUTO_AGENTS_KB_ROOT  = nil
   vim.env.AUTO_AGENTS_KB_READ  = nil
+  store_kb(nil)
 
   vim.fn.mkdir(tmp_root .. "/docs/refs", "p")
   vim.fn.writefile({ "# ws-rooted" }, tmp_root .. "/docs/refs/v37.md")
@@ -3968,6 +3988,7 @@ section(function()
   vim.env.AUTO_AGENTS_KB_WRITE = _saved_kb_write
   vim.env.AUTO_AGENTS_KB_ROOT  = _saved_kb_root
   vim.env.AUTO_AGENTS_KB_READ  = _saved_kb_read
+  store_kb(_kb_test_dir)
 
   -- With the KB root set, the same relative ref is KB-rooted although the
   -- workspace holds a file at that relative path.
@@ -4002,6 +4023,7 @@ section(function()
 
   -- Cleanup KB fixture
   vim.env.AUTO_AGENTS_KB_ROOT = saved_kb
+  store_kb(nil)
   vim.fn.delete(_kb_test_dir, "rf")
 
   -- ── event-driven re-render works when buffer is visible ────
@@ -4178,8 +4200,11 @@ section(function()
   package.loaded["auto-core.todo.vars"] = nil
   local vars = require("auto-core.todo.vars")
 
-  vars.set("PROJECT_DOCS", "/tmp/project-docs")
+  -- the store first: from auto-core v0.4.2 a new var is this machine's value for
+  -- the store (ADR 1792015069), so there must be one
   todo.add({ title = "task for vars test" })
+  local okset, seterr = vars.set("PROJECT_DOCS", "/tmp/project-docs")
+  ok("vars.set answers true", okset == true, seterr)
 
   -- Put the panel buffer in a visible window so event-driven
   -- re-render isn't gated by win_findbuf=0.
@@ -4227,11 +4252,18 @@ section(function()
     panel_shows(b, "$ANOTHER", true))
 
   vars.remove("ANOTHER")
-  ok("remove triggers re-render (var no longer visible)",
-    vim.wait(3000, function()
-      return not table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
-        :find("$ANOTHER", 1, true)
-    end, 10))
+  if vars.is_builtin("PROJECT_ROOT") then
+    -- auto-core v0.4.2: remove clears this machine's value; the name stays declared
+    -- machine-only for the store, whose other machines may set it
+    ok("remove triggers re-render (the value is gone, the name stays declared)",
+      panel_shows(b, "$ANOTHER = (unset)", true))
+  else
+    ok("remove triggers re-render (var no longer visible)",
+      vim.wait(3000, function()
+        return not table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+          :find("$ANOTHER", 1, true)
+      end, 10))
+  end
 
   -- Numbered status modal: stub vim.ui.select, fire the `s` keymap.
   local id = todo.add({ title = "status-modal target" })
