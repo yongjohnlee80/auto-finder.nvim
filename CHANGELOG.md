@@ -18,12 +18,12 @@ release: `$WORKSPACE` is no longer a built-in.
   machine-only adds `machine-only`. A name a pending migration holds in
   conflict reads `(conflict)`, and is unresolved until this machine sets it
   (`e`). The preview (`i`) says the same, in words.
-- **Edits go there.** `a`, `e` and `d` write to the owning workspace's
+- **Edits go there.** `a`, `e` and `d` write to the same workspace's
   variables, in the scope the value comes from (a new name: this machine).
-- **A task's refs** resolve with the variables of the workspace that owns the
-  task's file (`{ from = task.file_path }`). The panel shows the session's
-  store, so this is the same table it already used. The rule is the daemon's,
-  stated once.
+- **One table.** Edits and a task's refs read the session store's table, with no
+  `from`. That is the owning workspace's own: the panel shows only the session's
+  store, and every task in it shares its owner. Only the Vars section passes
+  `from`, the store's directory, which is how it names the workspace.
 - **`$WORKSPACE` is retired.** It is an ordinary name, unresolved unless set.
   The smoke cell that listed it as a built-in now asserts that it is gone.
 
