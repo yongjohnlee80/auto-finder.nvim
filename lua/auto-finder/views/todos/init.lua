@@ -338,9 +338,10 @@ end
 -- ─── path resolvers (used by the inline-expansion + <CR>) ──────
 
 ---The `{ from = path }` auto-core's variables are read with (auto-core v0.5.0, ADR 1792132105
----§2.5): a file's refs resolve with the variables of the workspace that owns the file, which the
----daemon names. path is a task's file, or the store's directory for the Vars section; nil reads
----the session store's (auto-core before v0.5.0 ignores the argument).
+---§2.5): the variables of the workspace that owns path, which the daemon names. Only the Vars
+---section passes one, the store's directory, to name that workspace: everything else here reads
+---the session store's table, the same one, as the panel shows only the session's store and every
+---task of it shares its owner. nil reads the session store's (auto-core before v0.5.0 ignores it).
 ---@param path string?
 ---@return table?
 local function _from(path)
@@ -348,8 +349,8 @@ local function _from(path)
   return { from = path }
 end
 
----The directory of the store the panel last loaded: the Vars section shows its workspace's
----variables, and edits them there. nil before a load.
+---The directory of the store the panel last loaded, whose owning workspace the Vars section
+---names. nil before a load.
 ---@return string?
 local function _store_dir()
   local s = M._snapshot
@@ -374,12 +375,11 @@ local _VAR_FROM = {
 ---validator does. A private copy here read the env vars in another order
 ---(WRITE first, the order auto-core dropped for producing `shared/shared`
 ---paths) and could disagree with it.
----@param from string?  the file whose refs these are (see `_from`)
 ---@return string?  absolute KB root, or nil when none resolves
-local function _kb_root(from)
+local function _kb_root()
   local ok, vars = pcall(require, "auto-core.todo.vars")
   if not ok then return nil end
-  local okv, root = pcall(vars.get, "KB_ROOT", _from(from))
+  local okv, root = pcall(vars.get, "KB_ROOT")
   if not okv or type(root) ~= "string" or root == "" then return nil end
   return (vim.fn.fnamemodify(vim.fn.expand(root), ":p"):gsub("/$", ""))
 end
@@ -407,14 +407,13 @@ end
 ---     uses). The old KB → workspace → cwd fallback is gone: a path the
 ---     daemon flags as not-found must not open some other file here.
 ---@param ref string
----@param from string?  the file the ref is in (a task's): it resolves with that file's workspace's variables
 ---@return string?  absolute path, or nil for invalid input or no KB root
-local function _resolve_ref_path(ref, from)
+local function _resolve_ref_path(ref)
   if type(ref) ~= "string" or ref == "" then return nil end
 
   local ok_vars, vars = pcall(require, "auto-core.todo.vars")
   if ok_vars and type(vars.resolve_path) == "function" then
-    local r = vars.resolve_path(ref, _from(from))
+    local r = vars.resolve_path(ref)
     if r.unresolved then
       return r.path  -- the literal $VAR/... so the editor surfaces a clear error
     end
@@ -427,7 +426,7 @@ local function _resolve_ref_path(ref, from)
     return vim.fn.expand(ref)
   end
 
-  local kb = _kb_root(from)
+  local kb = _kb_root()
   if not kb then return nil end
   return kb:gsub("/+$", "") .. "/" .. ref:gsub("^/+", "")
 end
@@ -761,7 +760,7 @@ local function _render(bufnr, snapshot)
     if type(task.adr) == "table" and #task.adr > 0 then
       emit_fm_list_header(task, "adr")
       for _, rel in ipairs(task.adr) do
-        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_ref_path(rel, task.file_path) })
+        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_ref_path(rel) })
       end
     end
 
@@ -770,11 +769,11 @@ local function _render(bufnr, snapshot)
     if type(task.review) == "table" and #task.review > 0 then
       emit_fm_list_header(task, "review")
       for _, rel in ipairs(task.review) do
-        emit_fm_list_item(task, "review[]", rel, { filepath = _resolve_ref_path(rel, task.file_path) })
+        emit_fm_list_item(task, "review[]", rel, { filepath = _resolve_ref_path(rel) })
       end
     elseif type(task.review) == "string" and task.review ~= "" then
       emit_fm_scalar(task, "review", task.review,
-        { hl = HL.fm_path, filepath = _resolve_ref_path(task.review, task.file_path) })
+        { hl = HL.fm_path, filepath = _resolve_ref_path(task.review) })
     end
 
     -- blocked — list of task ids; each resolves to a task file path.
@@ -1456,7 +1455,7 @@ local function _add_var()
     name = name:gsub("^%$+", "")  -- tolerate `$NAME` input
     vim.ui.input({ prompt = "Value for $" .. name .. ": " }, function(value)
       if not value or value == "" then return end
-      local ok, err = vars.set(name, value, _from(_store_dir()))
+      local ok, err = vars.set(name, value)
       if not ok then
         require("auto-finder.log").error("view.todos",
           "var set failed: " .. tostring(err))
@@ -1482,7 +1481,7 @@ local function _edit_var(row)
     default = tostring(row.value or ""),
   }, function(input)
     if input == nil then return end  -- cancelled
-    local ok, err = vars.set(row.name, input, _from(_store_dir()))
+    local ok, err = vars.set(row.name, input)
     if not ok then
       require("auto-finder.log").error("view.todos",
         "var set failed: " .. tostring(err))
@@ -1527,7 +1526,7 @@ local function _remove_task(row)
       "Delete user variable '$" .. tostring(row.name) .. "'?",
       "&Yes\n&No", 2)
     if choice ~= 1 then return end
-    local ok, err = vars.remove(row.name, _from(_store_dir()))
+    local ok, err = vars.remove(row.name)
     if not ok then
       require("auto-finder.log").error("view.todos",
         "var remove failed: " .. tostring(err))
@@ -1813,7 +1812,7 @@ local function _migrate_dir()
     local resolved_input = input
     local ok_vars, vars = pcall(require, "auto-core.todo.vars")
     if ok_vars and type(vars.resolve_path) == "function" then
-      local r = vars.resolve_path(input, _from(current))
+      local r = vars.resolve_path(input)
       if r.unresolved then
         require("auto-finder.log").error("view.todos",
           "migrate: variable $" .. tostring(r.var_name)
