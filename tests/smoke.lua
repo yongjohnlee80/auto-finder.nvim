@@ -116,7 +116,7 @@ end
 ---the store is, never from $AUTO_AGENTS_KB_ROOT, so a fixture that wants one sets
 ---the store's own override (nil clears it). An older auto-core reads the env,
 ---which the cells still set: there this does nothing.
-local _kb_wss = {} -- the workspaces store_kb added (auto-core v0.5.0), store_kb_drop removes
+local _kb_wss = {} -- { name, dir } of each workspace store_kb added (auto-core v0.5.0); store_kb_drop removes them
 local function store_kb(dir)
   local vars = require("auto-core.todo.vars")
   local where, daemon = require("auto-core.todo.where"), require("auto-core.todo.daemon")
@@ -130,12 +130,19 @@ local function store_kb(dir)
     if not dir then return end
     local okd, err = daemon.sync(function()
       do
-        local name = ("af-kb-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
-        local _, e = daemon.rpc("workspace.add", { name, dir })
-        if e then daemon.fail(e) end
-        _kb_wss[#_kb_wss + 1] = name
+        -- one workspace per root: the daemon refuses a second at a root it has
+        local name
+        for _, w in ipairs(_kb_wss) do
+          if w.dir == dir then name = w.name end
+        end
+        if not name then
+          name = ("af-kb-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
+          local _, e = daemon.rpc("workspace.add", { name, dir })
+          if e then daemon.fail(e) end
+          _kb_wss[#_kb_wss + 1] = { name = name, dir = dir }
+        end
         local c = where.ensure(where.root())
-        _, e = daemon.rpc("todos.set_kb", { c.at, name })
+        local _, e = daemon.rpc("todos.set_kb", { c.at, name })
         if e then daemon.fail(e) end
       end
     end)
@@ -160,8 +167,8 @@ local function store_kb_drop()
   local names = _kb_wss
   _kb_wss = {}
   local okd, err = daemon.sync(function()
-    for _, name in ipairs(names) do
-      local _, e = daemon.rpc("workspace.remove", { name })
+    for _, w in ipairs(names) do
+      local _, e = daemon.rpc("workspace.remove", { w.name })
       if e then daemon.fail(e) end
     end
   end)
@@ -4019,11 +4026,21 @@ section(function()
   ok("D2: a relative adr never resolves to <workspace>/<rel>",
     adr_ws_row and adr_ws_row.filepath ~= tmp_root .. "/docs/refs/v37.md",
     adr_ws_row and tostring(adr_ws_row.filepath))
-  ok("D2: a relative adr resolves to <KB_ROOT>/<rel>, or to nothing without a KB root",
-    adr_ws_row and (kb_now == nil and adr_ws_row.filepath == nil
-      or kb_now ~= nil and adr_ws_row.filepath == vim.fn.fnamemodify(kb_now, ":p"):gsub("/$", "")
-        .. "/docs/refs/v37.md"),
-    adr_ws_row and ("KB_ROOT=" .. tostring(kb_now) .. " filepath=" .. tostring(adr_ws_row.filepath)))
+  if type(require("auto-core.todo.vars").workspace) == "function" then
+    -- auto-core v0.5.0: the store stays linked to _kb_test_dir, as store_kb linked it above (a
+    -- link is never undone), so $KB_ROOT is that root and a relative ref is rooted there
+    local kb = (vim.fn.fnamemodify(_kb_test_dir, ":p"):gsub("/$", ""))
+    ok("D2: a relative adr resolves to <KB_ROOT>/<rel>, the store's linked KB (auto-core v0.5.0)",
+      adr_ws_row and kb_now ~= nil and (vim.fn.fnamemodify(kb_now, ":p"):gsub("/$", "")) == kb
+        and adr_ws_row.filepath == kb .. "/docs/refs/v37.md",
+      adr_ws_row and ("KB_ROOT=" .. tostring(kb_now) .. " filepath=" .. tostring(adr_ws_row.filepath)))
+  else
+    ok("D2: a relative adr resolves to <KB_ROOT>/<rel>, or to nothing without a KB root",
+      adr_ws_row and (kb_now == nil and adr_ws_row.filepath == nil
+        or kb_now ~= nil and adr_ws_row.filepath == vim.fn.fnamemodify(kb_now, ":p"):gsub("/$", "")
+          .. "/docs/refs/v37.md"),
+      adr_ws_row and ("KB_ROOT=" .. tostring(kb_now) .. " filepath=" .. tostring(adr_ws_row.filepath)))
+  end
 
   vim.env.AUTO_AGENTS_KB_WRITE = _saved_kb_write
   vim.env.AUTO_AGENTS_KB_ROOT  = _saved_kb_root
