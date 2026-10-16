@@ -124,9 +124,12 @@ jobs:
           # Step 4 (the panel calls autodoc.todos itself) needs nothing newer:
           # it uses only auto-core.todo.where / daemon / buffers, which v0.4.0
           # ships, and auto-core v0.4.1 removes the shim AFTER this release.
-          AUTO_CORE_REF: "5bd0f4be35ecaf025fd7dc3dd2ddb44e550e5fe2"  # auto-core v0.4.0 (main @ #5, the release commit)
-          # The daemon the panel calls: v0.1.41, the cutover's AutoDoc half (#150).
-          AUTODOC_REF:   "0584e785b7b7d839bcfd2671b75896583ef91488"  # autodoc v0.1.41
+          # BUMPED for ADR 1792132105 (variables belong to the workspace): the Vars section reads
+          # the owning workspace's variables through auto-core v0.5.0's `{ from = path }`, and
+          # the daemon must answer workspace.of / workspace.vars (protocol 24, AutoDoc v0.1.53).
+          AUTO_CORE_REF: "bc4739aa2f5921185eca15f2b63e25172309a63e"  # auto-core main @ #10 (v0.5.0 line)
+          # The daemon the panel calls: v0.1.53, protocol 24 (workspace-owned variables).
+          AUTODOC_REF:   "dcc5aabb7ca97f94bc7761ba473bf82d62999980"  # autodoc v0.1.53
           # BUMPED for ADR-0083 r11: `p` and `d` call
           # `review.amend_pr_association`, which the previous pin predated.
           # Briefly pointed at PR #34's head while that PR was open; now on
@@ -201,7 +204,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           # Kept in step with the install pin above — the guard below asserts it.
-          AUTO_CORE_REF: "5bd0f4be35ecaf025fd7dc3dd2ddb44e550e5fe2"
+          AUTO_CORE_REF: "bc4739aa2f5921185eca15f2b63e25172309a63e"
         run: |
           # One API call rather than a second clone: compare gives the distance
           # to the default branch directly.

@@ -2,6 +2,31 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.6.0] — unreleased — the Vars section is the owning workspace's
+
+ADR 1792132105, "variables belong to the workspace". **Requires auto-core
+v0.5.0 or later and AutoDoc v0.1.53 or later (protocol 24).** It is a minor
+release: `$WORKSPACE` is no longer a built-in.
+
+- **The owning workspace.** The todos panel's Vars section shows the variables
+  of the workspace that owns the store, which the daemon names. auto-finder
+  reads them with auto-core's `{ from = <the store's directory> }`. The header
+  names that workspace: `Vars (7) · kb`.
+- **Where a value comes from.** Each row says where its value comes from:
+  `auto` for a derived built-in, else `machine`, `kb` (the KB's
+  `.autodoc-vars.toml`), `global` or `env`. A name the KB's file declares
+  machine-only adds `machine-only`. A name a pending migration holds in
+  conflict reads `(conflict)`, and is unresolved until this machine sets it
+  (`e`). The preview (`i`) says the same, in words.
+- **Edits go there.** `a`, `e` and `d` write to the owning workspace's
+  variables, in the scope the value comes from (a new name: this machine).
+- **A task's refs** resolve with the variables of the workspace that owns the
+  task's file (`{ from = task.file_path }`). The panel shows the session's
+  store, so this is the same table it already used. The rule is the daemon's,
+  stated once.
+- **`$WORKSPACE` is retired.** It is an ordinary name, unresolved unless set.
+  The smoke cell that listed it as a built-in now asserts that it is gone.
+
 ## [v0.5.10] — 2026-10-14 — the todos panel calls AutoDoc itself
 
 ADR 1791532020 §3 step 4 (r12). **Requires auto-core v0.4.0 or later and

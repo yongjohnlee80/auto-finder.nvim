@@ -4219,7 +4219,12 @@ section(function()
   local text  = table.concat(lines, "\n")
   ok("render shows Vars header", text:find("Vars %(") ~= nil)
   ok("render lists $KB_ROOT built-in",     text:find("$KB_ROOT", 1, true) ~= nil)
-  ok("render lists $WORKSPACE built-in",   text:find("$WORKSPACE", 1, true) ~= nil)
+  if type(vars.workspace) == "function" then
+    -- auto-core v0.5.0 (ADR 1792132105): $WORKSPACE is retired, an ordinary name, unset here
+    ok("render lists no $WORKSPACE (retired, auto-core v0.5.0)", text:find("$WORKSPACE", 1, true) == nil)
+  else
+    ok("render lists $WORKSPACE built-in",   text:find("$WORKSPACE", 1, true) ~= nil)
+  end
   ok("render lists $HOME built-in",        text:find("$HOME", 1, true) ~= nil)
   -- auto-core v0.4.2: the store's built-ins are AutoDoc's (ADR 1792015069):
   -- $PROJECT_ROOT is one, and $CWD is gone (the daemon has no working directory)
@@ -4528,6 +4533,126 @@ section(function()
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(tmp_root,  "rf")
   vim.fn.delete(state_tmp, "rf")
+end)
+
+-- ─────────────────────── 39e. views.todos — the owning workspace's variables (v0.6.0) ──
+-- auto-core v0.5.0 (ADR 1792132105, "variables belong to the workspace"): the Vars section
+-- shows the variables of the workspace that owns the store, named in its header, each with
+-- where its value comes from; a machine-only name and a name in conflict say so; a task's
+-- refs resolve with them, and `e` writes there.
+print("\n[39e] views.todos — the Vars section is the owning workspace's (auto-core v0.5.0)")
+section(function()
+  local ok_v, view = pcall(require, "auto-finder.views.todos")
+  if not ok_v then return end
+  package.loaded["auto-core.todo.vars"] = nil
+  local vars = require("auto-core.todo.vars")
+  ok("auto-core v0.5.0: vars.workspace", type(vars.workspace) == "function")
+  if type(vars.workspace) ~= "function" then return end
+  local todo = todos_client()
+  local daemon = require("auto-core.todo.daemon")
+  local function call(method, params)
+    return daemon.sync(function()
+      local _, e = daemon.rpc(method, params)
+      if e then daemon.fail(e) end
+    end)
+  end
+
+  local proj = vim.fn.tempname()
+  vim.fn.mkdir(proj .. "/docs", "p")
+  vim.fn.writefile({ "# x" }, proj .. "/docs/x.md")
+  local worktree = require("auto-core.git.worktree")
+  worktree.set_workspace_root(proj)
+  local state_tmp = vim.fn.tempname()
+  vim.fn.mkdir(state_tmp, "p")
+  require("auto-core.state").configure({ persist_dir = state_tmp })
+
+  -- the workspace first, so the store made in it is recorded as its
+  local ws = "af-ws-" .. vim.uv.os_getpid()
+  local okw, werr = call("workspace.add", { ws, proj })
+  ok("fixture: the project is a workspace", okw, werr)
+  todo.add({ title = "the store first" })
+  local store_dir = todo.dir()
+  local okd, derr = call("workspace.set_var", { ws, "DOCS", proj .. "/docs", { scope = "machine" } })
+  ok("fixture: $DOCS set on this machine for it", okd, derr)
+  vars._reset_for_tests()
+  ok("fixture: auto-core names the store's workspace", vars.workspace({ from = store_dir }) == ws,
+    tostring(vars.workspace({ from = store_dir })))
+
+  local id = todo.add({ title = "a ref through the workspace", adr = { "$DOCS/x.md" } })
+
+  vim.cmd("vsplit")
+  local panel_win = vim.api.nvim_get_current_win()
+  local b = view.get_buffer(panel_win)
+  vim.api.nvim_win_set_buf(panel_win, b)
+  view._expanded = { [id] = true }
+  view.on_focus(nil, b)
+  await_todos(view)
+
+  ok("the Vars header names the store's workspace",
+    panel_shows(b, "Vars %(%d+%) · " .. vim.pesc(ws)), vim.inspect(vim.api.nvim_buf_get_lines(b, 0, -1, false)))
+  local text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  ok("$KB_ROOT is the workspace's root", text:find("$KB_ROOT = " .. proj, 1, true) ~= nil)
+  ok("$DOCS shows where its value comes from",
+    text:find("$DOCS = " .. proj .. "/docs  (machine)", 1, true) ~= nil, text)
+  local docs_row, adr_row
+  for _, r in ipairs(view._rows or {}) do
+    if r.kind == "vars-entry" and r.name == "DOCS" then docs_row = r end
+    if r.kind == "frontmatter-field" and r.task and r.task.id == id and r.field == "adr[]" then adr_row = r end
+  end
+  ok("the $DOCS row carries its source and workspace",
+    docs_row and docs_row.source == "machine" and docs_row.workspace == ws, vim.inspect(docs_row))
+  ok("the task's $DOCS ref resolves with the workspace's value",
+    adr_row and adr_row.filepath == proj .. "/docs/x.md", adr_row and tostring(adr_row.filepath))
+
+  -- `e` on $DOCS writes the workspace's value
+  local orig_input = vim.ui.input
+  vim.ui.input = function(_, cb) cb(proj .. "/elsewhere") end
+  if docs_row then
+    vim.api.nvim_win_set_cursor(panel_win, { docs_row.lnum, 0 })
+    for _, mp in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
+      if mp.lhs == "e" then mp.callback(); break end
+    end
+  end
+  vim.ui.input = orig_input
+  vars._reset_for_tests()
+  ok("`e` on $DOCS sets the workspace's value",
+    vars.get("DOCS", { from = store_dir }) == proj .. "/elsewhere", tostring(vars.get("DOCS", { from = store_dir })))
+
+  -- a machine-only name and one in conflict, as auto-core answers them
+  local real_list, real_ws = vars.list, vars.workspace
+  vars.list = function()
+    return {
+      { name = "KB_ROOT", value = proj, builtin = true, source = "derived" },
+      { name = "MINE", value = "/m", builtin = false, source = "machine", machine = true },
+      { name = "HELD", builtin = false, source = "conflict", conflict = true },
+      { name = "SHARED", value = proj .. "/s", builtin = false, source = "kb" },
+    }
+  end
+  vars.workspace = function() return "stubbed-ws" end
+  view.on_focus(nil, b)
+  await_todos(view)
+  text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+  vars.list, vars.workspace = real_list, real_ws
+  ok("a machine-only name says so", text:find("$MINE = /m  (machine, machine-only)", 1, true) ~= nil, text)
+  ok("a name in conflict shows as one", text:find("$HELD = (conflict)", 1, true) ~= nil, text)
+  ok("a KB value says it is the KB's", text:find("$SHARED = " .. proj .. "/s  (kb)", 1, true) ~= nil, text)
+  ok("a derived built-in stays (auto)", text:find("$KB_ROOT = " .. proj .. "  (auto)", 1, true) ~= nil, text)
+  local held
+  for _, r in ipairs(view._rows or {}) do
+    if r.kind == "vars-entry" and r.name == "HELD" then held = r end
+  end
+  ok("the conflict row is flagged", held and held.conflict == true and held.is_unset == true, vim.inspect(held))
+
+  view.on_close()
+  if vim.api.nvim_win_is_valid(panel_win) then
+    pcall(vim.api.nvim_win_close, panel_win, true)
+  end
+  call("workspace.remove", { ws })
+  worktree.set_workspace_root(nil)
+  require("auto-core.state").configure({ persist_dir = nil })
+  vim.fn.delete(proj, "rf")
+  vim.fn.delete(state_tmp, "rf")
+  package.loaded["auto-core.todo.vars"] = nil
 end)
 
 -- ─────────────────────── 40. ADR-0035 Phase 1 ────────────────────────
