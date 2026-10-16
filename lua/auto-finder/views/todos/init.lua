@@ -337,17 +337,49 @@ end
 
 -- ─── path resolvers (used by the inline-expansion + <CR>) ──────
 
+---The `{ from = path }` auto-core's variables are read with (auto-core v0.5.0, ADR 1792132105
+---§2.5): a file's refs resolve with the variables of the workspace that owns the file, which the
+---daemon names. path is a task's file, or the store's directory for the Vars section; nil reads
+---the session store's (auto-core before v0.5.0 ignores the argument).
+---@param path string?
+---@return table?
+local function _from(path)
+  if type(path) ~= "string" or path == "" then return nil end
+  return { from = path }
+end
+
+---The directory of the store the panel last loaded: the Vars section shows its workspace's
+---variables, and edits them there. nil before a load.
+---@return string?
+local function _store_dir()
+  local s = M._snapshot
+  return s and s.ctx and s.ctx.store or nil
+end
+
+-- where a variable's value comes from (a row's source, AutoDoc's workspace.vars): the short tag a
+-- Vars row carries, and the preview's words. "store" is "kb" on a session below protocol 24.
+local _VAR_TAG = { machine = "machine", kb = "kb", store = "kb", global = "global", env = "env" }
+local _VAR_FROM = {
+  machine = "this machine's value",
+  kb      = "the KB's .autodoc-vars.toml (relative to the KB root, carried by git)",
+  store   = "the KB's .autodoc-vars.toml (relative to the KB root, carried by git)",
+  global  = "AutoDoc's global variables",
+  env     = "the environment",
+  derived = "derived for this workspace on this machine",
+}
+
 ---Resolve the KB root for KB-relative reference fields (adr / review),
 ---through auto-core's one resolver (`$KB_ROOT`, which is `auto-core.kb`'s
 ---root from auto-core v0.3.0), so the panel computes the same path the
 ---validator does. A private copy here read the env vars in another order
 ---(WRITE first, the order auto-core dropped for producing `shared/shared`
 ---paths) and could disagree with it.
+---@param from string?  the file whose refs these are (see `_from`)
 ---@return string?  absolute KB root, or nil when none resolves
-local function _kb_root()
+local function _kb_root(from)
   local ok, vars = pcall(require, "auto-core.todo.vars")
   if not ok then return nil end
-  local okv, root = pcall(vars.get, "KB_ROOT")
+  local okv, root = pcall(vars.get, "KB_ROOT", _from(from))
   if not okv or type(root) ~= "string" or root == "" then return nil end
   return (vim.fn.fnamemodify(vim.fn.expand(root), ":p"):gsub("/$", ""))
 end
@@ -375,13 +407,14 @@ end
 ---     uses). The old KB → workspace → cwd fallback is gone: a path the
 ---     daemon flags as not-found must not open some other file here.
 ---@param ref string
+---@param from string?  the file the ref is in (a task's): it resolves with that file's workspace's variables
 ---@return string?  absolute path, or nil for invalid input or no KB root
-local function _resolve_ref_path(ref)
+local function _resolve_ref_path(ref, from)
   if type(ref) ~= "string" or ref == "" then return nil end
 
   local ok_vars, vars = pcall(require, "auto-core.todo.vars")
   if ok_vars and type(vars.resolve_path) == "function" then
-    local r = vars.resolve_path(ref)
+    local r = vars.resolve_path(ref, _from(from))
     if r.unresolved then
       return r.path  -- the literal $VAR/... so the editor surfaces a clear error
     end
@@ -394,7 +427,7 @@ local function _resolve_ref_path(ref)
     return vim.fn.expand(ref)
   end
 
-  local kb = _kb_root()
+  local kb = _kb_root(from)
   if not kb then return nil end
   return kb:gsub("/+$", "") .. "/" .. ref:gsub("^/+", "")
 end
@@ -728,7 +761,7 @@ local function _render(bufnr, snapshot)
     if type(task.adr) == "table" and #task.adr > 0 then
       emit_fm_list_header(task, "adr")
       for _, rel in ipairs(task.adr) do
-        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_ref_path(rel) })
+        emit_fm_list_item(task, "adr[]", rel, { filepath = _resolve_ref_path(rel, task.file_path) })
       end
     end
 
@@ -737,11 +770,11 @@ local function _render(bufnr, snapshot)
     if type(task.review) == "table" and #task.review > 0 then
       emit_fm_list_header(task, "review")
       for _, rel in ipairs(task.review) do
-        emit_fm_list_item(task, "review[]", rel, { filepath = _resolve_ref_path(rel) })
+        emit_fm_list_item(task, "review[]", rel, { filepath = _resolve_ref_path(rel, task.file_path) })
       end
     elseif type(task.review) == "string" and task.review ~= "" then
       emit_fm_scalar(task, "review", task.review,
-        { hl = HL.fm_path, filepath = _resolve_ref_path(task.review) })
+        { hl = HL.fm_path, filepath = _resolve_ref_path(task.review, task.file_path) })
     end
 
     -- blocked — list of task ids; each resolves to a task file path.
@@ -952,13 +985,16 @@ local function _render(bufnr, snapshot)
   do
     local ok_vars, vars = pcall(require, "auto-core.todo.vars")
     if ok_vars and type(vars.list) == "function" then
-      local entries = vars.list() or {}
+      -- the variables of the workspace that owns the store (auto-core v0.5.0), named after the count
+      local from    = _from(_store_dir())
+      local entries = vars.list(from) or {}
+      local ws      = type(vars.workspace) == "function" and vars.workspace(from) or nil
 
       -- Header with chevron (v0.2.41).
       if #lines > 0 then lines[#lines + 1] = "" end
       local vars_collapsed = M._collapsed["vars"] == true
       local vars_chevron   = vars_collapsed and "▶ " or "▼ "
-      local header         = "Vars (" .. #entries .. ")"
+      local header         = "Vars (" .. #entries .. ")" .. (ws and (" · " .. ws) or "")
       local header_line    = vars_chevron .. header
       lines[#lines + 1] = header_line
       local lnum0 = #lines - 1
@@ -990,16 +1026,22 @@ local function _render(bufnr, snapshot)
         mark(#lines - 1, 0, #line, HL.empty)
       else
         for _, e in ipairs(entries) do
-          -- Layout: `  $NAME = <value>  (auto)` for built-ins
-          --         `  $NAME = <value>`           for user vars
-          --         `  $NAME = (unset)`           for built-ins whose
-          --                                       resolver returned nil
+          -- Layout: `  $NAME = <value>  (<where>[, machine-only])`, where is `auto` for a
+          -- derived built-in, else where the value comes from (_VAR_TAG); `(unset)` for a
+          -- name with no value here, `(conflict)` for one a pending migration holds
           local prefix     = "  "
           local name_chunk = "$" .. tostring(e.name)
           local eq_chunk   = " = "
           local is_unset   = e.value == nil or e.value == ""
-          local val_chunk  = is_unset and "(unset)" or tostring(e.value)
-          local tag_chunk  = e.builtin and "  (auto)" or ""
+          local val_chunk  = e.conflict and "(conflict)" or is_unset and "(unset)" or tostring(e.value)
+          local tags = {}
+          if e.builtin and (e.source == nil or e.source == "derived") then
+            tags[#tags + 1] = "auto"
+          elseif not is_unset and _VAR_TAG[e.source] then
+            tags[#tags + 1] = _VAR_TAG[e.source]
+          end
+          if e.machine then tags[#tags + 1] = "machine-only" end
+          local tag_chunk  = #tags > 0 and ("  (" .. table.concat(tags, ", ") .. ")") or ""
           local line = prefix .. name_chunk .. eq_chunk .. val_chunk .. tag_chunk
           lines[#lines + 1] = line
           local lnum0 = #lines - 1
@@ -1009,8 +1051,8 @@ local function _render(bufnr, snapshot)
           mark(lnum0, c, c + #name_chunk, HL.vars_name)
           c = c + #name_chunk + #eq_chunk
           mark(lnum0, c, c + #val_chunk,
-            is_unset and HL.vars_unset or HL.vars_value)
-          if e.builtin and #tag_chunk > 0 then
+            (is_unset or e.conflict) and HL.vars_unset or HL.vars_value)
+          if #tag_chunk > 0 then
             c = c + #val_chunk
             mark(lnum0, c, c + #tag_chunk, HL.vars_builtin_tag)
           end
@@ -1023,6 +1065,10 @@ local function _render(bufnr, snapshot)
             builtin  = e.builtin == true,
             doc      = e.doc,
             is_unset = is_unset,
+            source    = e.source,
+            machine   = e.machine == true,
+            conflict  = e.conflict == true,
+            workspace = ws,
           }
         end
       end
@@ -1261,6 +1307,19 @@ local function _preview_task(row)
       row.is_unset and "(unset)" or tostring(row.value or ""))
     lines[#lines + 1] = string.format("  %-12s %s", "Source",
       row.builtin and "built-in (auto-resolved, read-only)" or "user-defined")
+    if row.workspace then
+      lines[#lines + 1] = string.format("  %-12s %s", "Workspace", row.workspace)
+    end
+    if row.conflict then
+      lines[#lines + 1] = string.format("  %-12s %s", "Conflict",
+        "held by a pending migration: unresolved until this machine sets it (e)")
+    elseif not row.is_unset and _VAR_FROM[row.source] then
+      lines[#lines + 1] = string.format("  %-12s %s", "From", _VAR_FROM[row.source])
+    end
+    if row.machine then
+      lines[#lines + 1] = string.format("  %-12s %s", "Machine-only",
+        "declared by the KB's file: each machine sets its own value")
+    end
     if row.doc and row.doc ~= "" then
       lines[#lines + 1] = ""
       lines[#lines + 1] = "  Doc"
@@ -1397,7 +1456,7 @@ local function _add_var()
     name = name:gsub("^%$+", "")  -- tolerate `$NAME` input
     vim.ui.input({ prompt = "Value for $" .. name .. ": " }, function(value)
       if not value or value == "" then return end
-      local ok, err = vars.set(name, value)
+      local ok, err = vars.set(name, value, _from(_store_dir()))
       if not ok then
         require("auto-finder.log").error("view.todos",
           "var set failed: " .. tostring(err))
@@ -1423,7 +1482,7 @@ local function _edit_var(row)
     default = tostring(row.value or ""),
   }, function(input)
     if input == nil then return end  -- cancelled
-    local ok, err = vars.set(row.name, input)
+    local ok, err = vars.set(row.name, input, _from(_store_dir()))
     if not ok then
       require("auto-finder.log").error("view.todos",
         "var set failed: " .. tostring(err))
@@ -1468,7 +1527,7 @@ local function _remove_task(row)
       "Delete user variable '$" .. tostring(row.name) .. "'?",
       "&Yes\n&No", 2)
     if choice ~= 1 then return end
-    local ok, err = vars.remove(row.name)
+    local ok, err = vars.remove(row.name, _from(_store_dir()))
     if not ok then
       require("auto-finder.log").error("view.todos",
         "var remove failed: " .. tostring(err))
@@ -1754,7 +1813,7 @@ local function _migrate_dir()
     local resolved_input = input
     local ok_vars, vars = pcall(require, "auto-core.todo.vars")
     if ok_vars and type(vars.resolve_path) == "function" then
-      local r = vars.resolve_path(input)
+      local r = vars.resolve_path(input, _from(current))
       if r.unresolved then
         require("auto-finder.log").error("view.todos",
           "migrate: variable $" .. tostring(r.var_name)
