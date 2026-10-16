@@ -116,10 +116,37 @@ end
 ---the store is, never from $AUTO_AGENTS_KB_ROOT, so a fixture that wants one sets
 ---the store's own override (nil clears it). An older auto-core reads the env,
 ---which the cells still set: there this does nothing.
+local _kb_ws -- the workspace store_kb linked the store to (auto-core v0.5.0)
 local function store_kb(dir)
   local vars = require("auto-core.todo.vars")
-  if not vars.is_builtin("PROJECT_ROOT") then return end
   local where, daemon = require("auto-core.todo.where"), require("auto-core.todo.daemon")
+  if type(vars.workspace) == "function" then
+    -- auto-core v0.5.0 (ADR 1792132105): $KB_ROOT is the root of the workspace that owns the
+    -- store, and a store in none has none and takes no override. A KB root is therefore a
+    -- workspace at dir that the store is linked to (todos.set_kb); nil removes it, which leaves
+    -- the store owned by no workspace again.
+    local okd, err = daemon.sync(function()
+      if _kb_ws then
+        local name = _kb_ws
+        _kb_ws = nil
+        local _, e = daemon.rpc("workspace.remove", { name })
+        if e then daemon.fail(e) end
+      end
+      if dir then
+        local name = ("af-kb-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
+        local _, e = daemon.rpc("workspace.add", { name, dir })
+        if e then daemon.fail(e) end
+        _kb_ws = name
+        local c = where.ensure(where.root())
+        _, e = daemon.rpc("todos.set_kb", { c.at, name })
+        if e then daemon.fail(e) end
+      end
+    end)
+    assert(okd, "store_kb: " .. tostring(err))
+    vars._reset_for_tests()
+    return
+  end
+  if not vars.is_builtin("PROJECT_ROOT") then return end
   local okd, err = daemon.sync(function()
     local c = where.ensure(where.root())
     local _, e = daemon.rpc("todos.set_var", { "KB_ROOT", dir or "", { at = c.at, scope = "store" } })
@@ -4203,6 +4230,8 @@ section(function()
   -- the store first: from auto-core v0.4.2 a new var is this machine's value for
   -- the store (ADR 1792015069), so there must be one
   todo.add({ title = "task for vars test" })
+  -- auto-core v0.5.0: a user variable belongs to a workspace; the store must be in one
+  store_kb(tmp_root)
   local okset, seterr = vars.set("PROJECT_DOCS", "/tmp/project-docs")
   ok("vars.set answers true", okset == true, seterr)
 
@@ -4228,7 +4257,10 @@ section(function()
   ok("render lists $HOME built-in",        text:find("$HOME", 1, true) ~= nil)
   -- auto-core v0.4.2: the store's built-ins are AutoDoc's (ADR 1792015069):
   -- $PROJECT_ROOT is one, and $CWD is gone (the daemon has no working directory)
-  if vars.is_builtin("PROJECT_ROOT") then
+  if type(vars.workspace) == "function" then
+    -- auto-core v0.5.0: $PROJECT_ROOT is a user variable, unset here; no $CWD
+    ok("render lists no $CWD (auto-core v0.5.0)", text:find("$CWD", 1, true) == nil)
+  elseif vars.is_builtin("PROJECT_ROOT") then
     ok("render lists $PROJECT_ROOT built-in", text:find("$PROJECT_ROOT", 1, true) ~= nil)
     ok("render lists no $CWD (auto-core v0.4.2)", text:find("$CWD", 1, true) == nil)
   else
@@ -4343,6 +4375,7 @@ section(function()
   if vim.api.nvim_win_is_valid(panel_win) then
     pcall(vim.api.nvim_win_close, panel_win, true)
   end
+  store_kb(nil)
   worktree.set_workspace_root(nil)
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(tmp_root,  "rf")
@@ -4605,18 +4638,25 @@ section(function()
     adr_row and adr_row.filepath == proj .. "/docs/x.md", adr_row and tostring(adr_row.filepath))
 
   -- `e` on $DOCS writes the workspace's value
-  local orig_input = vim.ui.input
-  vim.ui.input = function(_, cb) cb(proj .. "/elsewhere") end
+  local orig_input, asked = vim.ui.input, nil
+  vim.ui.input = function(o, cb) asked = o and o.prompt or "?"; cb(proj .. "/elsewhere") end
+  local log, errs = require("auto-finder.log"), {}
+  local orig_error = log.error
+  log.error = function(_, msg) errs[#errs + 1] = msg end
+  local under
   if docs_row then
     vim.api.nvim_win_set_cursor(panel_win, { docs_row.lnum, 0 })
+    under = view._row_under_cursor(panel_win)
     for _, mp in ipairs(vim.api.nvim_buf_get_keymap(b, "n")) do
       if mp.lhs == "e" then mp.callback(); break end
     end
   end
-  vim.ui.input = orig_input
+  vim.ui.input, log.error = orig_input, orig_error
   vars._reset_for_tests()
   ok("`e` on $DOCS sets the workspace's value",
-    vars.get("DOCS", { from = store_dir }) == proj .. "/elsewhere", tostring(vars.get("DOCS", { from = store_dir })))
+    vars.get("DOCS", { from = store_dir }) == proj .. "/elsewhere",
+    vim.inspect({ got = vars.get("DOCS", { from = store_dir }), asked = asked,
+      under = under and under.name, errs = errs }))
 
   -- a machine-only name and one in conflict, as auto-core answers them
   local real_list, real_ws = vars.list, vars.workspace
