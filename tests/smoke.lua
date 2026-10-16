@@ -116,27 +116,24 @@ end
 ---the store is, never from $AUTO_AGENTS_KB_ROOT, so a fixture that wants one sets
 ---the store's own override (nil clears it). An older auto-core reads the env,
 ---which the cells still set: there this does nothing.
-local _kb_ws -- the workspace store_kb linked the store to (auto-core v0.5.0)
+local _kb_wss = {} -- the workspaces store_kb added (auto-core v0.5.0), store_kb_drop removes
 local function store_kb(dir)
   local vars = require("auto-core.todo.vars")
   local where, daemon = require("auto-core.todo.where"), require("auto-core.todo.daemon")
   if type(vars.workspace) == "function" then
     -- auto-core v0.5.0 (ADR 1792132105): $KB_ROOT is the root of the workspace that owns the
     -- store, and a store in none has none and takes no override. A KB root is therefore a
-    -- workspace at dir that the store is linked to (todos.set_kb); nil removes it, which leaves
-    -- the store owned by no workspace again.
+    -- workspace at dir that the store is linked to (todos.set_kb). A linked store cannot be
+    -- unlinked (todos.set_kb only moves it), so nil does nothing: a cell wanting no KB root
+    -- uses a store never linked. Removing the workspace would leave the store linked to a root
+    -- no workspace names (store_kb_drop, once the section is done with its store).
+    if not dir then return end
     local okd, err = daemon.sync(function()
-      if _kb_ws then
-        local name = _kb_ws
-        _kb_ws = nil
-        local _, e = daemon.rpc("workspace.remove", { name })
-        if e then daemon.fail(e) end
-      end
-      if dir then
+      do
         local name = ("af-kb-%d-%d"):format(vim.uv.os_getpid(), vim.uv.hrtime() % 1000000000)
         local _, e = daemon.rpc("workspace.add", { name, dir })
         if e then daemon.fail(e) end
-        _kb_ws = name
+        _kb_wss[#_kb_wss + 1] = name
         local c = where.ensure(where.root())
         _, e = daemon.rpc("todos.set_kb", { c.at, name })
         if e then daemon.fail(e) end
@@ -154,6 +151,22 @@ local function store_kb(dir)
   end)
   assert(okd, "store_kb: " .. tostring(err))
   vars._reset_for_tests()
+end
+
+---store_kb_drop removes the workspaces store_kb added, once a section is done with its store.
+local function store_kb_drop()
+  if #_kb_wss == 0 then return end
+  local daemon = require("auto-core.todo.daemon")
+  local names = _kb_wss
+  _kb_wss = {}
+  local okd, err = daemon.sync(function()
+    for _, name in ipairs(names) do
+      local _, e = daemon.rpc("workspace.remove", { name })
+      if e then daemon.fail(e) end
+    end
+  end)
+  assert(okd, "store_kb_drop: " .. tostring(err))
+  require("auto-core.todo.vars")._reset_for_tests()
 end
 
 -- ── silent-truncation guard (KB todo 2026-08-23) ──────────────────
@@ -4111,6 +4124,7 @@ section(function()
   if vim.api.nvim_win_is_valid(w) then
     pcall(vim.api.nvim_win_close, w, true)
   end
+  store_kb_drop()
   worktree.set_workspace_root(nil)
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(tmp_root, "rf")
@@ -4375,7 +4389,7 @@ section(function()
   if vim.api.nvim_win_is_valid(panel_win) then
     pcall(vim.api.nvim_win_close, panel_win, true)
   end
-  store_kb(nil)
+  store_kb_drop()
   worktree.set_workspace_root(nil)
   require("auto-core.state").configure({ persist_dir = nil })
   vim.fn.delete(tmp_root,  "rf")
@@ -4618,7 +4632,7 @@ section(function()
   local b = view.get_buffer(panel_win)
   vim.api.nvim_win_set_buf(panel_win, b)
   view._expanded = { [id] = true }
-  view.on_focus(nil, b)
+  view.on_focus(panel_win, b)
   await_todos(view)
 
   ok("the Vars header names the store's workspace",
@@ -4669,7 +4683,7 @@ section(function()
     }
   end
   vars.workspace = function() return "stubbed-ws" end
-  view.on_focus(nil, b)
+  view.on_focus(panel_win, b)
   await_todos(view)
   text = table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
   vars.list, vars.workspace = real_list, real_ws
