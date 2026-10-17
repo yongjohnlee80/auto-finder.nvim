@@ -2,7 +2,7 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [v0.6.0] — unreleased — the Vars section is the owning workspace's
+## [v0.6.0] — 2026-10-17 — the Vars section is the owning workspace's
 
 ADR 1792132105, "variables belong to the workspace". **Requires auto-core
 v0.5.0 or later and AutoDoc v0.1.53 or later (protocol 24).** It is a minor
