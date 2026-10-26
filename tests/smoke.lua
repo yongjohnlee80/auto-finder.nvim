@@ -4945,11 +4945,13 @@ section(function()
   }
   vim.ui.select = function(items, _, cb) cb(items[1]) end
   vim.ui.input = function(_, cb) cb("start with the tests") end
-  -- this project's todo scope, as auto-agents sets it at setup (ADR 1791532020 §2.5a)
-  local todo_scope = require("auto-core.todo.scope")
-  todo_scope.set("auto-agents:smoke")
-  ok("p40f: fixture precondition — assignments are scoped (auto-core and AutoDoc carry a scope)",
-    todo_scope.scoped(), "autodoc.nvim protocol " .. tostring(todo_scope.protocol()))
+  -- this project's todo scope, as auto-agents sets it at setup (ADR 1791532020 §2.5a). Where
+  -- auto-core has the scope and AutoDoc takes it (protocol 30), A assigns the bare name with the
+  -- scope; otherwise the full mailbox id, as before, which this cell checks too.
+  local ok_scope, todo_scope = pcall(require, "auto-core.todo.scope")
+  if ok_scope then todo_scope.set("auto-agents:smoke") end
+  local scoped = ok_scope and todo_scope.scoped()
+  local want_assignee = scoped and "agent:gold-man" or "agent:gold-man:4040404040-1"
 
   local id_start = todo.add({ id = "2026-05-30-p40-A-starts-work",
                               title = "dispatched by the operator" })
@@ -5000,12 +5002,18 @@ section(function()
     end
     ok("p40f: A sends one todos.assign and no todos.status", n_assign == 1 and n_status == 0,
       vim.inspect(sent))
-    ok("p40f: *** A assigns the agent's bare name with this project's scope, never its instance ***",
-      assign_params and assign_params[4] == "agent:gold-man" and assign_params[6] == "auto-agents:smoke",
-      vim.inspect(assign_params))
+    if scoped then
+      ok("p40f: *** A assigns the agent's bare name with this project's scope, never its instance ***",
+        assign_params and assign_params[4] == "agent:gold-man" and assign_params[6] == "auto-agents:smoke",
+        vim.inspect(assign_params))
+    else
+      ok("p40f: without the scope (auto-core or AutoDoc older), A assigns the full mailbox id, no scope",
+        assign_params and assign_params[4] == "agent:gold-man:4040404040-1" and assign_params[6] == nil,
+        vim.inspect(assign_params))
+    end
     local t_after = todo.get(id_start)
     ok("p40f: *** the assignee landed ***",
-      t_after ~= nil and t_after.assignee == "agent:gold-man",
+      t_after ~= nil and t_after.assignee == want_assignee,
       tostring(t_after and t_after.assignee))
     ok("p40f: *** and A moved the task to in-progress ***",
       t_after ~= nil and t_after.status == "in-progress",
@@ -5047,7 +5055,7 @@ section(function()
     local t_done = todo.get(id_done)
     ok("p40f: *** A on a COMPLETED task assigns without rewinding it ***",
       t_done ~= nil and t_done.status == "completed"
-        and t_done.assignee == "agent:gold-man",
+        and t_done.assignee == want_assignee,
       ("status=%s assignee=%s"):format(tostring(t_done and t_done.status),
         tostring(t_done and t_done.assignee)))
   else
@@ -5057,6 +5065,7 @@ section(function()
 
   vim.ui.select, vim.ui.input = saved_sel, saved_inp
   package.loaded["auto-agents"] = saved_aa
+  if ok_scope then todo_scope.set(nil) end
 
   if vim.api.nvim_win_is_valid(panel_win) then
     pcall(vim.api.nvim_win_close, panel_win, true)
