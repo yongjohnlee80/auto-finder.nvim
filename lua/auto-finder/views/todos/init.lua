@@ -1690,7 +1690,14 @@ local function _assign_task(row)
       local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
       if store.dir() ~= directory then return end
-      store.mutate("assign", row.task, { choice.mailbox_id, reason }, function(assigned, err, raw)
+      -- A bare `agent:<name>` with this project's scope: the notifier delivers it in this project
+      -- only, and the task file carries no instance id (ADR 1791532020 §2.5a). With an auto-core
+      -- before the scope, the full mailbox id, which reaches this instance alone.
+      local ok_sc, sc = pcall(require, "auto-core.todo.scope")
+      local params = (ok_sc and sc.scoped() and sc.get())
+        and sc.assign_params("agent:" .. tostring(choice.name), reason)
+        or { choice.mailbox_id, reason }
+      store.mutate("assign", row.task, params, function(assigned, err, raw)
         if not assigned then return _failed("assign", err, raw) end
 
         -- ASSIGNING STARTS THE WORK (Johno, 2026-09-08), now from every

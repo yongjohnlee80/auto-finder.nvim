@@ -4940,11 +4940,16 @@ section(function()
   package.loaded["auto-agents"] = {
     spawned_agents = function()
       return { { slot = 5, name = "gold-man", kind = "claude",
-                 mailbox_id = "agent:gold-man" } }
+                 mailbox_id = "agent:gold-man:4040404040-1" } }
     end,
   }
   vim.ui.select = function(items, _, cb) cb(items[1]) end
   vim.ui.input = function(_, cb) cb("start with the tests") end
+  -- this project's todo scope, as auto-agents sets it at setup (ADR 1791532020 §2.5a)
+  local todo_scope = require("auto-core.todo.scope")
+  todo_scope.set("auto-agents:smoke")
+  ok("p40f: fixture precondition — assignments are scoped (auto-core and AutoDoc carry a scope)",
+    todo_scope.scoped(), "autodoc.nvim protocol " .. tostring(todo_scope.protocol()))
 
   local id_start = todo.add({ id = "2026-05-30-p40-A-starts-work",
                               title = "dispatched by the operator" })
@@ -4975,9 +4980,10 @@ section(function()
     -- autodoc.todos itself, so the spy wraps that client's call.
     local ad_todos = require("autodoc.todos")
     local real_call = ad_todos.call
-    local sent, answered = {}, false
+    local sent, answered, assign_params = {}, false, nil
     ad_todos.call = function(verb, params, cb)
       sent[#sent + 1] = "todos." .. verb
+      if verb == "assign" then assign_params = params end
       real_call(verb, params, function(r, e)
         if verb == "assign" then answered = true end
         cb(r, e)
@@ -4994,6 +5000,9 @@ section(function()
     end
     ok("p40f: A sends one todos.assign and no todos.status", n_assign == 1 and n_status == 0,
       vim.inspect(sent))
+    ok("p40f: *** A assigns the agent's bare name with this project's scope, never its instance ***",
+      assign_params and assign_params[4] == "agent:gold-man" and assign_params[6] == "auto-agents:smoke",
+      vim.inspect(assign_params))
     local t_after = todo.get(id_start)
     ok("p40f: *** the assignee landed ***",
       t_after ~= nil and t_after.assignee == "agent:gold-man",
