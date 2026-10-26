@@ -2,6 +2,15 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [Unreleased] — the panel assigns this project's agent by name
+
+ADR 1791532020 r15 §2.5a. **Needs auto-core with `auto-core.todo.scope` and AutoDoc protocol 30**
+for the scoped form; with either older, `A` assigns the full mailbox id as before.
+
+- **`A` assigns the bare `agent:<name>` with this project's scope** (auto-core's `assign_params`),
+  so the task file carries no instance id, and auto-core's notifier delivers it in this project
+  only. It used to assign the agent's full mailbox id, `agent:<name>:<instance>`.
+
 ## [v0.6.0] — 2026-10-17 — the Vars section is the owning workspace's
 
 ADR 1792132105, "variables belong to the workspace". **Requires auto-core
