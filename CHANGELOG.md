@@ -2,7 +2,7 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
-## [Unreleased] — the panel assigns this project's agent by name
+## [v0.6.1] — 2026-10-27 — the panel assigns this project's agent by name
 
 ADR 1791532020 r15 §2.5a. **Needs auto-core with `auto-core.todo.scope` and AutoDoc protocol 30**
 for the scoped form; with either older, `A` assigns the full mailbox id as before.
