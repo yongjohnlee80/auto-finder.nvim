@@ -1690,13 +1690,21 @@ local function _assign_task(row)
       local instruction = (vim.trim(notes) ~= "") and notes or nil
       local reason = instruction or "Task assigned to you."
       if store.dir() ~= directory then return end
-      -- A bare `agent:<name>` with this project's scope: the notifier delivers it in this project
-      -- only, and the task file carries no instance id (ADR 1791532020 §2.5a). With an auto-core
-      -- before the scope, the full mailbox id, which reaches this instance alone.
+      -- The task file names the agent only, never an instance (Johno, 2026-10-29: "the full
+      -- address is only temp"). With this project's scope, the bare `agent:<name>` is delivered in
+      -- this project only (ADR 1791532020 §2.5a). With no project scope set, the full mailbox id is
+      -- given to auto-core, which keeps the name and routes this one delivery to the instance
+      -- (scope.route_of). An auto-core without either still gets the name alone.
+      local name = "agent:" .. tostring(choice.name)
       local ok_sc, sc = pcall(require, "auto-core.todo.scope")
-      local params = (ok_sc and sc.scoped() and sc.get())
-        and sc.assign_params("agent:" .. tostring(choice.name), reason)
-        or { choice.mailbox_id, reason }
+      local params
+      if ok_sc and sc.scoped() and sc.get() then
+        params = sc.assign_params(name, reason)
+      elseif ok_sc and sc.scoped() and sc.route_of then
+        params = sc.assign_params(choice.mailbox_id, reason)
+      else
+        params = { name, reason }
+      end
       store.mutate("assign", row.task, params, function(assigned, err, raw)
         if not assigned then return _failed("assign", err, raw) end
 

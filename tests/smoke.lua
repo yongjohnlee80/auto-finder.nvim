@@ -4947,11 +4947,12 @@ section(function()
   vim.ui.input = function(_, cb) cb("start with the tests") end
   -- this project's todo scope, as auto-agents sets it at setup (ADR 1791532020 §2.5a). Where
   -- auto-core has the scope and AutoDoc takes it (protocol 30), A assigns the bare name with the
-  -- scope; otherwise the full mailbox id, as before, which this cell checks too.
+  -- scope; otherwise the bare name alone. The task never carries an instance id (Johno,
+  -- 2026-10-29: "the full address is only temp"), which this cell checks either way.
   local ok_scope, todo_scope = pcall(require, "auto-core.todo.scope")
   if ok_scope then todo_scope.set("auto-agents:smoke") end
   local scoped = ok_scope and todo_scope.scoped()
-  local want_assignee = scoped and "agent:gold-man" or "agent:gold-man:4040404040-1"
+  local want_assignee = "agent:gold-man"
 
   local id_start = todo.add({ id = "2026-05-30-p40-A-starts-work",
                               title = "dispatched by the operator" })
@@ -5007,8 +5008,8 @@ section(function()
         assign_params and assign_params[4] == "agent:gold-man" and assign_params[6] == "auto-agents:smoke",
         vim.inspect(assign_params))
     else
-      ok("p40f: without the scope (auto-core or AutoDoc older), A assigns the full mailbox id, no scope",
-        assign_params and assign_params[4] == "agent:gold-man:4040404040-1" and assign_params[6] == nil,
+      ok("p40f: *** without the scope (auto-core or AutoDoc older), A still assigns the name alone, no instance ***",
+        assign_params and assign_params[4] == "agent:gold-man" and assign_params[6] == nil,
         vim.inspect(assign_params))
     end
     local t_after = todo.get(id_start)
