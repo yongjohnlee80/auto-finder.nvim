@@ -1697,13 +1697,16 @@ local function _assign_task(row)
       -- (scope.route_of). An auto-core without either still gets the name alone.
       local name = "agent:" .. tostring(choice.name)
       local ok_sc, sc = pcall(require, "auto-core.todo.scope")
-      local params
+      local params, unrouted
       if ok_sc and sc.scoped() and sc.get() then
         params = sc.assign_params(name, reason)
       elseif ok_sc and sc.scoped() and sc.route_of then
         params = sc.assign_params(choice.mailbox_id, reason)
       else
-        params = { name, reason }
+        -- the name alone, with nothing to route it: an auto-core before v0.5.2 with no project
+        -- scope delivers it to no one, and against an AutoDoc before protocol 30 every Neovim
+        -- with this agent does; said, not silent (below)
+        params, unrouted = { name, reason }, true
       end
       store.mutate("assign", row.task, params, function(assigned, err, raw)
         if not assigned then return _failed("assign", err, raw) end
@@ -1730,6 +1733,13 @@ local function _assign_task(row)
             instruction and (" — " .. instruction) or "",
             moved and " (→ in-progress)" or ""),
           { component = "view.todos", level = "info", notify = true })
+        if unrouted then
+          require("auto-finder.log").notify(
+            string.format("'%s' records %s by name only: this auto-core (or AutoDoc) can't route the "
+              .. "assignment to this project's agent, so it may not be delivered. Update auto-core "
+              .. "to v0.5.2 or later, and AutoDoc.", row.task.title or row.task.id, choice.name),
+            { component = "view.todos", level = "warn", notify = true })
+        end
         _reload()
       end)
     end)
