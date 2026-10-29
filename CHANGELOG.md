@@ -2,6 +2,19 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.6.2] — 2026-10-29 — Assign never writes an instance id into a task
+
+A task's assignee is the agent's name only (Johno, 2026-10-29: "the full address is only temp").
+**Best with auto-core v0.5.2**, which routes a full id by its instance.
+
+- **With this project's scope set,** `A` assigns the bare `agent:<name>` with that scope, as before.
+- **With no project scope set,** `A` hands auto-core the full mailbox id. auto-core keeps the name
+  on the task and routes this one delivery to the instance (`scope.route_of`). It used to write the
+  full id into the task file.
+- **With neither** (an auto-core before v0.5.2 and no project scope, or an AutoDoc before protocol
+  30), `A` assigns the name alone and warns that the assignment may not be delivered, and that
+  auto-core and AutoDoc should be updated. It used to assign silently.
+
 ## [v0.6.1] — 2026-10-27 — the panel assigns this project's agent by name
 
 ADR 1791532020 r15 §2.5a. **Needs auto-core with `auto-core.todo.scope` and AutoDoc protocol 30**
