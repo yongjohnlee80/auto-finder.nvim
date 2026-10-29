@@ -5064,6 +5064,61 @@ section(function()
       false, "could not stage the completed row")
   end
 
+  -- With no project scope set, A gives auto-core the full mailbox id, which keeps the name and
+  -- routes this one delivery to the instance: the wire carries the name and "@<instance>".
+  -- Without even that (an auto-core before route_of), A gives the name alone and says it may not
+  -- be delivered.
+  local function assign_once(title)
+    local tid = todo.add({ title = title })
+    todo.refresh()
+    reload()
+    local lnum
+    for _, row in ipairs(view._rows or {}) do
+      if row.kind == "task" and row.task and row.task.id == tid then lnum = row.lnum end
+    end
+    if not (lnum and akm and vim.api.nvim_win_is_valid(panel_win)) then return nil, tid end
+    vim.api.nvim_win_set_cursor(panel_win, { lnum, 0 })
+    local ad_todos = require("autodoc.todos")
+    local real_call = ad_todos.call
+    local params, answered = nil, false
+    ad_todos.call = function(verb, p, cb)
+      if verb == "assign" then params = p end
+      real_call(verb, p, function(r, e)
+        if verb == "assign" then answered = true end
+        cb(r, e)
+      end)
+    end
+    pcall(akm.callback)
+    vim.wait(3000, function() return answered end, 10)
+    ad_todos.call = real_call
+    await_todos(view)
+    return params, tid
+  end
+  if scoped and type(todo_scope.route_of) == "function" then
+    todo_scope.set(nil)
+    local p, tid = assign_once("routed to its instance")
+    ok("p40f: *** with no project scope, A sends the name and routes to the instance ***",
+      p and p[4] == "agent:gold-man" and p[6] == "@4040404040-1", vim.inspect(p))
+    local t = todo.get(tid)
+    ok("p40f: *** … and the task records the name only ***",
+      t ~= nil and t.assignee == "agent:gold-man", tostring(t and t.assignee))
+
+    local real_route, warned = todo_scope.route_of, nil
+    local log = require("auto-finder.log")
+    local real_notify = log.notify
+    todo_scope.route_of = nil -- an auto-core before v0.5.2
+    log.notify = function(msg, o)
+      if o and o.level == "warn" then warned = msg end
+      return real_notify(msg, o)
+    end
+    local q = assign_once("unrouted, said so")
+    log.notify, todo_scope.route_of = real_notify, real_route
+    ok("p40f: *** with nothing to route it, A sends the name alone ***",
+      q and q[4] == "agent:gold-man" and q[6] == nil, vim.inspect(q))
+    ok("p40f: *** … and says it may not be delivered ***",
+      type(warned) == "string" and warned:find("may not be delivered", 1, true) ~= nil, tostring(warned))
+  end
+
   vim.ui.select, vim.ui.input = saved_sel, saved_inp
   package.loaded["auto-agents"] = saved_aa
   if ok_scope then todo_scope.set(nil) end
