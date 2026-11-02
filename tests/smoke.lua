@@ -5103,6 +5103,31 @@ section(function()
     ok("p40f: *** … and the task records the name only ***",
       t ~= nil and t.assignee == "agent:gold-man", tostring(t and t.assignee))
 
+    -- auto-agents v0.4.0 lists its agents as { agent_id = "agent:<name>" }, with no instance: they
+    -- run in this Neovim, so A routes by this Neovim's instance (auto-core.instance, v0.6.0).
+    local ok_inst, instance = pcall(require, "auto-core.instance")
+    if ok_inst and type(instance.set_id) == "function" then
+      package.loaded["auto-agents"] = {
+        spawned_agents = function()
+          return { { slot = 5, name = "gold-man", kind = "claude", agent_id = "agent:gold-man" } }
+        end,
+      }
+      instance.set_id("4040404040-1")
+      local p2, tid2 = assign_once("routed by this Neovim's instance")
+      instance.set_id(nil)
+      ok("p40f: *** an agent listed without an instance is routed to this Neovim's ***",
+        p2 and p2[4] == "agent:gold-man" and p2[6] == "@4040404040-1", vim.inspect(p2))
+      local t2 = todo.get(tid2)
+      ok("p40f: *** … and the task records the name only ***",
+        t2 ~= nil and t2.assignee == "agent:gold-man", tostring(t2 and t2.assignee))
+      package.loaded["auto-agents"] = {
+        spawned_agents = function()
+          return { { slot = 5, name = "gold-man", kind = "claude",
+                     mailbox_id = "agent:gold-man:4040404040-1" } }
+        end,
+      }
+    end
+
     local real_route, warned = todo_scope.route_of, nil
     local log = require("auto-finder.log")
     local real_notify = log.notify
