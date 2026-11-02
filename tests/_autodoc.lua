@@ -19,6 +19,45 @@
 ---@param sandbox_root string
 ---@param label string
 ---@return boolean ok, string? why
+---daemons is the pids of the autodoc daemons started with config file cfg.
+---@param cfg string
+---@return string[]
+local function daemons(cfg)
+  local out = {}
+  for _, pid in ipairs(vim.fn.systemlist({ "pgrep", "-f", "--", "--serve --config" })) do
+    local cmd = vim.fn.system({ "ps", "-o", "command=", "-p", pid })
+    if cmd:find(" --serve --config " .. cfg, 1, true) then out[#out + 1] = pid end
+  end
+  return out
+end
+
+---stop_on_exit stops the daemon started with cfg, and removes its socket folder, however
+---the suite ends: a normal end or an error (VimLeavePre), :qa or :cquit (VimLeavePre too),
+---or os.exit, which skips the autocmds, so it is wrapped. TERM, then KILL, until none is left
+---(5 s at most).
+---@param cfg string
+---@param sockdir string
+local function stop_on_exit(cfg, sockdir)
+  local done = false
+  local function stop()
+    if done then return end
+    done = true
+    for i = 1, 20 do
+      local pids = daemons(cfg)
+      if #pids == 0 then break end
+      vim.fn.system(vim.list_extend({ "kill", i > 10 and "-KILL" or "-TERM" }, pids))
+      vim.uv.sleep(250)
+    end
+    vim.fn.delete(sockdir, "rf")
+  end
+  vim.api.nvim_create_autocmd("VimLeavePre", { callback = function() pcall(stop) end })
+  local exit = os.exit
+  os.exit = function(...)
+    pcall(stop)
+    return exit(...)
+  end
+end
+
 return function(sandbox_root, label)
   local here = vim.fn.fnamemodify(debug.getinfo(1, "S").source:sub(2), ":p:h")
   local plugins = vim.fn.fnamemodify(here, ":h:h:h")
@@ -39,7 +78,9 @@ return function(sandbox_root, label)
   -- sandbox (a long TMPDIR) exceeds, so it lives under /tmp. Not in /tmp itself:
   -- autodoc refuses a socket in a folder others can write (it could be replaced
   -- there), so it gets a folder of its own, mkdtemp's (mode 0700).
-  -- The daemon is stopped by run-all.sh (its --config names this sandbox).
+  -- The daemon outlives this nvim (autodoc starts it detached). run-all.sh stops it by
+  -- the sandbox as well, but a suite run on its own (nvim -l tests/<suite>.lua) has only
+  -- the stop below, on every way out (stop_on_exit).
   local sockdir = assert(vim.uv.fs_mkdtemp("/tmp/af-ad-XXXXXX"))
   local sock = string.format("%s/%s.sock", sockdir, label)
   local cfg = root .. "/config.toml"
@@ -56,5 +97,6 @@ return function(sandbox_root, label)
       offer_restart = false, offer_link = false })
   end)
   if not ok then return false, "autodoc.setup failed: " .. tostring(err) end
+  stop_on_exit(cfg, sockdir)
   return true
 end
