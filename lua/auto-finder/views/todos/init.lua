@@ -1644,9 +1644,10 @@ local function _assign_task(row)
   -- now" surface the user expects.
   local agents = {}
   ---full_id is the agent's `agent:<name>:<instance>`, which routes one delivery to its Neovim
-  ---when no project scope is set. auto-agents before v0.4.0 gave it as mailbox_id; v0.4.0 lists
-  ---its agents as `agent:<name>` (agent_id), and they run in this Neovim, so the instance is this
-  ---Neovim's (auto-core.instance, v0.6.0).
+  ---when no project scope is set. auto-agents lists its agents by the bare `agent:<name>`
+  ---(mailbox_id through v0.3.x, agent_id from v0.4.0), and they run in this Neovim, so the
+  ---instance is this Neovim's (auto-core.instance, v0.6.0). A full id given as mailbox_id is
+  ---kept as given.
   local function full_id(entry)
     local name = "agent:" .. tostring(entry.name)
     if type(entry.mailbox_id) == "string" and entry.mailbox_id:match("^agent:[^:]+:.+$") then
