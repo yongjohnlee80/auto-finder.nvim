@@ -36,9 +36,12 @@ return function(sandbox_root, label)
   local root = vim.uv.fs_mkdtemp((sandbox_root or vim.fn.tempname()) .. "/ad-" .. label .. "-XXXXXX")
   for _, d in ipairs({ "state", "data" }) do vim.fn.mkdir(root .. "/" .. d, "p") end
   -- The socket path must stay under autodoc's 100-byte limit, which a deep
-  -- sandbox (a long TMPDIR) exceeds; it lives in /tmp under this process's pid.
+  -- sandbox (a long TMPDIR) exceeds, so it lives under /tmp. Not in /tmp itself:
+  -- autodoc refuses a socket in a folder others can write (it could be replaced
+  -- there), so it gets a folder of its own, mkdtemp's (mode 0700).
   -- The daemon is stopped by run-all.sh (its --config names this sandbox).
-  local sock = string.format("/tmp/af-ad-%d-%s.sock", vim.uv.os_getpid(), label)
+  local sockdir = assert(vim.uv.fs_mkdtemp("/tmp/af-ad-XXXXXX"))
+  local sock = string.format("%s/%s.sock", sockdir, label)
   local cfg = root .. "/config.toml"
   local f = assert(io.open(cfg, "w"))
   f:write(table.concat({
