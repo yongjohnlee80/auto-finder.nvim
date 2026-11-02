@@ -4329,6 +4329,13 @@ section(function()
       return not table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
         :find("$ANOTHER", 1, true)
     end, 10))
+  -- a machine-only declaration outlives its value: removed, the name shows "(unset)"
+  local mo_ok, mo_err = vars.set("ONLYHERE", "/tmp/onlyhere", { scope = "machine", machine_only = true })
+  ok("a machine-only variable is set", mo_ok, mo_err)
+  ok("… and shown", panel_shows(b, "$ONLYHERE", true))
+  vars.remove("ONLYHERE")
+  ok("remove of a machine-only variable keeps its name, shown (unset)",
+    panel_shows(b, "$ONLYHERE = (unset)", true))
 
   -- Numbered status modal: stub vim.ui.select, fire the `s` keymap.
   local id = todo.add({ title = "status-modal target" })
