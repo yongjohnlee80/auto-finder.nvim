@@ -2,6 +2,20 @@
 
 All notable changes to `auto-finder.nvim` are documented here.
 
+## [v0.6.3] — 2026-11-02 — Assign routes auto-agents v0.4.0's bare agent id
+
+Part of the joint release with auto-core v0.6.0 and auto-agents v0.4.0 (the file mailbox retired).
+It works with both auto-agents lines.
+
+- **`A` routes an agent listed without an instance** to this Neovim's instance when no project scope
+  is set. auto-agents v0.4.0 lists its agents by `agent_id`, the bare name. An older auto-agents'
+  full mailbox id still routes as before.
+- **Tests:** the routing cells assert the bare name auto-agents always sent; the old fixture's full
+  id hid the missing route. The AutoDoc test daemon's socket is in a private folder (mode 0700)
+  under /tmp, since AutoDoc refuses one in /tmp itself (before this, the todo cells never got a
+  daemon). The Vars panel cells follow AutoDoc's rule that only a machine-only declaration outlives
+  its value.
+
 ## [v0.6.2] — 2026-10-29 — Assign never writes an instance id into a task
 
 A task's assignee is the agent's name only (Johno, 2026-10-29: "the full address is only temp").
