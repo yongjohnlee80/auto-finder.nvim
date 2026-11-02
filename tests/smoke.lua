@@ -4320,18 +4320,15 @@ section(function()
     panel_shows(b, "$ANOTHER", true))
 
   vars.remove("ANOTHER")
-  if vars.is_builtin("PROJECT_ROOT") then
-    -- auto-core v0.4.2: remove clears this machine's value; the name stays declared
-    -- machine-only for the store, whose other machines may set it
-    ok("remove triggers re-render (the value is gone, the name stays declared)",
-      panel_shows(b, "$ANOTHER = (unset)", true))
-  else
-    ok("remove triggers re-render (var no longer visible)",
-      vim.wait(3000, function()
-        return not table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
-          :find("$ANOTHER", 1, true)
-      end, 10))
-  end
+  -- From AutoDoc v0.1.53 (ADR 1792132105, variables belong to the workspace) a name stays declared
+  -- after its value goes only when it was declared machine-only (set with machine_only); ANOTHER was
+  -- set as this machine's value alone, so removing it removes the name too. (auto-core v0.4.2 with an
+  -- older AutoDoc kept every machine value's name declared, shown as "(unset)".)
+  ok("remove triggers re-render (var no longer visible)",
+    vim.wait(3000, function()
+      return not table.concat(vim.api.nvim_buf_get_lines(b, 0, -1, false), "\n")
+        :find("$ANOTHER", 1, true)
+    end, 10))
 
   -- Numbered status modal: stub vim.ui.select, fire the `s` keymap.
   local id = todo.add({ title = "status-modal target" })
