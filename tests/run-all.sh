@@ -276,6 +276,17 @@ else
   overall=1
 fi
 
+# A suite run on its own stops the AutoDoc daemon it started, however it ends
+# (tests/_autodoc.lua): run-all's own stop by the sandbox never runs for it.
+echo "── autodoc_daemon_stop ───────────────────────"
+if stop_out="$(tests/autodoc-daemon-stop.sh 2>&1)"; then
+  printf '%s\n' "$stop_out" | tail -1 | sed 's/^/   autodoc_daemon_stop: /'
+else
+  printf '%s\n' "$stop_out" | grep -E "^  FAIL" | head -5
+  echo "   ✗ autodoc_daemon_stop: FAILED"
+  overall=1
+fi
+
 for entry in "${SUITES[@]}"; do
   run_suite "${entry%%|*}" "${entry#*|}"
 done
