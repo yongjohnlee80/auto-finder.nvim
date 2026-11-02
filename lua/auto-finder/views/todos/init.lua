@@ -1618,8 +1618,7 @@ end
 ---Flow:
 ---  1. Pull the spawned-agent roster from
 ---     `auto-agents.spawned_agents()` (only currently-alive
----     bootstrap slots). Falls back to `auto-core.mailbox.
----     registry.list()` when auto-agents isn't loaded.
+---     slots). Without auto-agents there is no one to assign to.
 ---  2. Show a `vim.ui.select` picker of agent names.
 ---  3. After selection, prompt for an optional one-line directive
 ---     via `vim.ui.input`. `<Esc>` (nil) cancels — the task is left
@@ -1629,9 +1628,10 @@ end
 ---     meaningful message.
 ---  4. AutoDoc assigns it (todos.assign, at the row's rev), and
 ---     assigning an `open` task makes it `in-progress` in the same write
----     (D1, ADR 1791532020 §2.3). auto-core's notifier sends the
----     recipient its mailbox message (title, id, file path, and the
----     notes as `Reason:`); the panel asks it to poll at once.
+---     (D1, ADR 1791532020 §2.3). auto-core's notifier tells the
+---     recipient (title, id, file path, and the notes as its note),
+---     through the crew or auto-agents' fallback; the panel asks it
+---     to poll at once.
 ---
 ---No-op on non-task rows (vars / malformed / headers).
 ---@param row table?
@@ -1643,6 +1643,19 @@ local function _assign_task(row)
   -- bootstrap slots, which is the natural "agents available right
   -- now" surface the user expects.
   local agents = {}
+  ---full_id is the agent's `agent:<name>:<instance>`, which routes one delivery to its Neovim
+  ---when no project scope is set. auto-agents before v0.4.0 gave it as mailbox_id; v0.4.0 lists
+  ---its agents as `agent:<name>` (agent_id), and they run in this Neovim, so the instance is this
+  ---Neovim's (auto-core.instance, v0.6.0).
+  local function full_id(entry)
+    local name = "agent:" .. tostring(entry.name)
+    if type(entry.mailbox_id) == "string" and entry.mailbox_id:match("^agent:[^:]+:.+$") then
+      return entry.mailbox_id
+    end
+    local ok_inst, inst = pcall(function() return require("auto-core.instance").id() end)
+    if ok_inst and type(inst) == "string" and inst ~= "" then return name .. ":" .. inst end
+    return name
+  end
   local ok_aa, aa = pcall(require, "auto-agents")
   if ok_aa and type(aa.spawned_agents) == "function" then
     local list = aa.spawned_agents() or {}
@@ -1652,8 +1665,8 @@ local function _assign_task(row)
           entry.slot or 0,
           tostring(entry.name or "?"),
           entry.kind and (" (" .. entry.kind .. ")") or ""),
-        name       = entry.name,
-        mailbox_id = entry.mailbox_id or ("agent:" .. tostring(entry.name)),
+        name    = entry.name,
+        full_id = full_id(entry),
       }
     end
   end
@@ -1692,7 +1705,7 @@ local function _assign_task(row)
       if store.dir() ~= directory then return end
       -- The task file names the agent only, never an instance (Johno, 2026-10-29: "the full
       -- address is only temp"). With this project's scope, the bare `agent:<name>` is delivered in
-      -- this project only (ADR 1791532020 §2.5a). With no project scope set, the full mailbox id is
+      -- this project only (ADR 1791532020 §2.5a). With no project scope set, the full agent id is
       -- given to auto-core, which keeps the name and routes this one delivery to the instance
       -- (scope.route_of). An auto-core without either still gets the name alone.
       local name = "agent:" .. tostring(choice.name)
@@ -1701,7 +1714,7 @@ local function _assign_task(row)
       if ok_sc and sc.scoped() and sc.get() then
         params = sc.assign_params(name, reason)
       elseif ok_sc and sc.scoped() and sc.route_of then
-        params = sc.assign_params(choice.mailbox_id, reason)
+        params = sc.assign_params(choice.full_id, reason)
       else
         -- the name alone, with nothing to route it: an auto-core before v0.5.2 with no project
         -- scope delivers it to no one, and against an AutoDoc before protocol 30 every Neovim
