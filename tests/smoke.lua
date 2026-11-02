@@ -5103,23 +5103,30 @@ section(function()
     ok("p40f: *** … and the task records the name only ***",
       t ~= nil and t.assignee == "agent:gold-man", tostring(t and t.assignee))
 
-    -- auto-agents v0.4.0 lists its agents as { agent_id = "agent:<name>" }, with no instance: they
-    -- run in this Neovim, so A routes by this Neovim's instance (auto-core.instance, v0.6.0).
+    -- Real auto-agents lists its agents by the bare name, with no instance: mailbox_id =
+    -- "agent:<name>" through v0.3.x, agent_id from v0.4.0 (the full id above is the fixture's, not
+    -- what auto-agents sends). They run in this Neovim, so A routes by this Neovim's instance
+    -- (auto-core.instance, v0.6.0). Before that, a bare name went out with no route at all.
     local ok_inst, instance = pcall(require, "auto-core.instance")
     if ok_inst and type(instance.set_id) == "function" then
-      package.loaded["auto-agents"] = {
-        spawned_agents = function()
-          return { { slot = 5, name = "gold-man", kind = "claude", agent_id = "agent:gold-man" } }
-        end,
-      }
-      instance.set_id("4040404040-1")
-      local p2, tid2 = assign_once("routed by this Neovim's instance")
-      instance.set_id(nil)
-      ok("p40f: *** an agent listed without an instance is routed to this Neovim's ***",
-        p2 and p2[4] == "agent:gold-man" and p2[6] == "@4040404040-1", vim.inspect(p2))
-      local t2 = todo.get(tid2)
-      ok("p40f: *** … and the task records the name only ***",
-        t2 ~= nil and t2.assignee == "agent:gold-man", tostring(t2 and t2.assignee))
+      for _, shape in ipairs({
+        { label = "v0.3.x's bare mailbox_id", entry = { mailbox_id = "agent:gold-man" } },
+        { label = "v0.4.0's agent_id", entry = { agent_id = "agent:gold-man" } },
+      }) do
+        package.loaded["auto-agents"] = {
+          spawned_agents = function()
+            return { vim.tbl_extend("force", { slot = 5, name = "gold-man", kind = "claude" }, shape.entry) }
+          end,
+        }
+        instance.set_id("4040404040-1")
+        local p2, tid2 = assign_once("routed by this Neovim's instance, " .. shape.label)
+        instance.set_id(nil)
+        ok("p40f: *** an agent listed by its bare name (" .. shape.label .. ") is routed to this Neovim's instance ***",
+          p2 and p2[4] == "agent:gold-man" and p2[6] == "@4040404040-1", vim.inspect(p2))
+        local t2 = todo.get(tid2)
+        ok("p40f: *** … and the task records the name only (" .. shape.label .. ") ***",
+          t2 ~= nil and t2.assignee == "agent:gold-man", tostring(t2 and t2.assignee))
+      end
       package.loaded["auto-agents"] = {
         spawned_agents = function()
           return { { slot = 5, name = "gold-man", kind = "claude",
