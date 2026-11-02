@@ -14,7 +14,8 @@ It works with both auto-agents lines.
   id hid the missing route. The AutoDoc test daemon's socket is in a private folder (mode 0700)
   under /tmp, since AutoDoc refuses one in /tmp itself (before this, the todo cells never got a
   daemon). The Vars panel cells follow AutoDoc's rule that only a machine-only declaration outlives
-  its value.
+  its value. todos-cutover's add cell follows AutoDoc's claim on first write: an add to a project with
+  no store makes its task in that store, with no scaffold or second add after it.
 
 ## [v0.6.2] — 2026-10-29 — Assign never writes an instance id into a task
 

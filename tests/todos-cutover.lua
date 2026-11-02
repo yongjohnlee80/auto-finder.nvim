@@ -469,18 +469,23 @@ do
   local elsewhere = vim.uv.fs_realpath(sandbox) .. "/switched-to"
   vim.fn.mkdir(elsewhere, "p")
 
-  -- add on a project with no store: the switch lands at the not_a_store answer,
-  -- between the first add and the scaffold
+  -- add on a project with no store: todos.add claims the store itself on its first write
+  -- (AutoDoc's "a store is claimed by its first write"), so the switch lands at the add's own
+  -- answer and nothing follows it. The door's not_a_store -> scaffold -> add again is for an older
+  -- daemon only; this one never answers not_a_store to an add.
   local fresh = vim.uv.fs_realpath(sandbox) .. "/fresh-add"
   vim.fn.mkdir(fresh, "p")
   require("auto-core.git.worktree").set_workspace_root(fresh)
   local res, switched, after = switch_during("add", elsewhere, function(done)
     door.add({ title = "Made in fresh-add" }, done)
   end)
-  check("add: fixture — the project switched after the first add answered", switched)
+  check("add: fixture — the project switched after the add answered", switched)
   check("add: the task was created", type(res[1]) == "table" and res[1].id ~= nil, vim.inspect(res))
-  check("add: the scaffold and the retried add went to fresh-add's store",
-    stayed(after, fresh) and #after == 2, vim.inspect(after))
+  local made = type(res[1]) == "table" and res[1].file_path or nil
+  check("add: … in fresh-add's store, which the add claimed",
+    type(made) == "string" and vim.startswith(made, fresh .. "/") and exists(made), vim.inspect(made))
+  check("add: no scaffold or second add follows it (todos.add claims the store itself)",
+    #after == 0, vim.inspect(after))
   check("add: the project switched to got no store", not exists(elsewhere .. "/.todo-list"))
 
   -- a load: the switch lands at the active buckets' answer, before the archive
