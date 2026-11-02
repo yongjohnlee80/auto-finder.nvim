@@ -5064,7 +5064,7 @@ section(function()
       false, "could not stage the completed row")
   end
 
-  -- With no project scope set, A gives auto-core the full mailbox id, which keeps the name and
+  -- With no project scope set, A gives auto-core the full agent id, which keeps the name and
   -- routes this one delivery to the instance: the wire carries the name and "@<instance>".
   -- Without even that (an auto-core before route_of), A gives the name alone and says it may not
   -- be delivered.
