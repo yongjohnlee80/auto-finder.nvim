@@ -15,7 +15,10 @@ It works with both auto-agents lines.
   under /tmp, since AutoDoc refuses one in /tmp itself (before this, the todo cells never got a
   daemon). The Vars panel cells follow AutoDoc's rule that only a machine-only declaration outlives
   its value. todos-cutover's add cell follows AutoDoc's claim on first write: an add to a project with
-  no store makes its task in that store, with no scaffold or second add after it.
+  no store makes its task in that store, with no scaffold or second add after it. A suite stops the AutoDoc
+  daemon it started however it ends (a normal end or an error, os.exit included) and removes its
+  socket folder: run on its own, a suite used to leave its daemon running.
+  `autodoc-daemon-stop.sh` pins each way out.
 
 ## [v0.6.2] — 2026-10-29 — Assign never writes an instance id into a task
 
